@@ -1,0 +1,12 @@
+[package]
+name = "talk-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+description = "The pure talk-cli engine: selection, slugs, frontmatter, settle, cleanup."
+repository = "https://github.com/walktalkmeditate/talk-cli"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
