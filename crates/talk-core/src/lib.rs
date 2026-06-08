@@ -4,4 +4,5 @@ pub mod cleanup;
 pub mod entry;
 pub mod frontmatter;
 pub mod palette;
+pub mod settle;
 pub mod slug;
