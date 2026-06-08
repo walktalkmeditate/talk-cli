@@ -1,4 +1,5 @@
 mod paths;
+mod session;
 mod source;
 mod writer;
 
