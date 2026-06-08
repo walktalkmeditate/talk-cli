@@ -1,0 +1,12 @@
+name = "spine"
+description = "Placeholder spine — the real 65 are vendored in Plan 4."
+
+[[questions]]
+id = "carrying-not-yours"
+text = "What are you carrying that isn't yours?"
+slot = "evening"
+
+[[questions]]
+id = "morning-intention"
+text = "What do you want to protect today?"
+slot = "morning"
