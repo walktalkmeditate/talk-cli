@@ -58,3 +58,13 @@ fn missing_from_text_errors_without_writing() {
     assert!(!out.status.success()); // exits non-zero, writes nothing
     assert_eq!(std::fs::read_dir(dir.path().join("talk")).unwrap().count(), 0);
 }
+
+#[test]
+fn config_default_mode_journal_routes_bare_talk_to_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("talk")).unwrap();
+    std::fs::write(dir.path().join("talk/config.toml"), "default_mode = \"journal\"\n").unwrap();
+    let out = talk(dir.path(), &["--from-text", "just talking", "--date", "2026-06-08", "--time", "09:00"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(dir.path().join("talk/2026-06-08.md").exists(), "bare talk should have written a journal file");
+}

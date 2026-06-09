@@ -36,7 +36,7 @@ pub fn write_entry(req: &WriteRequest) -> std::io::Result<Option<PathBuf>> {
         Target::Reflect { id, question, slug, pack, addressee } => {
             let (mut fm, body) = match Frontmatter::parse(&existing) {
                 Some((fm, body)) => (fm, body.to_string()),
-                None => (
+                None if existing.trim().is_empty() => (
                     Frontmatter {
                         id: id.to_string(), question: question.to_string(),
                         slug: slug.to_string(), pack: pack.to_string(),
@@ -45,6 +45,10 @@ pub fn write_entry(req: &WriteRequest) -> std::io::Result<Option<PathBuf>> {
                     },
                     String::new(),
                 ),
+                None => return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{} has unparseable frontmatter; refusing to overwrite", path.display()),
+                )),
             };
             fm.entries += 1;
             fm.last = req.date.to_string();

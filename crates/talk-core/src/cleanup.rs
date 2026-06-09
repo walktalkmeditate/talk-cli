@@ -1,3 +1,5 @@
+/// Cleanup intensity. Plan 3 wires this into the LLM rewrite; Plan 1 ships deterministic-Light only.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level { None, Light, Medium, High }
 
@@ -34,19 +36,26 @@ pub fn apply_spoken_commands(text: &str) -> String {
         .to_string()
 }
 
-/// Find `needle` in `hay` only at word boundaries (so the trigger "actually no"
-/// does NOT match inside "actually nobody"). ASCII-boundary check; English
-/// triggers only.
-fn find_word_bounded(hay: &str, needle: &str) -> Option<usize> {
-    let bytes = hay.as_bytes();
-    let mut from = 0;
-    while let Some(rel) = hay[from..].find(needle) {
-        let pos = from + rel;
-        let before_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
-        let after = pos + needle.len();
-        let after_ok = after == bytes.len() || !bytes[after].is_ascii_alphanumeric();
-        if before_ok && after_ok { return Some(pos); }
-        from = pos + needle.len();
+/// Find `needle_lower` (lowercase ASCII) in `hay` at word boundaries, returning
+/// a byte offset valid in `hay`. Case-insensitive without lowercasing `hay`, so
+/// the offset never lands mid-codepoint (a prior bug: offsets from a lowercased
+/// copy were sliced against the original and panicked on case-shrinking chars).
+fn find_word_bounded(hay: &str, needle_lower: &str) -> Option<usize> {
+    let hb = hay.as_bytes();
+    let nb = needle_lower.as_bytes();
+    let nlen = nb.len();
+    if nlen == 0 || hb.len() < nlen { return None; }
+    let mut i = 0;
+    while i + nlen <= hb.len() {
+        // ASCII needle bytes can only match ASCII haystack bytes, so a match
+        // always starts/ends on a char boundary.
+        if (0..nlen).all(|k| hb[i + k].to_ascii_lowercase() == nb[k]) {
+            let before_ok = i == 0 || !hb[i - 1].is_ascii_alphanumeric();
+            let after = i + nlen;
+            let after_ok = after == hb.len() || !hb[after].is_ascii_alphanumeric();
+            if before_ok && after_ok { return Some(i); }
+        }
+        i += 1;
     }
     None
 }
@@ -59,7 +68,7 @@ pub fn apply_backtrack(text: &str) -> String {
     const TRIGGERS: &[&str] = &["scratch that", "actually no"];
     let mut result = text.to_string();
     for trigger in TRIGGERS {
-        while let Some(pos) = find_word_bounded(&result.to_lowercase(), trigger) {
+        while let Some(pos) = find_word_bounded(&result, trigger) {
             let before = result[..pos].trim_end();
             let after = &result[pos + trigger.len()..];
             let kept: Vec<&str> = before.split_whitespace().collect();
@@ -181,5 +190,13 @@ mod tests {
     fn spoken_command_at_phrase_start_and_end() {
         assert_eq!(apply_spoken_commands("new line b"), "b");
         assert_eq!(apply_spoken_commands("a new line"), "a");
+    }
+
+    #[test]
+    fn backtrack_handles_non_ascii_without_panicking() {
+        // 'ẞ' lowercases to fewer bytes; offsets must stay on char boundaries.
+        let out = apply_backtrack("aa bb ẞ scratch that ẞ tail");
+        assert!(out.contains("tail"));
+        assert!(!out.contains("scratch that"));
     }
 }

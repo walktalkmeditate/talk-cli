@@ -8,6 +8,7 @@ pub struct State {
     pub last_served: HashMap<String, u64>,
     pub tick: u64,
     pub held_run: Option<(String, u32)>,
+    // Plan 4: streak display; collected but unused in Plan 1.
     pub streak: u32,
     pub last_session_date: Option<String>,
 }
@@ -64,5 +65,30 @@ mod tests {
         let reloaded = State::load(&s.save());
         assert_eq!(reloaded.served_count.get("a"), Some(&2));
         assert_eq!(reloaded.tick, 2);
+    }
+
+    fn q(id: &str, cadence: &str) -> talk_core::questions::Question {
+        talk_core::questions::Question {
+            id: id.into(), text: String::new(), slug: None,
+            addressee: "self".into(), cadence: cadence.into(), slot: None,
+        }
+    }
+
+    #[test]
+    fn advance_held_daily_is_noop() {
+        let mut s = State::default();
+        s.advance_held(&q("a", "daily"));
+        assert!(s.held_run.is_none());
+    }
+
+    #[test]
+    fn advance_held_runs_then_releases() {
+        let mut s = State::default();
+        s.advance_held(&q("h", "held:3"));
+        assert_eq!(s.held_run, Some(("h".to_string(), 1)));
+        s.advance_held(&q("h", "held:3"));
+        assert_eq!(s.held_run, Some(("h".to_string(), 2)));
+        s.advance_held(&q("h", "held:3"));
+        assert!(s.held_run.is_none()); // 3rd serving completes the run
     }
 }

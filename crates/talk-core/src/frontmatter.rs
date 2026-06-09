@@ -56,7 +56,8 @@ impl Frontmatter {
 }
 
 fn quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    let one_line = s.replace(['\n', '\r'], " ");
+    format!("\"{}\"", one_line.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn unquote(s: &str) -> String {
@@ -96,5 +97,14 @@ mod tests {
         fm.question = "Why \"this\": really?".into();
         let (parsed, _) = Frontmatter::parse(&(fm.to_yaml() + "\nx\n")).unwrap();
         assert_eq!(parsed.question, "Why \"this\": really?");
+    }
+
+    #[test]
+    fn newline_in_question_cannot_break_out_of_yaml() {
+        let mut fm = sample();
+        fm.question = "line one\n---\nentries: 9999".into();
+        let (parsed, _) = Frontmatter::parse(&(fm.to_yaml() + "\nbody\n")).unwrap();
+        assert_eq!(parsed.entries, fm.entries); // injected "entries:" did not take effect
+        assert!(!parsed.question.contains('\n'));
     }
 }

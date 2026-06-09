@@ -9,7 +9,8 @@ pub fn derive_slug(text: &str) -> String {
         if words.len() == 6 { break; }
     }
     let joined = words.join("-");
-    joined.chars().take(60).collect()
+    let slug: String = joined.chars().take(60).collect();
+    if slug.is_empty() { short_hash(text) } else { slug }
 }
 
 /// A stable FNV-1a short hash (base36), used to disambiguate slug collisions
@@ -75,6 +76,13 @@ mod tests {
     fn slug_truncates_to_six_words() {
         let s = derive_slug("one two three four five six seven eight");
         assert_eq!(s, "one-two-three-four-five-six");
+    }
+
+    #[test]
+    fn empty_derivable_slug_falls_back_to_hash() {
+        let s = derive_slug("???");
+        assert!(!s.is_empty());
+        assert_eq!(s, derive_slug("???")); // deterministic
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub struct Config {
     pub base_dir: Option<String>,
     pub default_mode: String,        // "reflect" | "journal"
     pub keep_raw: bool,
+    // Consumed in Plan 2+ (pack selection / silence auto-end); parsed now for forward-compat.
     pub auto_end_silence_seconds: u32, // 0 = off
     pub default_pack: String,
 }

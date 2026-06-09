@@ -37,11 +37,19 @@ fn main() -> std::io::Result<()> {
             run_and_report(&base, Target::Journal, &date, &time, &text, cfg.keep_raw, true)?;
             println!("Released. Nothing was written.");
         }
-        Some(Command::Config { action }) => return handle_config(&base, action.as_deref()),
+        Some(Command::Config { action }) => return handle_config(action.as_deref()),
         Some(Command::Thread { question }) => print_thread(&base, question.as_deref()),
         Some(Command::Streak) => println!("streak: (Plan 4)"),
-        // Bare `talk`, `talk reflect`, or `talk "byo question"` → reflect.
-        _ => reflect(&base, &args.question, &date, &time, &require_text(&args.from_text), &cfg)?,
+        Some(Command::Reflect) => reflect(&base, &args.question, &date, &time, &require_text(&args.from_text), &cfg)?,
+        // Bare `talk`: honor config.default_mode (journal) unless a BYO question was given.
+        _ => {
+            if args.question.is_none() && cfg.default_mode == "journal" {
+                let text = require_text(&args.from_text);
+                run_and_report(&base, Target::Journal, &date, &time, &text, cfg.keep_raw, false)?;
+            } else {
+                reflect(&base, &args.question, &date, &time, &require_text(&args.from_text), &cfg)?;
+            }
+        }
     }
     Ok(())
 }
@@ -54,18 +62,19 @@ fn reflect(base: &Path, byo: &Option<String>, date: &str, time: &str, text: &str
         Some(q) => {
             // BYO: id == slug, collision-suffixed against a DIFFERENT existing question.
             let slug = talk_core::slug::derive_slug_unique(q, |s| {
-                file_question_differs(&base.join(format!("{}.md", s)), q)
+                slug_taken_by_other(&base.join(format!("{}.md", s)), q)
             });
             (slug.clone(), q.clone(), slug, "byo".to_string(), "self".to_string())
         }
         None => {
-            let spine = talk_core::questions::Pack::from_toml(SPINE_TOML)
-                .expect("bundled spine.toml is valid");
-            let chosen = talk_core::selection::select(&spine, &st.selection_state(), hour_of(time))
-                .expect("spine is non-empty")
-                .clone();
-            // Filename slug: authored if present, else the id itself (authored
-            // ids are already kebab / filename-safe; re-deriving would mangle them).
+            let spine = talk_core::questions::Pack::from_toml(SPINE_TOML).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bundled spine.toml invalid: {e}"))
+            })?;
+            let chosen = match talk_core::selection::select(&spine, &st.selection_state(), hour_of(time)) {
+                Some(q) => q.clone(),
+                None => return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData, "spine pack has no questions")),
+            };
             let slug = chosen.slug.clone().unwrap_or_else(|| chosen.id.clone());
             st.record_served(&chosen.id);
             st.advance_held(&chosen);
@@ -88,14 +97,18 @@ fn run_and_report(base: &Path, target: Target, date: &str, time: &str, text: &st
     Ok(())
 }
 
-fn handle_config(base: &Path, action: Option<&str>) -> std::io::Result<()> {
+// config.toml always lives at the default ~/talk; base_dir only relocates where entries land.
+fn config_path() -> PathBuf { paths::base_dir(None).join("config.toml") }
+
+fn handle_config(action: Option<&str>) -> std::io::Result<()> {
+    let p = config_path();
     match action {
         Some("init") => {
-            let p = base.join("config.toml");
+            if let Some(dir) = p.parent() { paths::ensure_base_dir(dir)?; }
             paths::write_private(&p, &config::Config::commented_template())?;
             println!("wrote {}", p.display());
         }
-        Some("path") => println!("{}", base.join("config.toml").display()),
+        Some("path") => println!("{}", p.display()),
         _ => print!("{}", config::Config::commented_template()),
     }
     Ok(())
@@ -104,18 +117,30 @@ fn handle_config(base: &Path, action: Option<&str>) -> std::io::Result<()> {
 fn print_thread(base: &Path, question: Option<&str>) {
     match question {
         Some(q) => {
-            let p: PathBuf = base.join(format!("{}.md", talk_core::slug::derive_slug(q)));
-            match std::fs::read_to_string(&p) {
-                Ok(text) => print!("{}", text),
-                Err(_) => println!("No thread yet for \"{}\".", q),
+            let direct = base.join(format!("{}.md", talk_core::slug::derive_slug(q)));
+            let path = if direct.exists() { Some(direct) } else { find_by_question(base, q) };
+            match path.and_then(|p| std::fs::read_to_string(p).ok()) {
+                Some(text) => print!("{}", text),
+                None => println!("No thread yet for \"{}\".", q),
             }
         }
         None => println!("(thread list — Plan 4)"),
     }
 }
 
+/// Scan the base dir for a reflect file whose frontmatter question matches `q`
+/// (covers spine id-named and collision-suffixed files).
+fn find_by_question(base: &Path, q: &str) -> Option<PathBuf> {
+    std::fs::read_dir(base).ok()?.flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "md"))
+        .find(|p| std::fs::read_to_string(p).ok()
+            .and_then(|t| talk_core::frontmatter::Frontmatter::parse(&t).map(|(fm, _)| fm.question == q))
+            .unwrap_or(false))
+}
+
 fn load_config() -> std::io::Result<config::Config> {
-    let text = std::fs::read_to_string(paths::base_dir(None).join("config.toml")).unwrap_or_default();
+    let text = std::fs::read_to_string(config_path()).unwrap_or_default();
     Ok(config::Config::load(&text).unwrap_or_default())
 }
 
@@ -123,11 +148,17 @@ fn state_path(base: &Path) -> PathBuf {
     base.join(".state.json") // dot-prefixed so vault sync / indexing skip it
 }
 
-/// True only if a file exists AND stores a DIFFERENT question (a real collision).
-fn file_question_differs(path: &Path, q: &str) -> bool {
-    std::fs::read_to_string(path).ok()
-        .and_then(|t| talk_core::frontmatter::Frontmatter::parse(&t).map(|(fm, _)| fm.question != q))
-        .unwrap_or(false)
+/// True if a file at `path` exists AND is not this question's own reflect file —
+/// either it stores a DIFFERENT question, or it has no frontmatter at all (e.g.
+/// a journal date file the BYO slug happens to collide with).
+fn slug_taken_by_other(path: &Path, q: &str) -> bool {
+    match std::fs::read_to_string(path) {
+        Ok(t) => match talk_core::frontmatter::Frontmatter::parse(&t) {
+            Some((fm, _)) => fm.question != q,
+            None => true,
+        },
+        Err(_) => false,
+    }
 }
 
 fn require_text(from: &Option<String>) -> String {

@@ -19,6 +19,9 @@ pub fn resolve_base(configured: Option<&str>) -> io::Result<PathBuf> {
     if !p.is_absolute() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "base_dir must be absolute"));
     }
+    if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "base_dir must not contain '..'"));
+    }
     if let Some(dirs) = directories::UserDirs::new() {
         if !p.starts_with(dirs.home_dir()) {
             return Err(io::Error::new(
@@ -60,15 +63,20 @@ pub fn ensure_base_dir(dir: &Path) -> io::Result<()> {
 /// no world-readable TOCTOU window between create and a later chmod.
 pub fn write_private(path: &Path, contents: &str) -> io::Result<()> {
     use std::io::Write;
-    #[cfg(unix)]
-    let mut f = {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .write(true).create(true).truncate(true).mode(0o600).open(path)?
-    };
-    #[cfg(not(unix))]
-    let mut f = std::fs::File::create(path)?;
-    f.write_all(contents.as_bytes())
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    {
+        #[cfg(unix)]
+        let mut f = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true).create(true).truncate(true).mode(0o600).open(&tmp)?
+        };
+        #[cfg(not(unix))]
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(contents.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
 }
 
 #[cfg(unix)]
@@ -94,6 +102,7 @@ mod tests {
     fn resolve_base_rejects_relative_and_outside_home() {
         assert!(resolve_base(Some("../../etc")).is_err());      // not absolute
         assert!(resolve_base(Some("/etc")).is_err());           // outside home
+        assert!(resolve_base(Some("/tmp/../etc")).is_err());    // '..' traversal
         assert!(resolve_base(None).is_ok());                    // default ok
     }
 

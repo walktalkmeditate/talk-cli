@@ -1,8 +1,10 @@
-/// Injectable time source so selection is deterministic in tests.
+/// Injectable clock for Plan 2's live session; Plan 1's pure `select` takes an hour directly.
+#[allow(dead_code)]
 pub trait Clock {
     fn hour(&self) -> u32; // 0..=23
 }
 
+#[allow(dead_code)]
 pub struct FixedClock(pub u32);
 impl Clock for FixedClock {
     fn hour(&self) -> u32 { self.0 }
