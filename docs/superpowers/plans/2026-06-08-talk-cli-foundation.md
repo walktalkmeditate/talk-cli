@@ -2399,6 +2399,16 @@ git commit -m "feat: CLI wiring + --from-text end-to-end (reflect/journal/unburd
 
 ---
 
+## Post-review hardening (2026-06-08)
+
+After implementation, `ce-code-review` (correctness · security · adversarial · reliability · testing · maintainability) ran on the branch and found issues the code blocks above predate. All were fixed in commit `24af606` (suite 60 green, clippy clean); the module code in this plan is the pre-hardening version, so treat the committed code as authoritative where they differ. Fixes:
+
+- **P0:** `apply_backtrack` sliced the original string with offsets from a lowercased copy → mid-codepoint panic on case-shrinking Unicode. `find_word_bounded` now searches case-insensitively over the original (byte offsets always valid).
+- **P1:** spine load/select no longer `.expect()`-panic (clean errors); `write_private` is temp-file + atomic `rename` (no disk-full clobber); `write_entry` refuses to overwrite a non-empty *unparseable* reflect file; `config.toml` is fixed at the default `~/talk` and `default_mode` is wired; `advance_held` got tests.
+- **P2/P3:** frontmatter `quote` folds newlines (no YAML breakout); empty-derivable slugs fall back to `short_hash`; a BYO slug colliding with a journal date file now suffixes instead of clobbering; `talk thread <q>` resolves spine/suffixed files via frontmatter scan; `resolve_base` rejects `..`; Plan-2/3 seams (`Level`, `Clock`, `streak`) carry comments.
+
+Deferred (residual): full file-locking for the concurrent same-file write race (atomic-rename prevents corruption; lost-update is acceptable for a single-user journal) and wiring `default_pack` / `auto_end_silence_seconds` (no consumer until Plan 2). The content-word `guard_accepts` must be wired into the session path before Plan 3's LLM rewrite.
+
 ## Roadmap (Plans 2–4)
 
 **Plan 2 — Listen + Render.** *Prerequisite spike (spec §5/§7): measure 0.5B Q4 Light-cleanup latency on M1 + a commodity x86 CPU before locking the engine; if it blows the ~250ms swap window, the async-swap fallback in §7 is what ships.* Then: `cpal` mic capture (input stream + macOS permission + sample-rate conversion); `listen/` sherpa-onnx façade (Moonshine streaming partials + Silero VAD) implementing `TranscriptSource`; restore `palette()` synthesis (edge/dim/season-time, deferred from Plan 1) for the renderer; `render/` crossterm painter for the settle model (live edge dim/jitter → committing → settled bright, the immutable-block invariant), status line + `● local · no network`, in-session keys (`space`/`u`/`p`/`esc`), the close screen, and the ephemeral screen. **Model integrity:** wire the SHA-256 verify gate (Plan 4's pinned hashes) *before* any model-load path merges — never load an unverified model, even in Plan 2. Add a `TALK_BASE_DIR` env override to `paths::base_dir`. DoD: real voice → live settle → correct file.
