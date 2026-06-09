@@ -2401,7 +2401,7 @@ git commit -m "feat: CLI wiring + --from-text end-to-end (reflect/journal/unburd
 
 ## Post-review hardening (2026-06-08)
 
-After implementation, `ce-code-review` (correctness · security · adversarial · reliability · testing · maintainability) ran on the branch and found issues the code blocks above predate. All were fixed in commit `24af606` (suite 60 green, clippy clean); the module code in this plan is the pre-hardening version, so treat the committed code as authoritative where they differ. Fixes:
+After implementation, `ce-code-review` (correctness · security · adversarial · reliability · testing · maintainability) ran on the branch and found issues the code blocks above predate. All were fixed in commit `24af606` (suite 60 green, clippy clean); a round-2 verification review then confirmed the fixes held and caught one regression in the `thread` fix (wrong file returned on a slug collision) + a `--date` path-traversal, both resolved in `d03817d` (suite 62 green). The module code in this plan is the pre-hardening version, so treat the committed code as authoritative where they differ. Fixes:
 
 - **P0:** `apply_backtrack` sliced the original string with offsets from a lowercased copy → mid-codepoint panic on case-shrinking Unicode. `find_word_bounded` now searches case-insensitively over the original (byte offsets always valid).
 - **P1:** spine load/select no longer `.expect()`-panic (clean errors); `write_private` is temp-file + atomic `rename` (no disk-full clobber); `write_entry` refuses to overwrite a non-empty *unparseable* reflect file; `config.toml` is fixed at the default `~/talk` and `default_mode` is wired; `advance_held` got tests.
