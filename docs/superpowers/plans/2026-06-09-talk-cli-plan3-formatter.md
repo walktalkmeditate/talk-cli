@@ -1,5 +1,7 @@
 # talk-cli Formatter + Restraint Implementation Plan (Plan 3 of 4)
 
+> **RESOLVED 2026-06-09.** T2–T6 (the restraint moat, eval set, config levels, guard-wired session) shipped. T1 measured the LLM out of the realtime path; **T7–T9 are descoped** — see **Resolution** at the end for the evidence and the named, pre-verified future path (a 13ms/7.5MB punctuation+casing tagger, not a generative LLM).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add the optional on-device LLM formatter — a quantized 0.5B model that prettifies a settled phrase — gated so hard by content-word restraint (and an instant deterministic fallback) that it can never change what you said.
@@ -1191,3 +1193,18 @@ Two execution options (per superpowers:writing-plans):
 **2. Inline Execution** — execute T2–T6 in this session with checkpoints.
 
 Consistent with the review-gated workflow, I recommend running `/ce-doc-review` on this plan **before** building (it caught ~30 issues including blockers on Plan 2). Which would you like?
+
+---
+
+## Resolution (2026-06-09) — LLM descoped on T1 evidence; tagger recorded as the future path
+
+**What shipped from this plan:** T2–T6 (the `Formatter` trait + `guarded_format` moat, the falsifiable eval set, per-mode cleanup levels, the guard wired into `session::run`) — all merged, 64 talk-core tests green — plus a spike-derived deterministic win (standalone `i`→`I` in `deterministic_light`). T1 ran in full (deps pinned, MSRV checked, GGUF downloaded + HF-LFS-corroborated, spike measured on Apple Silicon CPU **and** Metal).
+
+**Why T7–T9 are descoped (evidence, not vibes):**
+1. **Latency:** CPU p50 1574 ms / p95 1754 ms per phrase (7× the ~250 ms window on the *fast* hardware floor); Metal erratic 237–2059 ms after a 7.5 s warm-up and Apple-only. No generative sub-1B model can hit 250 ms — ~25 output tokens at even 100 tok/s is 250 ms of decode alone.
+2. **Quality at 0.5B-Q4-greedy:** 2/5 outputs guard-rejected (paraphrase — the moat working), 1/5 ALL-CAPS (guard-passable but ugly), marginal gain over deterministic-Light on the rest.
+3. **The job mostly doesn't exist for this engine:** Moonshine tiny already emits cased, punctuated text (verified in the live acoustic-loopback session — raw output arrived as `"The thing I keep coming back to is the weight of other people's expectations."`). Prior-art research: no shipping local dictation product runs a dedicated formatting model; formatted-STT-output is the norm.
+
+**The named future path (researched + independently verified, 2026-06-09):** if a future STT engine emits unformatted text, or Medium-tier work needs it, use **`sherpa-onnx-online-punct-en-2024-08-06`** (Edge-Punct-Casing CNN-BiLSTM, Interspeech 2024, arXiv 2407.13142) — English punctuation **and** truecasing in one non-autoregressive pass; **13 ms int8 / 30 ms fp32** per phrase; **7.5 MB deployed** (30.7 MB `.tar.bz2`, SHA-256 `9f5e5a72c7d2829635bd074fce92b6bbd5b78da8a52e7ad8ed1be933f366b99d` per the release `checksum.txt`); **Apache-2.0** at repo/weights/crate layers; **zero new dependencies** — the already-pinned `sherpa-onnx` 1.13.2 crate ships `OnlinePunctuation`/`OnlinePunctuationConfig` (`add_punctuation(&str)`). As an insert-only tagger it cannot paraphrase, so it passes `guard_accepts` by construction, and at 13 ms it runs *synchronously* in the commit path — no async-swap machinery. URL: `https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuation-models/sherpa-onnx-online-punct-en-2024-08-06.tar.bz2`. Known limits: no exclamation marks; never deletes fillers (the deterministic pre-layer owns that); quality on rambling journaling speech needs a golden-transcript smoke test before adoption. Generative fallback if ever needed: Gemma 3 270M Q4 via candle `quantized_gemma3` (~1 s/phrase est., non-OSI Gemma terms, casing undocumented) — only worth it with a task fine-tune.
+
+**Removed with the descope:** the `formatter` cargo feature + `candle-core`/`candle-transformers`/`tokenizers` deps (no consumer; the feature graph also needed rustc ≥1.83 while the shipped graphs hold MSRV 1.82). The `FORMATTER_MODELS` manifest in T8 was never built; its pinned hashes live in this section's history if revisited. `cleanup::rewrite_prompt`/`RewritePrompt` remain in talk-core as documented forward-API for any future generative attempt; the moat (`guarded_format`) and eval set gate *any* future formatter, tagger or LLM.
