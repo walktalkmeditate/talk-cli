@@ -9,14 +9,35 @@ use models::Artifact;
 /// Redirect hops to tolerate (GitHub release assets 302 once to their CDN).
 const MAX_REDIRECTS: usize = 5;
 
+/// Cap on a fetched body. The hash gate only runs after the body is fully read,
+/// so without a cap a malicious hop could feed an endless (or gzip-amplified)
+/// body into memory first. Generous headroom over the largest planned artifact
+/// (the ~491 MB formatter model).
+const MAX_DOWNLOAD_BYTES: u64 = 1024 * 1024 * 1024;
+
 /// Validate a redirect target: only an absolute `https://` URL is followed, so a
-/// hop can never downgrade the transport to plaintext.
+/// hop can never downgrade the transport to plaintext. Scheme matching is
+/// case-insensitive per RFC 3986 §3.1 (`HTTPS://` is valid); `get` keeps a
+/// multi-byte char at the boundary fail-closed instead of panicking.
 fn redirect_target(location: Option<&str>) -> Result<String, String> {
     match location {
-        Some(l) if l.starts_with("https://") => Ok(l.to_string()),
+        Some(l) if l.get(..8).is_some_and(|p| p.eq_ignore_ascii_case("https://")) => {
+            Ok(l.to_string())
+        }
         Some(l) => Err(format!("refusing redirect to non-HTTPS url: {l}")),
         None => Err("redirect response without a Location header".to_string()),
     }
+}
+
+/// Read at most `cap` bytes from `r`; a longer body errors before the bytes ever
+/// reach the hash gate (memory defense, not integrity — that's the SHA-256).
+fn read_capped(r: impl Read, cap: u64, name: &str) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    r.take(cap + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > cap {
+        return Err(format!("response for {name} exceeds the {cap}-byte cap"));
+    }
+    Ok(bytes)
 }
 
 /// Fetch `art` to `dir` over HTTPS, verifying its pinned SHA-256 before keeping it.
@@ -41,9 +62,14 @@ pub fn fetch(art: &Artifact, dir: &Path) -> Result<(), String> {
     // GitHub release assets 302-redirect to a CDN, so redirects must be followed —
     // but manually, validating EVERY hop stays HTTPS (a transport downgrade is
     // refused; the pinned SHA-256 is the integrity guarantee either way).
+    // `identity` asks the server not to compress, so the hash is computed over
+    // wire bytes and a gzip bomb can't amplify; the read cap bounds either way.
     let agent = ureq::AgentBuilder::new().redirects(0).build();
+    let get = |u: &str| {
+        agent.get(u).set("Accept-Encoding", "identity").call().map_err(|e| e.to_string())
+    };
     let mut url = art.url.to_string();
-    let mut resp = agent.get(&url).call().map_err(|e| e.to_string())?;
+    let mut resp = get(&url)?;
     let mut hops = 0;
     while (300..400).contains(&resp.status()) {
         hops += 1;
@@ -51,10 +77,9 @@ pub fn fetch(art: &Artifact, dir: &Path) -> Result<(), String> {
             return Err(format!("too many redirects fetching {}", art.name));
         }
         url = redirect_target(resp.header("location"))?;
-        resp = agent.get(&url).call().map_err(|e| e.to_string())?;
+        resp = get(&url)?;
     }
-    let mut bytes = Vec::new();
-    resp.into_reader().read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    let bytes = read_capped(resp.into_reader(), MAX_DOWNLOAD_BYTES, art.name)?;
     let got = hex(Sha256::digest(&bytes));
     if got != art.sha256 {
         return Err(format!("checksum mismatch for {}: got {got}, want {}", art.name, art.sha256));
@@ -97,9 +122,20 @@ mod tests {
             redirect_target(Some("https://cdn.example.com/x")).unwrap(),
             "https://cdn.example.com/x"
         );
+        // scheme is case-insensitive per RFC 3986
+        assert!(redirect_target(Some("HTTPS://cdn.example.com/x")).is_ok());
         assert!(redirect_target(Some("http://cdn.example.com/x")).is_err()); // downgrade
+        assert!(redirect_target(Some("HTTP://cdn.example.com/x")).is_err());
         assert!(redirect_target(Some("/relative/path")).is_err());
+        assert!(redirect_target(Some("héllo://x")).is_err()); // non-boundary slice stays fail-closed
         assert!(redirect_target(None).is_err());
+    }
+
+    #[test]
+    fn read_capped_rejects_oversized_bodies() {
+        use std::io::Cursor;
+        assert_eq!(read_capped(Cursor::new(b"0123456789"), 10, "x").unwrap(), b"0123456789");
+        assert!(read_capped(Cursor::new(b"0123456789!"), 10, "x").is_err());
     }
 
     #[test]
