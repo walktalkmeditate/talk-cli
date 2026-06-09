@@ -1,3 +1,5 @@
+#![allow(dead_code)] // Wired into the live session loop in Plan-2 Task 11.
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
