@@ -1,9 +1,19 @@
-/// Cleanup intensity. Plan 3 wires this into the LLM rewrite; Plan 1 ships deterministic-Light only.
-#[allow(dead_code)]
+/// Cleanup intensity. Plan 3 wires this into the LLM rewrite; deterministic-Light
+/// is the instant, always-present layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level { None, Light, Medium, High }
 
-/// Words the guard is allowed to see added/removed (disfluencies + filler).
+/// Words the guard treats as droppable (disfluencies + conversational filler), so
+/// `deterministic_light`'s leading-filler strip stays guard-safe.
+///
+/// KNOWN LIMIT (Plan 3 code review): the guard drops these from BOTH sides of its
+/// comparison, so it permits removing a *content* use of you/know/like/so/well/i/
+/// mean anywhere (e.g. `guard_accepts("do you know the way", "do the way")` is
+/// true). `deterministic_light` only strips LEADING fillers, so it never triggers
+/// this — but an LLM (T7) told to remove mid-sentence filler could drop content
+/// and pass the guard. `rewrite_prompt`'s Light rule therefore asks only for
+/// LEADING filler removal; the real fix (position-aware / leading-only handling)
+/// is deferred to the subsequence-guard work.
 const FILLERS: &[&str] = &["um", "uh", "er", "ah", "like", "you", "know", "so", "well", "i", "mean"];
 
 fn content_words(text: &str) -> Vec<String> {
@@ -91,7 +101,23 @@ pub fn deterministic_light(text: &str) -> String {
     let trimmed = text.trim();
     let without_lead = strip_leading_fillers(trimmed);
     let capped = capitalize_sentences(&without_lead);
-    ensure_terminal(&capped)
+    ensure_terminal(&capitalize_standalone_i(&capped))
+}
+
+/// Capitalize a standalone `i` (and its contractions — the `'` after it is a
+/// non-alphanumeric boundary, so `i'm`/`i'll` qualify) anywhere in the phrase.
+/// The Plan-3 T1 spike showed this is the LLM's main visible improvement over the
+/// deterministic layer — and it's free, and invisible to the case-insensitive
+/// content-word guard.
+fn capitalize_standalone_i(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    for (idx, &ch) in chars.iter().enumerate() {
+        let alone_before = idx == 0 || !chars[idx - 1].is_alphanumeric();
+        let alone_after = idx + 1 == chars.len() || !chars[idx + 1].is_alphanumeric();
+        out.push(if ch == 'i' && alone_before && alone_after { 'I' } else { ch });
+    }
+    out
 }
 
 fn strip_leading_fillers(text: &str) -> String {
@@ -127,6 +153,44 @@ fn ensure_terminal(text: &str) -> String {
     }
 }
 
+/// Parse a config string into a `Level` (defaults to Light — the safe, restrained
+/// default — on anything unrecognized).
+pub fn parse_level(s: &str) -> Level {
+    match s.trim().to_lowercase().as_str() {
+        "none" => Level::None,
+        "medium" => Level::Medium,
+        "high" => Level::High,
+        _ => Level::Light,
+    }
+}
+
+/// The constrained-rewrite prompt for the LLM formatter (consumed by the Candle
+/// façade in T7). `system` is hard restraint that holds at every level; the
+/// per-level rule only *widens* which edits are permitted. Restraint is the
+/// wording, so it lives here in the pure core, not in the inference façade.
+pub struct RewritePrompt {
+    pub system: String,
+    pub user: String,
+}
+
+/// Build the per-level rewrite prompt for T7's Candle façade. The Light rule keeps
+/// filler removal to LEADING disfluencies only — mid-sentence `you know`/`i mean`
+/// removal is deliberately NOT requested, because the content-word guard would
+/// accept such drops (see the `FILLERS` note). T7 must preserve this restriction.
+pub fn rewrite_prompt(level: Level, text: &str) -> RewritePrompt {
+    let restraint = "You clean up raw voice transcripts. Return ONLY the cleaned text, nothing else — no preamble, no quotes. NEVER change meaning: never swap a word for a different one, never add words that change meaning, never drop a negation, never reorder clauses. When unsure, leave it as it is.";
+    let rule = match level {
+        Level::None => "Return the text exactly as given.",
+        Level::Light => "Fix only capitalization and punctuation, and drop leading filler (um, uh, like). Remove no other words.",
+        Level::Medium => "Also remove disfluencies and false starts and join fragments into sentences. Keep every meaning-bearing word.",
+        Level::High => "Also break into paragraphs at topic shifts and turn spoken lists into bullets. Keep every meaning-bearing word.",
+    };
+    RewritePrompt {
+        system: format!("{restraint} {rule}"),
+        user: format!("Clean this transcript:\n{text}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,8 +220,31 @@ mod tests {
     }
 
     #[test]
+    fn guard_permits_dropping_filler_homographs_known_limit() {
+        // Documents the Plan-3 review limit: filler-set words can be dropped even
+        // as content. deterministic_light never does this (leading-only); the T7
+        // LLM prompt must not request mid-sentence filler removal.
+        assert!(guard_accepts("do you know the way", "do the way"));
+        assert!(guard_accepts("i like it a lot", "it a lot"));
+    }
+
+    #[test]
     fn deterministic_light_caps_and_terminates() {
         assert_eq!(deterministic_light("um the thing is"), "The thing is.");
+    }
+
+    #[test]
+    fn standalone_i_is_capitalized_mid_sentence() {
+        assert_eq!(
+            deterministic_light("the thing is i keep avoiding it"),
+            "The thing is I keep avoiding it."
+        );
+        assert_eq!(
+            deterministic_light("i'm sure i'll try what i've found"),
+            "I'm sure I'll try what I've found."
+        );
+        // never inside words
+        assert_eq!(deterministic_light("it is in the bin"), "It is in the bin.");
     }
 
     #[test]
@@ -198,5 +285,29 @@ mod tests {
         let out = apply_backtrack("aa bb ẞ scratch that ẞ tail");
         assert!(out.contains("tail"));
         assert!(!out.contains("scratch that"));
+    }
+
+    #[test]
+    fn parse_level_maps_known_and_defaults_to_light() {
+        assert_eq!(parse_level("none"), Level::None);
+        assert_eq!(parse_level("Medium"), Level::Medium);
+        assert_eq!(parse_level("HIGH"), Level::High);
+        assert_eq!(parse_level("light"), Level::Light);
+        assert_eq!(parse_level("nonsense"), Level::Light);
+    }
+
+    #[test]
+    fn rewrite_prompt_widens_by_level_and_carries_the_text() {
+        assert!(rewrite_prompt(Level::Light, "x").system.to_lowercase().contains("capitalization"));
+        assert!(rewrite_prompt(Level::Medium, "x").system.to_lowercase().contains("disfluencies"));
+        assert!(rewrite_prompt(Level::High, "x").system.to_lowercase().contains("paragraph"));
+        assert!(rewrite_prompt(Level::Light, "the raw phrase").user.contains("the raw phrase"));
+    }
+
+    #[test]
+    fn rewrite_prompt_always_states_the_restraint() {
+        for lvl in [Level::Light, Level::Medium, Level::High] {
+            assert!(rewrite_prompt(lvl, "x").system.to_lowercase().contains("never change meaning"));
+        }
     }
 }

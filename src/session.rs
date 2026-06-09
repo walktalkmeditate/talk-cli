@@ -1,7 +1,8 @@
 use crate::source::{Event, TranscriptSource};
 use crate::writer::{write_entry, Target, WriteRequest};
 use std::path::{Path, PathBuf};
-use talk_core::cleanup::{apply_backtrack, apply_spoken_commands, deterministic_light};
+use talk_core::cleanup::Level;
+use talk_core::format::{guarded_format, Formatter};
 use talk_core::settle::Settle;
 
 pub struct RunConfig<'a> {
@@ -10,17 +11,20 @@ pub struct RunConfig<'a> {
     pub time: &'a str,
     pub keep_raw: bool,
     pub ephemeral: bool,
+    pub formatter: &'a dyn Formatter,
+    pub level: Level,
 }
 
-/// Consume the whole source, running the deterministic cleanup layer
-/// (spoken-commands → backtrack → Light) on each committed phrase, settling it,
+/// Consume the whole source, cleaning each committed phrase through
+/// `guarded_format` (the deterministic pre-layer + the injected `Formatter`, gated
+/// by the content-word guard with a deterministic-Light fallback), settling it,
 /// then persisting. `settle` is the single source of truth for the output (raw
-/// verbatim + Light clean), so the file matches what Plan 2 will render.
+/// verbatim + clean), so the file matches what the live renderer shows.
 ///
-/// Note: the Light layer normalizes whitespace, so a spoken `new line` removes
-/// the command words but does not yet preserve structural newlines — structured
-/// formatting is a Plan 3 (High cleanup / LLM) concern. Plan 1 only guarantees
-/// the literal command words don't survive.
+/// Note: the Light layer normalizes whitespace, so a spoken `new line` removes the
+/// command words but does not preserve structural newlines — structured formatting
+/// (Medium/High) is a follow-on concern; this path only guarantees the literal
+/// command words don't survive.
 pub fn run(
     source: &mut dyn TranscriptSource,
     target: Target,
@@ -32,9 +36,8 @@ pub fn run(
         match ev {
             Event::Partial(p) => settle.on_partial(&p),
             Event::Commit(raw) => {
-                let pre = apply_backtrack(&apply_spoken_commands(&raw));
-                let clean = deterministic_light(&pre);
-                settle.commit(&raw, &clean); // raw stored verbatim for recovery
+                let clean = guarded_format(cfg.formatter, cfg.level, &raw);
+                settle.commit(&raw, &clean);
             }
             Event::Done => break,
         }
@@ -62,7 +65,10 @@ mod tests {
     use crate::source::FakeTranscript;
 
     fn cfg(base: &Path, ephemeral: bool) -> RunConfig<'_> {
-        RunConfig { base, date: "2026-06-08", time: "08:14", keep_raw: true, ephemeral }
+        RunConfig {
+            base, date: "2026-06-08", time: "08:14", keep_raw: true, ephemeral,
+            formatter: &talk_core::format::DeterministicFormatter, level: Level::Light,
+        }
     }
 
     #[test]
@@ -75,7 +81,7 @@ mod tests {
         ]);
         let p = run(&mut src, Target::Journal, &cfg(dir.path(), false)).unwrap().unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
-        assert!(text.contains("The thing is i keep avoiding it."));
+        assert!(text.contains("The thing is I keep avoiding it."));
         assert!(text.contains("<!-- raw: um so the thing is i keep avoiding it -->"));
     }
 
@@ -101,6 +107,7 @@ mod tests {
         ]);
         let p = run(&mut src, Target::Journal, &RunConfig {
             base: dir.path(), date: "2026-06-08", time: "08:14", keep_raw: false, ephemeral: false,
+            formatter: &talk_core::format::DeterministicFormatter, level: Level::Light,
         }).unwrap().unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(!text.contains("new line"));
@@ -113,5 +120,28 @@ mod tests {
         let out = run(&mut src, Target::Journal, &cfg(dir.path(), true)).unwrap();
         assert!(out.is_none());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn an_over_editing_formatter_cannot_corrupt_the_file() {
+        struct Flip;
+        impl talk_core::format::Formatter for Flip {
+            fn format(&self, _l: Level, text: &str) -> String {
+                format!(" {} ", text).replace(" love ", " hate ").trim().to_string()
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut src = FakeTranscript::new(vec![
+            Event::Commit("i love this".into()),
+            Event::Done,
+        ]);
+        let cfg = RunConfig {
+            base: dir.path(), date: "2026-06-08", time: "08:14", keep_raw: true, ephemeral: false,
+            formatter: &Flip, level: Level::Light,
+        };
+        let p = run(&mut src, Target::Journal, &cfg).unwrap().unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(!text.contains("hate"));
+        assert!(text.to_lowercase().contains("love"));
     }
 }
