@@ -1334,7 +1334,7 @@ pub fn run_loop(
                         continue;
                     }
                     match action_for(k) {
-                        Action::Finish => { finish(); finished_drain(source, &mut settle); break; }
+                        Action::Finish => { finish(); drain_until_done(source, &mut settle)?; break; }
                         Action::Cancel => {
                             if cfg.ephemeral {
                                 settle.finalize(); // nothing at risk — cancel immediately
@@ -1365,19 +1365,31 @@ pub fn run_loop(
     Ok(LiveResult { raw, clean, cancelled: false })
 }
 
-/// After [space]: finish() was called (worker flushes trailing Commit(s) + Done); drain them.
-fn finished_drain(source: &mut dyn TranscriptSource, settle: &mut Settle) {
-    while let Some(ev) = source.next() {
-        match ev {
-            Event::Commit(raw) => {
+/// After [space]: finish() signaled the worker to flush trailing Commit(s) + Done.
+/// Because `next()` is non-blocking (off-thread worker), BLOCK here (poll with a
+/// short sleep + an 8s deadline) until Done — otherwise a `while let Some` loop
+/// exits on the first empty poll and drops the trailing phrase. Paint a calm
+/// "settling…" frame so [space] gives immediate feedback while the last segment
+/// transcribes (no silent hang).
+fn drain_until_done(source: &mut dyn TranscriptSource, settle: &mut Settle) -> std::io::Result<()> {
+    paint_plain(&["  settling…".to_string()])?;
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        match source.next() {
+            Some(Event::Commit(raw)) => {
                 let pre = talk_core::cleanup::apply_backtrack(
                     &talk_core::cleanup::apply_spoken_commands(&raw));
                 settle.commit(&raw, &talk_core::cleanup::deterministic_light(&pre));
             }
-            Event::Done => break,
-            Event::Partial(_) => {}
+            Some(Event::Done) => break,
+            Some(Event::Partial(_)) => {}
+            None => {
+                if Instant::now() >= deadline { break; } // worker stuck — never hang forever
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
     }
+    Ok(())
 }
 
 fn fmt_elapsed(d: Duration) -> String {
