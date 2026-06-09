@@ -3,6 +3,7 @@
 pub mod cleanup;
 pub mod clock;
 pub mod entry;
+pub mod format;
 pub mod frontmatter;
 pub mod palette;
 pub mod questions;
