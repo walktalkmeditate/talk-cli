@@ -1,6 +1,12 @@
 mod cli;
 mod config;
+#[cfg(feature = "download")]
+mod download;
 mod keymap;
+#[cfg(feature = "listen")]
+mod live;
+#[cfg(feature = "listen")]
+mod listen;
 mod paths;
 mod render;
 mod session;
@@ -29,6 +35,16 @@ fn main() -> std::io::Result<()> {
     let date = args.date.clone().unwrap_or_else(system_date);
     let time = args.time.clone().unwrap_or_else(system_time_hm);
 
+    // Live mic session: only when this build has `listen` AND no `--from-text`
+    // override AND the command is a session command. Non-session commands and the
+    // `--from-text` path fall through to the existing match below, unchanged.
+    #[cfg(feature = "listen")]
+    if args.from_text.is_none() {
+        if let Some(handled) = run_live_session(&base, &args, &date, &time, &cfg)? {
+            return handled;
+        }
+    }
+
     match args.command {
         Some(Command::Journal) => {
             let text = require_text(&args.from_text);
@@ -42,6 +58,7 @@ fn main() -> std::io::Result<()> {
         Some(Command::Config { action }) => return handle_config(action.as_deref()),
         Some(Command::Thread { question }) => print_thread(&base, question.as_deref()),
         Some(Command::Streak) => println!("streak: (Plan 4)"),
+        Some(Command::Download { target }) => return handle_download(target.as_deref()),
         Some(Command::Reflect) => reflect(&base, &args.question, &date, &time, &require_text(&args.from_text), &cfg)?,
         // Bare `talk`: honor config.default_mode (journal) unless a BYO question was given.
         _ => {
@@ -56,8 +73,21 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Reflect: a BYO question if one was given, else select from the spine pack.
-fn reflect(base: &Path, byo: &Option<String>, date: &str, time: &str, text: &str, cfg: &config::Config) -> std::io::Result<()> {
+/// The chosen reflect question plus the `State` mutated by the selection (which
+/// must be persisted AFTER a successful write, so a failed write doesn't burn a
+/// rotation). Shared by the `--from-text` path and the live mic path.
+struct ReflectChoice {
+    id: String,
+    question: String,
+    slug: String,
+    pack: String,
+    addressee: String,
+    state: state::State,
+}
+
+/// Select a reflect question: a BYO question if one was given, else from the
+/// spine pack (recording the serving in the returned `State`).
+fn reflect_choice(base: &Path, byo: &Option<String>, time: &str) -> std::io::Result<ReflectChoice> {
     let mut st = state::State::load(&std::fs::read_to_string(state_path(base)).unwrap_or_default());
 
     let (id, question, slug, pack, addressee) = match byo {
@@ -84,9 +114,16 @@ fn reflect(base: &Path, byo: &Option<String>, date: &str, time: &str, text: &str
         }
     };
 
-    let target = Target::Reflect { id: &id, question: &question, slug: &slug, pack: &pack, addressee: &addressee };
+    Ok(ReflectChoice { id, question, slug, pack, addressee, state: st })
+}
+
+/// Reflect: a BYO question if one was given, else select from the spine pack.
+fn reflect(base: &Path, byo: &Option<String>, date: &str, time: &str, text: &str, cfg: &config::Config) -> std::io::Result<()> {
+    let c = reflect_choice(base, byo, time)?;
+
+    let target = Target::Reflect { id: &c.id, question: &c.question, slug: &c.slug, pack: &c.pack, addressee: &c.addressee };
     run_and_report(base, target, date, time, text, cfg.keep_raw, false)?;
-    paths::write_private(&state_path(base), &st.save())?;
+    paths::write_private(&state_path(base), &c.state.save())?;
     Ok(())
 }
 
@@ -97,6 +134,150 @@ fn run_and_report(base: &Path, target: Target, date: &str, time: &str, text: &st
         println!("→ {}", p.display());
     }
     Ok(())
+}
+
+/// Drive a real mic session for a session command (reflect / journal / unburden /
+/// vent / bare). Returns `Ok(None)` for non-session commands (Config / Thread /
+/// Streak / Download) so `main` falls through to the existing dispatch. A returned
+/// `Ok(Some(result))` is the value `main` should return.
+#[cfg(feature = "listen")]
+fn run_live_session(
+    base: &Path,
+    args: &Cli,
+    date: &str,
+    time: &str,
+    cfg: &config::Config,
+) -> std::io::Result<Option<std::io::Result<()>>> {
+    use talk_core::render_model::Mode as RMode;
+
+    // Which session shape are we in? Non-session commands → fall through.
+    enum Shape { Reflect, Journal, Ephemeral }
+    let shape = match &args.command {
+        Some(Command::Reflect) => Shape::Reflect,
+        Some(Command::Journal) => Shape::Journal,
+        Some(Command::Unburden) | Some(Command::Vent) => Shape::Ephemeral,
+        // Bare `talk`: honor default_mode (journal) unless a BYO question was given.
+        None => {
+            if args.question.is_none() && cfg.default_mode == "journal" {
+                Shape::Journal
+            } else {
+                Shape::Reflect
+            }
+        }
+        Some(Command::Config { .. })
+        | Some(Command::Thread { .. })
+        | Some(Command::Streak)
+        | Some(Command::Download { .. }) => return Ok(None),
+    };
+
+    // Verify every model before loading anything; an unpinned / missing / mismatched
+    // artifact prints the download hint and exits non-zero (a failure to do the
+    // reflection — never a panic, and the exit is clean since no terminal state or
+    // file has been touched yet).
+    for art in download::models::MODELS {
+        match download::verify(&paths::models_dir().join(art.name), art.sha256) {
+            Ok(true) => {}
+            _ => {
+                eprintln!("models not ready — run `talk download models`");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let models = paths::models_dir();
+    let moonshine = models.join("sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27");
+    let (Some(enc), Some(dec), Some(tok), Some(silero)) = (
+        moonshine.join("encoder_model.ort").to_str().map(str::to_owned),
+        moonshine.join("decoder_model_merged.ort").to_str().map(str::to_owned),
+        moonshine.join("tokens.txt").to_str().map(str::to_owned),
+        models.join("silero_vad.onnx").to_str().map(str::to_owned),
+    ) else {
+        eprintln!("model path is not valid UTF-8 — run `talk download models`");
+        std::process::exit(1);
+    };
+
+    let capture = match listen::capture::Capture::start() {
+        Ok(c) => c,
+        Err(e) => { eprintln!("microphone unavailable: {e}"); std::process::exit(1); }
+    };
+    let seg = match listen::vad::Segmenter::new(&silero) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("VAD failed to load: {e}"); std::process::exit(1); }
+    };
+    let stt = match listen::stt::Stt::new(&enc, &dec, &tok) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("speech model failed to load: {e}"); std::process::exit(1); }
+    };
+
+    let mut source = listen::LiveSource::new(capture, seg, stt);
+    let finish_flag = source.finish_handle();
+    let speaking = source.speaking_handle();
+
+    // Build the per-mode View config and the write target. For reflect we resolve
+    // the question (BYO or spine) up front; its owned strings back the Target.
+    let choice = match shape {
+        Shape::Reflect => Some(reflect_choice(base, &args.question, time)?),
+        _ => None,
+    };
+    let (rmode, target, cleanup, ephemeral, question): (RMode, Target, &str, bool, Option<&str>) =
+        match (&shape, &choice) {
+            (Shape::Reflect, Some(c)) => (
+                RMode::Reflect,
+                Target::Reflect {
+                    id: &c.id, question: &c.question, slug: &c.slug,
+                    pack: &c.pack, addressee: &c.addressee,
+                },
+                "Light", false, Some(c.question.as_str()),
+            ),
+            (Shape::Journal, _) => (RMode::Journal, Target::Journal, "Medium", false, None),
+            (Shape::Ephemeral, _) => (RMode::Ephemeral, Target::Journal, "Medium", true, None),
+            (Shape::Reflect, None) => unreachable!("reflect always resolves a choice"),
+        };
+
+    let live_cfg = live::LiveConfig {
+        mode: rmode, question, held_label: None, cleanup, ephemeral,
+    };
+    let result = live::run_loop(&mut source, finish_flag, speaking, &live_cfg)?;
+
+    if result.cancelled {
+        return Ok(Some(Ok(())));
+    }
+    if ephemeral {
+        live::show_released()?;
+        return Ok(Some(Ok(())));
+    }
+    if result.clean.trim().is_empty() {
+        render::paint_plain(&["  nothing captured.".to_string()])?;
+        return Ok(Some(Ok(())));
+    }
+
+    let written = writer::write_entry(&writer::WriteRequest {
+        base, target, date, time,
+        raw: Some(&result.raw), clean: &result.clean,
+        keep_raw: cfg.keep_raw, ephemeral,
+    })?;
+
+    // Persist the reflect rotation only after the write succeeded.
+    if let Some(c) = &choice {
+        paths::write_private(&state_path(base), &c.state.save())?;
+    }
+
+    if let Some(path) = written {
+        let provenance = format!("entry {}", written_entry_count(&path));
+        live::show_close(&path.display().to_string(), &provenance, "Stillness carries forward.")?;
+    }
+    Ok(Some(Ok(())))
+}
+
+/// Best-effort entry count from a freshly-written file's frontmatter (reflect) or
+/// `## ` date headings (journal), for a simple `entry N` close-screen provenance.
+#[cfg(feature = "listen")]
+fn written_entry_count(path: &Path) -> usize {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    if let Some((fm, _)) = talk_core::frontmatter::Frontmatter::parse(&text) {
+        return fm.entries as usize;
+    }
+    text.lines().filter(|l| l.starts_with("## ")).count().max(1)
 }
 
 // config.toml always lives at the default ~/talk; base_dir only relocates where entries land.
@@ -114,6 +295,33 @@ fn handle_config(action: Option<&str>) -> std::io::Result<()> {
         _ => print!("{}", config::Config::commented_template()),
     }
     Ok(())
+}
+
+/// `talk download models` — fetch + SHA-256-verify the model artifacts (behind
+/// the `download` feature). Without the feature, this build can't fetch.
+#[cfg(feature = "download")]
+fn handle_download(target: Option<&str>) -> std::io::Result<()> {
+    match target {
+        Some("models") | None => {
+            for art in download::models::MODELS {
+                println!("fetching {} …", art.name);
+                download::fetch(art, &paths::models_dir())
+                    .map_err(std::io::Error::other)?;
+                println!("  ✓ {}", art.name);
+            }
+            Ok(())
+        }
+        Some(other) => {
+            eprintln!("unknown download target: {other} (try `talk download models`)");
+            std::process::exit(2);
+        }
+    }
+}
+
+#[cfg(not(feature = "download"))]
+fn handle_download(_target: Option<&str>) -> std::io::Result<()> {
+    eprintln!("this build has no download support — rebuild with `--features download`");
+    std::process::exit(2);
 }
 
 fn print_thread(base: &Path, question: Option<&str>) {

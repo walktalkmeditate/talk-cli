@@ -17,6 +17,10 @@ exclude = ["/crates", "/web", "/demo", "/docs", "/tests", "/.github"]
 name = "talk"
 path = "src/main.rs"
 
+[features]
+listen = ["download", "dep:cpal", "dep:sherpa-onnx", "dep:coreaudio-sys"]
+download = ["dep:ureq"]
+
 [dependencies]
 talk-core = { path = "crates/talk-core", version = "0.1.0" }
 clap = { version = "=4.5.20", features = ["derive"] }
@@ -26,9 +30,18 @@ toml = "0.8"
 directories = "5"
 fs2 = "0.4"
 crossterm = "0.28"
+cpal = { version = "0.16", optional = true }          # match the sherpa-onnx rust-api-examples
+sherpa-onnx = { version = "1.13", optional = true }   # verify symbols vs the pinned rust-api-examples
+ureq = { version = "2", optional = true }             # v2: resp.into_reader() exists (removed in v3)
+sha2 = "0.10"
+tar = "0.4"
+bzip2 = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+coreaudio-sys = { version = "=0.2.16", optional = true }   # MSRV pin, mirrors meditate-cli
 
 [dev-dependencies]
 tempfile = "3"
