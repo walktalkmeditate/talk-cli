@@ -10,6 +10,16 @@ pub fn base_dir(override_path: Option<PathBuf>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("talk"))
 }
 
+/// Where downloaded models live (separate from journal entries). Honors a validated
+/// `TALK_MODELS_DIR`, else the platform cache dir, else `<base>/models`.
+#[cfg(any(feature = "listen", feature = "download"))]
+pub fn models_dir() -> PathBuf {
+    if let Some(p) = safe_env_dir("TALK_MODELS_DIR") { return p; }
+    directories::ProjectDirs::from("org", "walktalkmeditate", "talk")
+        .map(|d| d.cache_dir().join("models"))
+        .unwrap_or_else(|| base_dir(None).join("models"))
+}
+
 /// Read an env-supplied dir, accepting it only if absolute and free of `..`
 /// components (reject traversal / relative paths). Warns + returns None otherwise.
 fn safe_env_dir(var: &str) -> Option<PathBuf> {
