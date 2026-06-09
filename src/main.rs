@@ -171,13 +171,15 @@ fn run_live_session(
     };
 
     // Verify every model before loading anything; an unpinned / missing / mismatched
-    // artifact prints the download hint and exits cleanly (never panics).
+    // artifact prints the download hint and exits non-zero (a failure to do the
+    // reflection — never a panic, and the exit is clean since no terminal state or
+    // file has been touched yet).
     for art in download::models::MODELS {
         match download::verify(&paths::models_dir().join(art.name), art.sha256) {
             Ok(true) => {}
             _ => {
                 eprintln!("models not ready — run `talk download models`");
-                return Ok(Some(Ok(())));
+                std::process::exit(1);
             }
         }
     }
@@ -191,20 +193,20 @@ fn run_live_session(
         models.join("silero_vad.onnx").to_str().map(str::to_owned),
     ) else {
         eprintln!("model path is not valid UTF-8 — run `talk download models`");
-        return Ok(Some(Ok(())));
+        std::process::exit(1);
     };
 
     let capture = match listen::capture::Capture::start() {
         Ok(c) => c,
-        Err(e) => { eprintln!("microphone unavailable: {e}"); return Ok(Some(Ok(()))); }
+        Err(e) => { eprintln!("microphone unavailable: {e}"); std::process::exit(1); }
     };
     let seg = match listen::vad::Segmenter::new(&silero) {
         Ok(s) => s,
-        Err(e) => { eprintln!("VAD failed to load: {e}"); return Ok(Some(Ok(()))); }
+        Err(e) => { eprintln!("VAD failed to load: {e}"); std::process::exit(1); }
     };
     let stt = match listen::stt::Stt::new(&enc, &dec, &tok) {
         Ok(s) => s,
-        Err(e) => { eprintln!("speech model failed to load: {e}"); return Ok(Some(Ok(()))); }
+        Err(e) => { eprintln!("speech model failed to load: {e}"); std::process::exit(1); }
     };
 
     let mut source = listen::LiveSource::new(capture, seg, stt);
