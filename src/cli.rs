@@ -39,4 +39,6 @@ pub enum Command {
     Streak,
     /// Config helpers.
     Config { action: Option<String> },
+    /// Download models (and later, question packs). `talk download models`.
+    Download { target: Option<String> },
 }

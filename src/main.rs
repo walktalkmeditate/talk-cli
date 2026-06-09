@@ -1,5 +1,7 @@
 mod cli;
 mod config;
+#[cfg(feature = "download")]
+mod download;
 mod keymap;
 #[cfg(feature = "listen")]
 mod listen;
@@ -44,6 +46,7 @@ fn main() -> std::io::Result<()> {
         Some(Command::Config { action }) => return handle_config(action.as_deref()),
         Some(Command::Thread { question }) => print_thread(&base, question.as_deref()),
         Some(Command::Streak) => println!("streak: (Plan 4)"),
+        Some(Command::Download { target }) => return handle_download(target.as_deref()),
         Some(Command::Reflect) => reflect(&base, &args.question, &date, &time, &require_text(&args.from_text), &cfg)?,
         // Bare `talk`: honor config.default_mode (journal) unless a BYO question was given.
         _ => {
@@ -116,6 +119,33 @@ fn handle_config(action: Option<&str>) -> std::io::Result<()> {
         _ => print!("{}", config::Config::commented_template()),
     }
     Ok(())
+}
+
+/// `talk download models` — fetch + SHA-256-verify the model artifacts (behind
+/// the `download` feature). Without the feature, this build can't fetch.
+#[cfg(feature = "download")]
+fn handle_download(target: Option<&str>) -> std::io::Result<()> {
+    match target {
+        Some("models") | None => {
+            for art in download::models::MODELS {
+                println!("fetching {} …", art.name);
+                download::fetch(art, &paths::models_dir())
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                println!("  ✓ {}", art.name);
+            }
+            Ok(())
+        }
+        Some(other) => {
+            eprintln!("unknown download target: {other} (try `talk download models`)");
+            std::process::exit(2);
+        }
+    }
+}
+
+#[cfg(not(feature = "download"))]
+fn handle_download(_target: Option<&str>) -> std::io::Result<()> {
+    eprintln!("this build has no download support — rebuild with `--features download`");
+    std::process::exit(2);
 }
 
 fn print_thread(base: &Path, question: Option<&str>) {
