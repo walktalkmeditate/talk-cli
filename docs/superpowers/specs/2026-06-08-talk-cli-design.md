@@ -160,6 +160,18 @@ the live edge jitters. Formatting happens *at* commit, so the user watches raw
 dissolve and clean appear in its place — never a re-flow. `u` toggles the whole
 transcript clean⇄raw (always available because raw is always stored).
 
+> **Settle model amended (2026-06-08, during Plan 2 research).** In the Rust
+> toolchain, sherpa-onnx's **Moonshine is offline (non-streaming)** — true
+> mid-phrase partials need a streaming Zipformer. We keep Moonshine (§6) and
+> adopt the **settle-on-pause** model (`DREAMING.md §5`'s "speak blind, see it
+> settled", which the dream flagged as likely *better* for reflection): **Silero
+> VAD** detects a speech segment; the dim "live edge" is a calm *listening*
+> indicator (not jittering partials); on your pause the segment is transcribed
+> and the clean phrase **settles in at once**. The `talk-core` settle machine is
+> unchanged — `commit()` fires on the VAD endpoint instead of a partial stream;
+> `Live`/`Committing`/`Settled` and the never-re-flow invariant still hold. A
+> streaming-Zipformer "live jitter" mode remains a later option behind a flag.
+
 **Rendering invariant that makes "never re-flows" true** (it must be engineered,
 not asserted): the settled region is an append-only stack of immutable blocks.
 Each committed phrase is laid out once into its *own* block; prior blocks are

@@ -1,13 +1,27 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Resolve the base dir: explicit override, else `~/talk`.
+/// Resolve the base dir: explicit override, else `TALK_BASE_DIR`, else `~/talk`.
 pub fn base_dir(override_path: Option<PathBuf>) -> PathBuf {
-    override_path.unwrap_or_else(|| {
-        directories::UserDirs::new()
-            .map(|d| d.home_dir().join("talk"))
-            .unwrap_or_else(|| PathBuf::from("talk"))
-    })
+    if let Some(p) = override_path { return p; }
+    if let Some(p) = safe_env_dir("TALK_BASE_DIR") { return p; }
+    directories::UserDirs::new()
+        .map(|d| d.home_dir().join("talk"))
+        .unwrap_or_else(|| PathBuf::from("talk"))
+}
+
+/// Read an env-supplied dir, accepting it only if absolute and free of `..`
+/// components (reject traversal / relative paths). Warns + returns None otherwise.
+fn safe_env_dir(var: &str) -> Option<PathBuf> {
+    let raw = std::env::var(var).ok()?;
+    if raw.is_empty() { return None; }
+    let p = PathBuf::from(raw);
+    if p.is_absolute() && !p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        Some(p)
+    } else {
+        eprintln!("{var} ignored: must be an absolute path without '..'");
+        None
+    }
 }
 
 /// Resolve a config-supplied base dir, validating it. A configured path must be
@@ -96,6 +110,21 @@ mod tests {
     fn base_dir_respects_override() {
         let p = base_dir(Some(PathBuf::from("/tmp/x")));
         assert_eq!(p, PathBuf::from("/tmp/x"));
+    }
+
+    #[test]
+    fn base_dir_honors_and_validates_talk_base_dir() {
+        std::env::set_var("TALK_BASE_DIR", "/tmp/talk-test-xyz");
+        assert_eq!(base_dir(None), PathBuf::from("/tmp/talk-test-xyz"));
+        std::env::set_var("TALK_BASE_DIR", "/tmp/../etc"); // traversal → rejected → not used
+        assert_ne!(base_dir(None), PathBuf::from("/tmp/../etc"));
+        std::env::set_var("TALK_BASE_DIR", "relative/dir");  // not absolute → rejected
+        assert_ne!(base_dir(None), PathBuf::from("relative/dir"));
+        std::env::remove_var("TALK_BASE_DIR");
+        // explicit override always wins over the env
+        std::env::set_var("TALK_BASE_DIR", "/tmp/ignored");
+        assert_eq!(base_dir(Some(PathBuf::from("/tmp/explicit"))), PathBuf::from("/tmp/explicit"));
+        std::env::remove_var("TALK_BASE_DIR");
     }
 
     #[test]
