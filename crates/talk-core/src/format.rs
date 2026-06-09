@@ -18,6 +18,9 @@ pub trait Formatter {
 pub struct DeterministicFormatter;
 
 impl Formatter for DeterministicFormatter {
+    /// `level` is intentionally ignored: with no model, every level collapses to
+    /// deterministic-Light (Medium/High word-removal would be rejected by the guard
+    /// anyway). This is the always-present fallback.
     fn format(&self, _level: Level, text: &str) -> String {
         deterministic_light(text)
     }
@@ -43,20 +46,7 @@ pub fn guarded_format(f: &dyn Formatter, level: Level, raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Restraint incarnate — deterministic-Light never substitutes a word.
-    struct Faithful;
-    impl Formatter for Faithful {
-        fn format(&self, _l: Level, text: &str) -> String { deterministic_light(text) }
-    }
-
-    /// Substitutes meaning words / drops negations — exactly what the guard rejects.
-    struct OverEditing;
-    impl Formatter for OverEditing {
-        fn format(&self, _l: Level, text: &str) -> String {
-            format!(" {} ", text).replace(" love ", " hate ").replace(" not ", " ").trim().to_string()
-        }
-    }
+    use crate::test_support::{Faithful, OverEditing};
 
     #[test]
     fn none_level_returns_pre_layer_unchanged() {
@@ -86,5 +76,14 @@ mod tests {
     #[test]
     fn faithful_output_passes_the_guard_unchanged() {
         assert_eq!(guarded_format(&Faithful, Level::Light, "um so i keep avoiding it"), "Keep avoiding it.");
+    }
+
+    #[test]
+    fn guard_fires_at_medium_too() {
+        // Medium/High would remove words, so any LLM rewrite there is rejected and
+        // falls back to deterministic-Light. The guard is level-agnostic.
+        let out = guarded_format(&OverEditing, Level::Medium, "i love her");
+        assert!(!out.contains("hate"));
+        assert!(out.to_lowercase().contains("love"));
     }
 }

@@ -3,7 +3,17 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level { None, Light, Medium, High }
 
-/// Words the guard is allowed to see added/removed (disfluencies + filler).
+/// Words the guard treats as droppable (disfluencies + conversational filler), so
+/// `deterministic_light`'s leading-filler strip stays guard-safe.
+///
+/// KNOWN LIMIT (Plan 3 code review): the guard drops these from BOTH sides of its
+/// comparison, so it permits removing a *content* use of you/know/like/so/well/i/
+/// mean anywhere (e.g. `guard_accepts("do you know the way", "do the way")` is
+/// true). `deterministic_light` only strips LEADING fillers, so it never triggers
+/// this — but an LLM (T7) told to remove mid-sentence filler could drop content
+/// and pass the guard. `rewrite_prompt`'s Light rule therefore asks only for
+/// LEADING filler removal; the real fix (position-aware / leading-only handling)
+/// is deferred to the subsequence-guard work.
 const FILLERS: &[&str] = &["um", "uh", "er", "ah", "like", "you", "know", "so", "well", "i", "mean"];
 
 fn content_words(text: &str) -> Vec<String> {
@@ -147,6 +157,10 @@ pub struct RewritePrompt {
     pub user: String,
 }
 
+/// Build the per-level rewrite prompt for T7's Candle façade. The Light rule keeps
+/// filler removal to LEADING disfluencies only — mid-sentence `you know`/`i mean`
+/// removal is deliberately NOT requested, because the content-word guard would
+/// accept such drops (see the `FILLERS` note). T7 must preserve this restriction.
 pub fn rewrite_prompt(level: Level, text: &str) -> RewritePrompt {
     let restraint = "You clean up raw voice transcripts. Return ONLY the cleaned text, nothing else — no preamble, no quotes. NEVER change meaning: never swap a word for a different one, never add words that change meaning, never drop a negation, never reorder clauses. When unsure, leave it as it is.";
     let rule = match level {
@@ -187,6 +201,15 @@ mod tests {
     #[test]
     fn rejects_an_added_content_word() {
         assert!(!guard_accepts("i am tired", "I am very tired."));
+    }
+
+    #[test]
+    fn guard_permits_dropping_filler_homographs_known_limit() {
+        // Documents the Plan-3 review limit: filler-set words can be dropped even
+        // as content. deterministic_light never does this (leading-only); the T7
+        // LLM prompt must not request mid-sentence filler removal.
+        assert!(guard_accepts("do you know the way", "do the way"));
+        assert!(guard_accepts("i like it a lot", "it a lot"));
     }
 
     #[test]

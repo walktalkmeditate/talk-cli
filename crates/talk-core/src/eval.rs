@@ -4,6 +4,7 @@
 //! output. `score` is the fraction of fixtures with zero impermissible edits. A
 //! deliberately over-editing mock MUST score red (see tests).
 
+use crate::cleanup::guard_accepts;
 use crate::cleanup::Level;
 use crate::format::Formatter;
 
@@ -35,8 +36,11 @@ pub fn score(f: &dyn Formatter, level: Level, fixtures: &[Fixture]) -> f32 {
         return 1.0;
     }
     let passed = fixtures.iter().filter(|fx| {
-        let out = f.format(level, fx.raw).to_lowercase();
-        fx.impermissible.iter().all(|bad| !out.contains(&bad.to_lowercase()))
+        let out = f.format(level, fx.raw);
+        let lower = out.to_lowercase();
+        !out.trim().is_empty()
+            && guard_accepts(fx.raw, &out)
+            && fx.impermissible.iter().all(|bad| !lower.contains(&bad.to_lowercase()))
     }).count();
     passed as f32 / fixtures.len() as f32
 }
@@ -44,26 +48,31 @@ pub fn score(f: &dyn Formatter, level: Level, fixtures: &[Fixture]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cleanup::deterministic_light;
     use crate::format::{guarded_format, DeterministicFormatter};
+    use crate::test_support::{Faithful, OverEditing};
 
-    struct Faithful;
-    impl Formatter for Faithful {
-        fn format(&self, _l: Level, text: &str) -> String { deterministic_light(text) }
+    struct Truncator;
+    impl Formatter for Truncator {
+        fn format(&self, _l: Level, _text: &str) -> String { String::new() }
     }
 
-    /// The must-fail mock: flips sentiment + drops negations.
-    struct OverEditing;
-    impl Formatter for OverEditing {
+    /// Flips meaning using words NOT in any fixture's impermissible list — caught
+    /// only by the guard_accepts arm of score.
+    struct OffBlocklistFlipper;
+    impl Formatter for OffBlocklistFlipper {
         fn format(&self, _l: Level, text: &str) -> String {
-            format!(" {} ", text)
-                .replace(" love ", " hate ")
-                .replace(" always ", " never ")
-                .replace(" should ", " shouldn't ")
-                .replace(" good ", " bad ")
-                .replace(" not ", " ")
-                .trim().to_string()
+            format!(" {} ", text).replace(" furious ", " livid ").replace(" love ", " adore ").trim().to_string()
         }
+    }
+
+    #[test]
+    fn empty_output_scores_red() {
+        assert!(score(&Truncator, Level::Light, FIXTURES) < 1.0);
+    }
+
+    #[test]
+    fn off_blocklist_meaning_flip_scores_red() {
+        assert!(score(&OffBlocklistFlipper, Level::Light, FIXTURES) < 1.0);
     }
 
     #[test]

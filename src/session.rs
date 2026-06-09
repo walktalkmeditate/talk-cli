@@ -37,7 +37,7 @@ pub fn run(
             Event::Partial(p) => settle.on_partial(&p),
             Event::Commit(raw) => {
                 let clean = guarded_format(cfg.formatter, cfg.level, &raw);
-                settle.commit(&raw, &clean); // raw stored verbatim for recovery
+                settle.commit(&raw, &clean);
             }
             Event::Done => break,
         }
