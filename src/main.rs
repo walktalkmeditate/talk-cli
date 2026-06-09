@@ -1,6 +1,8 @@
 mod cli;
 mod config;
 mod keymap;
+#[cfg(feature = "listen")]
+mod listen;
 mod paths;
 mod render;
 mod session;
