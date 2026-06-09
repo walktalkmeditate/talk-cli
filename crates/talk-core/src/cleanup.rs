@@ -101,7 +101,23 @@ pub fn deterministic_light(text: &str) -> String {
     let trimmed = text.trim();
     let without_lead = strip_leading_fillers(trimmed);
     let capped = capitalize_sentences(&without_lead);
-    ensure_terminal(&capped)
+    ensure_terminal(&capitalize_standalone_i(&capped))
+}
+
+/// Capitalize a standalone `i` (and its contractions — the `'` after it is a
+/// non-alphanumeric boundary, so `i'm`/`i'll` qualify) anywhere in the phrase.
+/// The Plan-3 T1 spike showed this is the LLM's main visible improvement over the
+/// deterministic layer — and it's free, and invisible to the case-insensitive
+/// content-word guard.
+fn capitalize_standalone_i(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    for (idx, &ch) in chars.iter().enumerate() {
+        let alone_before = idx == 0 || !chars[idx - 1].is_alphanumeric();
+        let alone_after = idx + 1 == chars.len() || !chars[idx + 1].is_alphanumeric();
+        out.push(if ch == 'i' && alone_before && alone_after { 'I' } else { ch });
+    }
+    out
 }
 
 fn strip_leading_fillers(text: &str) -> String {
@@ -215,6 +231,20 @@ mod tests {
     #[test]
     fn deterministic_light_caps_and_terminates() {
         assert_eq!(deterministic_light("um the thing is"), "The thing is.");
+    }
+
+    #[test]
+    fn standalone_i_is_capitalized_mid_sentence() {
+        assert_eq!(
+            deterministic_light("the thing is i keep avoiding it"),
+            "The thing is I keep avoiding it."
+        );
+        assert_eq!(
+            deterministic_light("i'm sure i'll try what i've found"),
+            "I'm sure I'll try what I've found."
+        );
+        // never inside words
+        assert_eq!(deterministic_light("it is in the bin"), "It is in the bin.");
     }
 
     #[test]

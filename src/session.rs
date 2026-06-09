@@ -81,7 +81,7 @@ mod tests {
         ]);
         let p = run(&mut src, Target::Journal, &cfg(dir.path(), false)).unwrap().unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
-        assert!(text.contains("The thing is i keep avoiding it."));
+        assert!(text.contains("The thing is I keep avoiding it."));
         assert!(text.contains("<!-- raw: um so the thing is i keep avoiding it -->"));
     }
 
