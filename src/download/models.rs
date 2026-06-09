@@ -15,11 +15,11 @@ pub const MODELS: &[Artifact] = &[
     Artifact {
         name: "sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27.tar.bz2",
         url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27.tar.bz2",
-        sha256: "FILL_AT_PIN_TIME",
+        sha256: "9ec31b342d8fa3240c3b81b8f82e1cf7e3ac467c93ca5a999b741d5887164f8d",
     },
     Artifact {
         name: "silero_vad.onnx",
         url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
-        sha256: "FILL_AT_PIN_TIME",
+        sha256: "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
     },
 ];

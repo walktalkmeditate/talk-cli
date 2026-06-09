@@ -6,6 +6,19 @@ use std::io::Read;
 use std::path::Path;
 use models::Artifact;
 
+/// Redirect hops to tolerate (GitHub release assets 302 once to their CDN).
+const MAX_REDIRECTS: usize = 5;
+
+/// Validate a redirect target: only an absolute `https://` URL is followed, so a
+/// hop can never downgrade the transport to plaintext.
+fn redirect_target(location: Option<&str>) -> Result<String, String> {
+    match location {
+        Some(l) if l.starts_with("https://") => Ok(l.to_string()),
+        Some(l) => Err(format!("refusing redirect to non-HTTPS url: {l}")),
+        None => Err("redirect response without a Location header".to_string()),
+    }
+}
+
 /// Fetch `art` to `dir` over HTTPS, verifying its pinned SHA-256 before keeping it.
 /// A mismatch deletes the bad file and errors — never load an unverified model.
 pub fn fetch(art: &Artifact, dir: &Path) -> Result<(), String> {
@@ -25,9 +38,21 @@ pub fn fetch(art: &Artifact, dir: &Path) -> Result<(), String> {
     if !art.url.starts_with("https://") {
         return Err(format!("refusing non-HTTPS url: {}", art.url));
     }
-    // No redirects: a redirect could downgrade HTTPS, so it must error instead.
+    // GitHub release assets 302-redirect to a CDN, so redirects must be followed —
+    // but manually, validating EVERY hop stays HTTPS (a transport downgrade is
+    // refused; the pinned SHA-256 is the integrity guarantee either way).
     let agent = ureq::AgentBuilder::new().redirects(0).build();
-    let resp = agent.get(art.url).call().map_err(|e| e.to_string())?;
+    let mut url = art.url.to_string();
+    let mut resp = agent.get(&url).call().map_err(|e| e.to_string())?;
+    let mut hops = 0;
+    while (300..400).contains(&resp.status()) {
+        hops += 1;
+        if hops > MAX_REDIRECTS {
+            return Err(format!("too many redirects fetching {}", art.name));
+        }
+        url = redirect_target(resp.header("location"))?;
+        resp = agent.get(&url).call().map_err(|e| e.to_string())?;
+    }
     let mut bytes = Vec::new();
     resp.into_reader().read_to_end(&mut bytes).map_err(|e| e.to_string())?;
     let got = hex(Sha256::digest(&bytes));
@@ -65,6 +90,17 @@ fn hex(d: impl AsRef<[u8]>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redirect_target_requires_absolute_https() {
+        assert_eq!(
+            redirect_target(Some("https://cdn.example.com/x")).unwrap(),
+            "https://cdn.example.com/x"
+        );
+        assert!(redirect_target(Some("http://cdn.example.com/x")).is_err()); // downgrade
+        assert!(redirect_target(Some("/relative/path")).is_err());
+        assert!(redirect_target(None).is_err());
+    }
 
     #[test]
     fn verify_matches_known_hash() {
