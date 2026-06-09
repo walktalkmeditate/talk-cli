@@ -14,12 +14,15 @@
 
 ## Scope notes (read first)
 
-- **Spine source exists:** the 65 curated questions live in `../walktalkmeditate/src/content/questions/{morning,evening,solo,walking}.yaml` (10+15+15+25 = 65, verified). T1 converts them to TOML; no content is invented.
+- **Spine source exists:** the 65 source questions live in `../walktalkmeditate/src/content/questions/{morning,evening,solo,walking}.yaml` (10+15+15+25 = 65, verified). T1 converts them to TOML and curates (see the curation note below); no content is invented.
 - **Remote pack download is deferred post-launch** (spec §9 frames extra packs as the OSS contribution surface). There are zero post-launch packs in existence today, so building remote pack-fetch now would ship dead machinery (YAGNI). `talk download` with no arg lists what's installed (vendored packs + models status); `talk download models` and the new `talk download verify` work as before. The `Artifact`+`fetch` machinery from Plan 2 is the named path when a real pack exists to host.
 - **`talk config path` already exists** (Plan 1) — dropped from this plan's scope.
 - **mlock is deliberately NOT implemented.** Spec §7 says "best-effort mlock"; in safe Rust, `String`/`Vec` reallocation moves buffers, so mlocking the final address is security theater that complicates the code without pinning earlier copies (STT buffers, channel messages). The honest hardening is: ephemeral writes nothing (tested), the final transcript is `zeroize`d (T7), and the threat-model boundary (swap during hibernation, terminal scrollback) is stated in the disclosure (T9) exactly as spec §7 requires. This is surfaced for the doc-review to weigh.
 - **Already-merged context this plan builds on:** `reflect_choice` (selection + state, shared by text/live paths), `run_live_session`/`live::run_loop`, `download::{fetch, verify, models::MODELS}`, `paths::{write_private, models_dir}`, `State`, `Config::cleanup_for`, the formatter moat (untouched here).
 - **Ephemeral never earns streak or state** — T4/T7 must keep `talk unburden` writing zero bytes (the existing `unburden_keeps_nothing` test is extended into the zero-bytes test).
+- **Spine curation (user decision, 2026-06-09):** the source questions were written for the website's group walks, so T1 applies a curation gate — drop group/relational-flavored questions that don't point a solo speaker inward. The spine ships at whatever count survives (~55–60); the spec's literal "the 65" is superseded by this recorded decision. Dropped questions + one-line rationale stay as comments in spine.toml.
+- **spec §14's version-bump audit** ("re-check the audio lib for network/telemetry on every bump") is a process gate, not code: recorded here as policy — any PR that changes Cargo.lock gets a manual network-behavior review note, and the no-egress tests are the runtime backstop. Not automated in v1.
+- **`talk download` with no arg CHANGES behavior** (was: fetch models; becomes: list installed packs + models status). The fetch stays under the explicit `talk download models`.
 
 ## File structure
 
@@ -68,7 +71,7 @@ The conversion is mechanical from the four YAML files in `../walktalkmeditate/sr
 - `text` = the YAML `text` verbatim (do not edit wording).
 - `id` = a kebab-case slug of 3–5 distinctive content words from the text (e.g. "What are you grateful for in this moment?" → `grateful-this-moment`). Ids must be unique across the whole file; on collision, add one more distinguishing word. **Ids are the immutable thread identity (spec §8) — once this file merges, never change them.**
 - `addressee` omitted (defaults `self`); `cadence` omitted (defaults `daily`); the YAML `stage` field is dropped (it's the website's grouping, not talk's).
-- File header: `name = "spine"`, `description = "The 65-question spine — curated, human-authored (from walktalkmeditate)."`
+- File header: `name = "spine"`, `description = "The curated spine — human-authored, drawn and pruned from walktalkmeditate."`
 
 Worked examples (first entry of each file):
 
@@ -84,6 +87,8 @@ text = "How do you define wisdom — and has your definition changed over time?"
 slot = "evening"
 ```
 
+> **Curation gate (recorded decision):** the source files were authored for group walks (evening.yaml: "Jeffersonian-style evening group discussions"). During conversion, apply this bar: *a spine question must be answerable alone, pointing the speaker inward* — drop questions that theorize about other people, presuppose a group, or are parlor gambits (e.g. "How do you reconcile differing personalities or interests in relationships?", "If happiness was the national currency…", "When is sitting together in silence more powerful than speaking?"). Expect to drop ~5–10. Record each dropped question as a `# dropped: "<text>" — <reason>` comment at the bottom of spine.toml. Pin the exact surviving count (and per-slot counts) in the test at conversion time.
+
 > **Replaces the two placeholder questions** (`carrying-not-yours`, `morning-intention`). Existing thread files keyed to those ids stay valid on disk (`talk thread` still reads them); they simply stop being served. This is the id-immutability model working as designed — files never orphan, packs evolve.
 
 - [ ] **Step 1: Write the failing test**
@@ -92,24 +97,24 @@ Add to `tests/integration.rs`:
 
 ```rust
 #[test]
-fn spine_is_the_real_sixty_five() {
+fn spine_is_the_curated_spine() {
     let spine = talk_core::questions::Pack::from_toml(include_str!("../questions/spine.toml")).unwrap();
-    assert_eq!(spine.questions.len(), 65);
+    let n = spine.questions.len();
+    assert!((55..=65).contains(&n), "curated spine size, pinned at conversion: {n}");
+    // PIN the exact n + slot counts here at conversion time (placeholder range until then).
     let mut ids: Vec<&str> = spine.questions.iter().map(|q| q.id.as_str()).collect();
     ids.sort_unstable();
     ids.dedup();
-    assert_eq!(ids.len(), 65, "ids must be unique");
+    assert_eq!(ids.len(), n, "ids must be unique");
     assert!(ids.iter().all(|id| id.chars().all(|c| c.is_ascii_lowercase() || c == '-')));
-    assert_eq!(spine.questions.iter().filter(|q| q.slot.as_deref() == Some("morning")).count(), 10);
-    assert_eq!(spine.questions.iter().filter(|q| q.slot.as_deref() == Some("evening")).count(), 15);
 }
 ```
 
 (Note: `talk-core` must be a dev-dependency of the binary's integration tests — it already is a dependency, so `talk_core::` resolves.)
 
-- [ ] **Step 2: Run it to fail** — `cargo test spine_is_the_real_sixty_five` → FAIL (placeholder has 2).
+- [ ] **Step 2: Run it to fail** — `cargo test spine_is_the_curated_spine` → FAIL (placeholder has 2, below the 55–65 curated range).
 
-- [ ] **Step 3: Convert the YAMLs** — read each of the four files at `/Users/rubberduck/GitHub/momentmaker/walktalkmeditate/src/content/questions/`, apply the mapping rules, write the full 65-entry `questions/spine.toml`. Existing binary tests that referenced the placeholder spine (`bare_reflect_selects_from_spine_by_time_of_day` expects `morning-intention.md`) must be updated to the new morning-slot selection result: with a fresh state at 07:30, selection picks the first-declared morning question → `grateful-this-moment.md` with `id: grateful-this-moment`.
+- [ ] **Step 3: Convert the YAMLs** — read each of the four files at `/Users/rubberduck/GitHub/momentmaker/walktalkmeditate/src/content/questions/`, apply the mapping rules **and the curation gate above**, write the surviving `questions/spine.toml` (~55–60 entries; the dropped ones recorded as `# dropped:` comments at the bottom). Existing binary tests that referenced the placeholder spine (`bare_reflect_selects_from_spine_by_time_of_day` expects `morning-intention.md`) must be updated to the new morning-slot selection result: with a fresh state at 07:30, selection picks the first-declared **surviving** morning question (e.g. `grateful-this-moment.md` with `id: grateful-this-moment`, if it survives curation).
 
 - [ ] **Step 4: Run the full suite** — `cargo test` → all green (the updated integration expectation included).
 
@@ -165,7 +170,8 @@ addressee = "future-self"
 `questions/parts.toml`:
 ```toml
 name = "parts"
-description = "Talk to a part of you."
+description = "Talk to a part of you. Drawn from parts-work (IFS) — go gently; this frame can reach deep."
+# addressee "the-part": these are spoken TO a part of you. The spec's addressee vocabulary is open ("self · future-self · empty-chair · the-critic · …") — "the-part" extends it deliberately; it lands in thread frontmatter as-is.
 
 [[questions]]
 id = "part-speaking-loudest"
@@ -232,23 +238,35 @@ slot = "evening"
 `questions/held.toml`:
 ```toml
 name = "held"
-description = "One question, held for seven days. The artifact is the change across the week."
+description = "One question, held for seven days. The artifact is the change across the week — notice the drift between your answers, not any single one."
 
 [[questions]]
-id = "held-what-matters"
-text = "What matters most right now?"
+id = "held-avoiding-today"
+text = "What are you avoiding right now — and what did avoiding it cost you today?"
 cadence = "held:7"
 
 [[questions]]
-id = "held-avoiding"
-text = "What are you avoiding?"
+id = "held-mattered-unnoticed"
+text = "What mattered today that you almost didn't notice?"
 cadence = "held:7"
 
 [[questions]]
 id = "held-becoming"
-text = "Who are you becoming?"
+text = "Who are you becoming — and did today move you toward or away?"
+cadence = "held:7"
+
+[[questions]]
+id = "held-carrying"
+text = "What are you carrying today that isn't yours to carry?"
+cadence = "held:7"
+
+[[questions]]
+id = "held-enough"
+text = "What was enough, today?"
 cadence = "held:7"
 ```
+
+> Held questions are deliberately re-answerable — each carries a "today" anchor so day 5's answer can differ from day 1's. Re-serving a held question after its run completes starts a fresh run (advance_held resets when held_run is None).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -292,7 +310,7 @@ mod tests {
         let total = ids.len();
         ids.sort();
         ids.dedup();
-        assert_eq!(ids.len(), total, "question ids must be unique ACROSS packs (they share one file namespace)");
+        assert_eq!(ids.len(), total, "question ids must be globally unique: two packs sharing an id would collide in one thread-file namespace");
     }
 
     #[test]
@@ -318,6 +336,8 @@ In `src/main.rs`:
 - `reflect_choice`'s spine-loading line (`Pack::from_toml(SPINE_TOML)`) becomes `let pack = crate::packs::by_name(&cfg.default_pack);` — which requires threading `cfg` (or just `&cfg.default_pack`) into `reflect_choice(base, byo, time, default_pack: &str)`. Update both callers (`reflect`, `run_live_session`). Delete the now-unused `SPINE_TOML` const from main.rs (packs.rs owns the data).
 - The `handle_download(None)` arm (currently treated as `models`): change `talk download` **with no target** to LIST instead of fetch:
 
+Note this CHANGES no-arg behavior (was fetch-models, becomes list — the current match arm is `Some("models") | None` and must be split).
+
 ```rust
         None => {
             println!("installed packs:");
@@ -340,6 +360,10 @@ In `src/main.rs`:
 ```
 
 (The `#[cfg(not(feature = "download"))]` stub keeps its current behavior for explicit targets but should also print the pack list for no-arg — structure the function so the pack list is unconditional and only the models section is gated.)
+
+Examen being all-evening is fine: selection's slot filter only applies when the active slot has matching candidates, so at other hours all examen questions compete normally.
+
+Held-run hygiene: when state.held_run is Some but selection returns a DIFFERENT id (the run's question isn't in the active pack — e.g. default_pack switched mid-run), clear held_run and print one line: "your held run paused — it lives in the `held` pack". Switching packs abandons a held run by design; document that the T2 uniqueness test is authoring-time only (downloaded future packs are not runtime-checked).
 
 - [ ] **Step 4: Integration test** — add to `tests/integration.rs`:
 
@@ -423,6 +447,8 @@ fn thread_lists_questions_by_recency() {
 
 (Check `Frontmatter` field names against `crates/talk-core/src/frontmatter.rs` — `slug`/`entries`/`last` exist per the Plan-1 schema; `entries` is numeric.)
 
+The .md extension filter also excludes the `.raw/` subdirectory entry (a dir has no .md extension), and `base` always exists by the time print_thread runs (main ensures it). Helper note: extract the frontmatter-scan iteration shared with find_by_question into a small `existing_threads(base)` helper here — T10 reuses it.
+
 - [ ] **Step 3: Run** — `cargo test thread` → PASS (this + the existing collision test). **Step 4: Commit** — `git commit -am "feat: thread list view (recency-sorted, empty state)"`
 
 ---
@@ -434,7 +460,7 @@ fn thread_lists_questions_by_recency() {
 - Modify: `src/main.rs` (`talk streak` + credit after successful writes)
 - Test: unit in `src/streak.rs` + `tests/integration.rs`
 
-Port `../meditate-cli/src/streak.rs` with two adaptations: (1) **credit = a saved entry** (writing is the practice — no minimum-seconds rule; ephemeral never credits because it never saves); (2) the file is **`.streak.toml`** (dot-prefixed, like `.state.json`, so vault sync/indexing skip it) and is written `0600`. Keep meditate's `fs2` exclusive-lock read-modify-write and its backward-clock tolerance verbatim.
+Port `../meditate-cli/src/streak.rs` with two adaptations: (1) **credit = a saved entry** (writing is the practice — no minimum-seconds rule; ephemeral never credits because it never saves); (2) the file is **`.streak.toml`** (dot-prefixed, like `.state.json`, so vault sync/indexing skip it) and is written `0600`. Keep meditate's `fs2` exclusive-lock read-modify-write and its backward-clock tolerance verbatim. Product note: the display is an archive of consistency, not a pressure mechanic — user copy says "run", entries lead, and a break never erases history. (STREAK_FILE is deliberately ".streak.toml" — dot-prefixed unlike meditate's "streak.toml" — so vault sync and Obsidian indexing skip it; don't copy the constant verbatim from the port source.)
 
 - [ ] **Step 1: Failing unit tests + implementation**
 
@@ -591,15 +617,16 @@ mod tests {
             if s.entries == 0 {
                 println!("No reflections yet — run `talk` to start.");
             } else {
-                println!("current {} day{} · longest {} · {} entries",
+                println!("{} reflection{} · current run {} day{} · longest {}",
+                    s.entries, if s.entries == 1 { "" } else { "s" },
                     s.current_streak, if s.current_streak == 1 { "" } else { "s" },
-                    s.longest_streak, s.entries);
+                    s.longest_streak);
             }
             return Ok(());
         }
 ```
 
-Credit after every **successful non-ephemeral write**, in exactly two places: (a) `run_and_report` — after `run(...)` returns `Some(path)`, `if let Some(day) = streak::civil_day(r.date) { let _ = streak::record_entry(r.base, day); }`; (b) `run_live_session` — after `write_entry` returns `Some(path)`, same call with the session `date`. (Streak failures never block the save — `let _ =`.)
+Credit after every **successful non-ephemeral write**, in exactly two places: (a) `run_and_report` — after `run(...)` returns `Some(path)`, `if let Some(day) = streak::civil_day(r.date) { let _ = streak::record_entry(r.base, day); }`; (b) `run_live_session` — after `write_entry` returns `Some(path)`, same call with the session `date`. (Streak failures never block the save — `let _ =`.) Placement matters: in run_live_session the credit sits strictly AFTER T8's retry loop succeeds (after the loop's `break w`), so a retried write credits once and the clipboard/discard exits credit nothing (and intentionally skip the reflect rotation save — a failed write never burns the question; this is documented behavior).
 
 - [ ] **Step 3: Integration test**
 
@@ -611,7 +638,7 @@ fn streak_credits_consecutive_days() {
     talk(dir.path(), &["journal", "--from-text", "day two", "--date", "2026-06-09", "--time", "08:00"]);
     let out = talk(dir.path(), &["streak"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("current 2 days"), "{stdout}");
+    assert!(stdout.contains("current run 2 days"), "{stdout}");
 }
 
 #[test]
@@ -659,7 +686,27 @@ with `#[cfg(test)]` tests in main.rs (the binary has a unit-test module preceden
     }
 ```
 
-- [ ] **Step 2: Wire** — `ReflectChoice` gains `held_day: Option<u32>` (computed inside `reflect_choice` BEFORE `record_served`/`advance_held`, only for the spine-selection arm; BYO → `None`). In `run_live_session`: `held_label: choice.as_ref().and_then(|c| c.held_day).map(|d| format!("held {} day{}", d, if d == 1 { "" } else { "s" }))` — note `LiveConfig.held_label` is `Option<&str>`, so format into a `let` binding that outlives the config. Close provenance: `format!("entry {}{}", n, choice.held_day.map(|d| format!(" · held {d} days")).unwrap_or_default())`.
+- [ ] **Step 2: Wire** — `ReflectChoice` gains `held_day: Option<u32>` (computed inside `reflect_choice` BEFORE `record_served`/`advance_held`, only for the spine-selection arm; BYO → `None`). In `run_live_session`: `held_label: choice.as_ref().and_then(|c| c.held_day).map(|d| format!("held {} day{}", d, if d == 1 { "" } else { "s" }))` — note `LiveConfig.held_label` is `Option<&str>`, so format into a `let` binding that outlives the config. Close provenance: `format!("entry {}{}", n, choice.held_day.map(|d| format!(" · held {d} days")).unwrap_or_default())`. Also thread held_day through `Report` so the `--from-text` path prints it: when `held_day` is `Some(d)`, run_and_report's path line becomes `→ {path} · held day {d}` — this makes the wiring integration-testable without a TTY.
+
+- [ ] **Step 2b: Close phrases (authored)** — the spec's close screen ends with a curated phrase; author them here as a constant in `src/live.rs` (rotated by entry count, so returning users don't see the same line twice in a row):
+
+```rust
+/// Curated close phrases (spec §7) — rotated by entry count.
+pub const CLOSE_PHRASES: &[&str] = &[
+    "Stillness carries forward.",
+    "Said out loud, it weighs less.",
+    "You showed up. That was the practice.",
+    "Let it settle.",
+    "The thread holds.",
+    "Nothing to fix. Just to hear.",
+    "The words keep working after you stop.",
+    "Come back when it tugs.",
+];
+```
+
+`show_close` callers pick `CLOSE_PHRASES[entry_count % CLOSE_PHRASES.len()]` instead of the current hardcoded phrase. The entry count on the close line is itself the gentle return-invite (the spec's 2–3-entry advisory): "entry 2" reads as a thread continuing, not a habit metric.
+
+Update T12's held test (fix 22 below) to also assert the provenance line.
 
 - [ ] **Step 3: Run + commit** — `cargo test` green → `git commit -am "feat: held-run label in live view + close provenance"`
 
@@ -709,25 +756,24 @@ Spec §8: opt-in — the main file omits the inline raw comment; the verbatim ra
     let (inline_raw, sidecar_raw) = if req.raw_sidecar { (None, raw) } else { (raw, None) };
 ```
 
-Use `inline_raw` for the `Entry`; after the successful `write_private` of the main file:
+Use `inline_raw` for the `Entry`. **Ordering is the atomicity contract:** compute the main path first, then write the SIDECAR first, then the main file. A sidecar failure thus aborts before the entry exists (the words stay in memory and T8's recovery loop runs — never a main file whose raw silently vanished). Create `.raw/` with perms AT creation (reuse `paths::ensure_base_dir(&raw_dir)?`, which uses `DirBuilder::mode(0o700)` — do NOT use create_dir_all + set_permissions, which reintroduces the umask window the base dir deliberately avoids).
 
 ```rust
+    // Compute the main path first, then write the sidecar BEFORE the main file.
     if let Some(r) = sidecar_raw {
         let raw_dir = req.base.join(".raw");
-        std::fs::create_dir_all(&raw_dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&raw_dir, std::fs::Permissions::from_mode(0o700))?;
-        }
+        crate::paths::ensure_base_dir(&raw_dir)?; // DirBuilder::mode(0o700) — perms at creation
         let side = raw_dir.join(path.file_name().expect("entry paths have file names"));
         let existing = std::fs::read_to_string(&side).unwrap_or_default();
         let appended = format!("{existing}## {} {}\n{r}\n\n", req.date, req.time);
         crate::paths::write_private(&side, &appended)?;
     }
+    // … then the existing main-file write_private (unchanged) follows here.
 ```
 
-All existing `WriteRequest` literals (writer tests, session.rs) gain `raw_sidecar: false`. `session::RunConfig` gains `raw_sidecar: bool` threaded from `cfg.raw_sidecar` at both call paths (`Report` struct + `run_live_session`'s `WriteRequest`). Config template documents it: `raw_sidecar = false  # true: verbatim raw goes to ~/talk/.raw/ (skipped by vault sync) instead of inline comments`.
+(The test is order-independent and stays as-is.)
+
+Full ripple (enumerated): `WriteRequest` gains `raw_sidecar` → set at session.rs's one internal literal (from `cfg.raw_sidecar`), the three writer.rs test literals (`false`), and run_live_session's literal (`cfg.raw_sidecar`). `RunConfig` gains `raw_sidecar` → set in main.rs's run_and_report construction (`r.raw_sidecar`), the session.rs test helper `cfg()` and its two inline test literals (`false`). `Report` gains `raw_sidecar` → set at its three main.rs construction sites (`cfg.raw_sidecar`). Six compile errors guide you if any site is missed. Config template documents it: `raw_sidecar = false  # true: verbatim raw goes to ~/talk/.raw/ (skipped by vault sync) instead of inline comments`.
 
 - [ ] **Step 3: Run + commit** — `cargo test` green → `git commit -am "feat: opt-in sidecar raw store (.raw/, 0700/0600)"`
 
@@ -765,6 +811,11 @@ fn ephemeral_leaves_zero_bytes_in_the_base_dir() {
     assert!(out.status.success());
     let entries: Vec<_> = std::fs::read_dir(dir.path().join("talk")).unwrap().flatten().collect();
     assert!(entries.is_empty(), "ephemeral persisted: {entries:?}");
+    // Scope: base-dir bytes only. The models cache and OS swap are explicitly out of scope (covered by the disclosure, not this test).
+    for name in [".state.json", ".streak.toml"] {
+        assert!(!dir.path().join("talk").join(name).exists(), "{name} written by ephemeral");
+    }
+    assert!(!dir.path().join("talk").join(".raw").exists(), ".raw/ written by ephemeral");
 }
 ```
 
@@ -777,7 +828,7 @@ result.raw.zeroize();
 result.clean.zeroize();
 ```
 
-(`LiveResult` fields are `String`s — zeroize them in `run_live_session` right after `show_released()?` and in the cancelled-ephemeral arm. This wipes the final joined transcript; intermediate STT buffers are out of safe-Rust reach and the threat boundary is stated in T9's disclosure.)
+(`LiveResult` fields are `String`s — zeroize them in `run_live_session` right after `show_released()?` and in the cancelled-ephemeral arm. `run_live_session` currently binds `let result` — make it `let mut result` so the buffers can be zeroized. This wipes the final joined transcript; intermediate STT buffers are out of safe-Rust reach and the threat boundary is stated in T9's disclosure.)
 
 - [ ] **Step 3: Run + commit** — `cargo test --test privacy` PASS (the test passes already if Plan 1–3 behavior holds — it should; the value is the *pinned guarantee*) → `git add Cargo.toml Cargo.lock src/live.rs src/main.rs tests/privacy.rs && git commit -m "feat: ephemeral zeroize + zero-bytes-to-disk guarantee test"`
 
@@ -848,19 +899,27 @@ pub fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
                     live::Recover::Retry => continue,
                     live::Recover::Clipboard => {
                         match live::copy_to_clipboard(&result.clean) {
-                            Ok(()) => { render::paint_plain(&["  copied — your words are safe on the clipboard.".to_string()])?; }
+                            Ok(()) => { render::paint_plain(&["  copied — note: clipboard managers and Universal Clipboard may keep or sync a copy.".to_string()])?; }
                             Err(ce) => { render::paint_plain(&[format!("  clipboard failed too: {ce} — try [r]etry")])?; continue; }
                         }
                         return Ok(Some(Ok(())));
                     }
-                    live::Recover::Discard => return Ok(Some(Ok(()))),
+                    live::Recover::Discard => {
+                        result.raw.zeroize();
+                        result.clean.zeroize();
+                        return Ok(Some(Ok(())));
+                    }
                 }
             }
         }
     };
 ```
 
-- [ ] **Step 3: Verify** — `cargo build --features listen` clean + clippy clean (the prompt path needs a TTY; verified manually by making the base dir read-only in a live run — an on-machine check, listed in the final sweep). Unit-test `copy_to_clipboard` lightly: on macOS dev machines `pbcopy` exists — `#[test] #[cfg(target_os = "macos")] fn clipboard_roundtrip() { copy_to_clipboard("x").unwrap(); }` (paste-back verification is manual; the test asserts the helper runs).
+Spec §13's "retry timeout → zeroize" is satisfied via the attempt cap rather than a wall clock (a TUI prompt has no idle timer): after 3 failures the prompt recommends clipboard, and Discard always zeroizes the in-memory transcript — recorded as the deviation.
+
+- [ ] **Step 3: Verify** — `cargo build --features listen` clean + clippy clean (the prompt path needs a TTY; verified manually by making the base dir read-only in a live run — an on-machine check, listed in the final sweep). Unit-test `copy_to_clipboard` lightly: on macOS dev machines `pbcopy` exists — `#[test] #[cfg(target_os = "macos")] fn clipboard_roundtrip() { if std::process::Command::new("pbcopy").stdin(std::process::Stdio::piped()).spawn().is_err() { return; } /* headless runner without a pasteboard — skip */ copy_to_clipboard("x").unwrap(); }` (paste-back verification is manual; the test asserts the helper runs).
+
+Also add an automated non-TTY test (to `tests/integration.rs`): make the base dir read-only (chmod 0o500) and run `talk journal --from-text x` → assert exit non-zero and stderr mentions the write failure. Restore perms after so tempdir cleanup works.
 
 - [ ] **Step 4: Commit** — `git commit -am "feat: write-error recovery (retry / clipboard / discard) in the live path"`
 
@@ -877,15 +936,15 @@ Three small §8/§11/§7 items:
 (a) **Disclosure (spec §8, "surfaced on first run"):** before the first non-ephemeral session ever starts, print once (then record in state):
 
 ```
-talk keeps everything local. one honest note: your verbatim words are stored
-as plaintext in ~/talk (inline raw comments — or ~/talk/.raw/ with
-raw_sidecar = true). if you point ~/talk at a cloud-synced folder, your words
-go to that cloud. `keep_raw = false` stores only the cleaned text. ephemeral
-(`talk unburden`) keeps nothing — though your terminal's scrollback and OS
-swap are beyond any app's reach.
+talk keeps everything local — your words land only in ~/talk on this machine.
+one honest note: the raw transcript is plaintext. if ~/talk lives in a
+cloud-synced folder (iCloud, Dropbox), that cloud sees your words.
+`keep_raw = false` stores only the cleaned text; `talk unburden` keeps
+nothing at all. clipboard recovery, if you ever use it, passes through the
+system clipboard. scrollback and OS swap are beyond any app's reach.
 ```
 
-Implementation: `State` gains `disclosed: bool` (serde default false). Add a helper `fn disclose_once(base: &Path) -> std::io::Result<()>` (load state → if `!disclosed`, eprint the note, set + `write_private` 0600). **Ordering matters, twice:** (1) it must fire only when a session actually proceeds — i.e. AFTER `require_text` in the `--from-text` arms and at the top of `run_live_session`'s session-shape branch — never before, or `talk journal` with no `--from-text` would write `.state.json` and break `missing_from_text_errors_without_writing`'s empty-dir assert; (2) it must fire BEFORE `reflect_choice` loads its own `State` copy, or reflect's later save (loaded pre-disclosure with `disclosed: false`) would clobber the flag. So: call `disclose_once` as the FIRST action of each non-ephemeral session arm (Journal/Reflect/bare, both text and live paths), before any other `State` load. Ephemeral (unburden/vent) never discloses — it writes nothing to disclose about. Integration test: first journal run's stderr contains "local"; a second run's doesn't; and `missing_from_text_errors_without_writing` still passes (no state written on the error path).
+Implementation: `State` gains `disclosed: bool` (serde default false). Add a helper `fn disclose_once(base: &Path) -> std::io::Result<()>` (load state → if `!disclosed`, print the note to STDOUT (it's a first-run feature, not an error), set + `write_private` 0600). **Ordering matters, twice:** (1) it must fire only when a session actually proceeds — i.e. AFTER `require_text` in the `--from-text` arms and at the top of `run_live_session`'s session-shape branch — never before, or `talk journal` with no `--from-text` would write `.state.json` and break `missing_from_text_errors_without_writing`'s empty-dir assert; (2) it must fire BEFORE `reflect_choice` loads its own `State` copy, or reflect's later save (loaded pre-disclosure with `disclosed: false`) would clobber the flag. So: in the --from-text arms, call disclose_once immediately AFTER require_text succeeds (require_text exits the process, and disclose_once must not touch disk on that error path); in run_live_session, call it at the top of the session-shape branch — in both cases BEFORE any other State load (reflect_choice's included), and BEFORE the models gate so the first thing a brand-new user ever sees is the disclosure, then the fetch offer. Ephemeral (unburden/vent) never discloses — it writes nothing to disclose about. Integration test: first journal run's stdout contains "local"; a second run's doesn't; and `missing_from_text_errors_without_writing` still passes (no state written on the error path).
 
 (b) **`talk download verify` (spec §11):** new arm in `handle_download`:
 
@@ -909,9 +968,9 @@ Implementation: `State` gains `disclosed: bool` (serde default false). Add a hel
         }
 ```
 
-Integration test (download feature): with `TALK_MODELS_DIR` pointing at a temp dir containing a wrong-content file under a manifest name, `talk download verify` exits non-zero and names the artifact.
+Integration test (download feature): with `TALK_MODELS_DIR` pointing at a temp dir containing a wrong-content file under a manifest name, `talk download verify` exits non-zero and names the artifact. The download-verify integration test must run with `--features download` (under default features the stub exits 2, not the asserted 1).
 
-(c) **First-run fetch offer (spec §7, scoped):** in `run_live_session`'s models-not-ready arm, when stdin is a TTY (`libc::isatty(0) == 1` — `libc` is already a unix dependency), prompt `models not downloaded (~30 MB, one time). download now? [y/N] `, read one stdin line; `y`/`Y` → run the same fetch loop as `talk download models`, then continue into the session; anything else → the existing exit(1) hint. Non-TTY keeps today's exact behavior (tests unaffected). Resumable-partial download is NOT implemented (a failed fetch re-runs from zero; the verify-cached-skip already makes re-runs cheap) — recorded as the spec §7 deviation for the doc-review to weigh.
+(c) **First-run fetch offer (spec §7, scoped):** in `run_live_session`'s models-not-ready arm, when stdin is a TTY (`libc::isatty(0) == 1` — `libc` is already a unix dependency, so no Cargo change for isatty), prompt `models not downloaded (~30 MB, one time). download now? [y/N] `, read one stdin line; `y`/`Y` → run the same fetch loop as `talk download models`, then continue into the session; anything else → the existing exit(1) hint. (~30 MB is the MEASURED total — moonshine 29.8 MB + silero 0.6 MB, pinned in Plan 2; the spec's "~60MB" was a pre-research estimate and the formatter is descoped.) Non-TTY keeps today's exact behavior (tests unaffected). Resumable-partial download is NOT implemented (a failed fetch re-runs from zero; the verify-cached-skip already makes re-runs cheap) — recorded as the spec §7 deviation for the doc-review to weigh.
 
 - [ ] Steps: failing integration tests for (a)+(b) → implement (a)(b)(c) → `cargo test` + `cargo test --features listen` green → `git commit -am "feat: first-run disclosure, download verify, first-run fetch offer"`
 
@@ -959,7 +1018,7 @@ pub fn near_match<'a>(q: &str, existing: &'a [String]) -> Option<&'a String> {
         .iter()
         .filter(|e| e.as_str() != q)
         .map(|e| (similarity(q, e), e))
-        .filter(|(s, _)| *s >= 0.6)
+        .filter(|(s, _)| *s >= 0.5) // 0.5: "what am i avoiding right now" vs "What am I avoiding?" = 4∩2/4∪2 = 0.5 — the canonical rephrase must clear the bar (verified by execution in review).
         .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(_, e)| e)
 }
@@ -989,7 +1048,9 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Wire (live only)** — in `run_live_session`'s Reflect arm, before `reflect_choice`, when `args.question` is `Some(q)`: collect existing questions (scan base-dir frontmatter, reusing the same iteration as `print_thread`/`find_by_question` — extract a small `fn existing_questions(base: &Path) -> Vec<String>` helper used by both); on `near_match` → stdin prompt `you've sat with "<existing>" before — continue that thread? [Y/n] ` (TTY only); `Y`/default → substitute the existing question string for `q` (the normal exact-match path then reuses its file). Non-TTY skips the prompt (current behavior).
+- [ ] **Step 2: Wire (live only)** — in `run_live_session`'s Reflect arm, before `reflect_choice`, when `args.question` is `Some(q)`: collect existing questions FROM BYO THREADS ONLY (frontmatter `pack == "byo"`) — pack/spine questions are served by id and must never be merged by a rephrase (two distinct examen questions can clear 0.5: "what did you receive today" vs "what did you give today"). Reuse the `existing_threads(base)` helper from T3 with a pack filter. On `near_match` → stdin prompt `you've sat with "<existing>" before — continue that thread? [Y/n] ` (TTY only); `Y`/default → substitute the existing question string for `q` (the normal exact-match path then reuses its file). Non-TTY skips the prompt (current behavior). near_match's max_by keeps the last of tied candidates — acceptable for a [Y/n] prompt; the user confirms.
+
+- [ ] **Step 2c: Guard the BYO slug namespace** — a BYO question whose derived slug matches `^\d{4}-\d{2}-\d{2}$` (a journal filename) is treated as always-taken in `reflect_choice` (forcing the collision hash-suffix), closing both orderings of the BYO↔journal collision (a journal append onto a reflect-frontmatter file would corrupt it; the sidecar would merge raw streams). Unit-test: `derive_slug_unique` on the question "2026 06 09" must NOT yield "2026-06-09".
 
 - [ ] **Step 3: Run + commit** — `cargo test -p talk-core matchq` + full suites green → `git commit -am "feat: BYO near-match offers to continue the existing thread"`
 
@@ -1036,12 +1097,14 @@ fn tampered_model_refuses_to_run() {
 - [ ] **Step 2: No-egress runtime test (macOS)** — append:
 
 ```rust
-/// Spec §14: a full session makes zero outbound connections. macOS: run the
-/// session under a deny-network sandbox profile; if the session path ever
-/// gained a network call, the sandbox would kill it and the run would fail.
+/// Spec §14: the TEXT pipeline makes zero outbound connections. macOS: run the
+/// --from-text session under a deny-network sandbox profile; if the text path
+/// ever gained a network call, the sandbox would kill it and the run would fail.
+/// (This exercises only the text pipeline — the FFI inference path is proven by
+/// the models-gated test below.)
 #[cfg(target_os = "macos")]
 #[test]
-fn session_runs_under_deny_network_sandbox() {
+fn text_pipeline_makes_no_network_calls_under_sandbox() {
     let home = tempfile::tempdir().unwrap();
     let out = Command::new("sandbox-exec")
         .args([
@@ -1057,9 +1120,29 @@ fn session_runs_under_deny_network_sandbox() {
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     assert!(std::fs::read_to_string(home.path().join("talk/2026-06-09.md")).unwrap().contains("No packets were harmed."));
 }
+
+/// The REAL inference stack (sherpa-onnx FFI: VAD + Moonshine) under deny-network.
+/// Models-present-gated: skips on runners without the cached models; runs in full
+/// on dev machines (where Plan 2 downloaded them). This is the spec §14 check that
+/// the FFI path makes zero outbound connections.
+#[cfg(all(target_os = "macos", feature = "listen"))]
+#[test]
+fn inference_stack_runs_under_deny_network_sandbox() {
+    // Canary: the sandbox must actually deny network, or this test proves nothing.
+    let canary = Command::new("sandbox-exec")
+        .args(["-p", "(version 1)(allow default)(deny network*)", "/usr/bin/curl", "--max-time", "3", "-s", "http://example.com"])
+        .output()
+        .unwrap();
+    assert!(!canary.status.success(), "sandbox-exec failed to deny network — the no-egress proof is void");
+    // … then run a tiny helper binary (examples/ffi_probe.rs or a #[ignore]-less
+    // sub-invocation of `talk` with a models-present check) that constructs
+    // Segmenter + Stt from the cached models and transcribes 2s of synthesized
+    // audio, under the same profile. Skip (return) if paths::models_dir() lacks
+    // the artifacts.
+}
 ```
 
-(`sandbox-exec` is deprecated-but-present on macOS; if it's ever removed the test fails loudly and gets ported, not silently skipped. Verified here.)
+(`sandbox-exec` is deprecated-but-present on macOS; if it's ever removed the test fails loudly and gets ported, not silently skipped. Verified here. Build a tiny `examples/ffi_probe.rs` — feature `listen`, `#[path]`-includes vad.rs + stt.rs like Plan 2's probes did — that loads models from a path argument, feeds 32k zero-samples + a 440 Hz tone, and prints `OK`; the `inference_stack_runs_under_deny_network_sandbox` test shells out to it under `sandbox-exec`, skipping (returning) when models are absent.)
 
 - [ ] **Step 3: CI** — create `.github/workflows/ci.yml`:
 
@@ -1076,11 +1159,11 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with: { components: clippy }
+      - uses: actions/checkout@<sha> # pin to the current v4 SHA at implementation time — look it up, don't trust this doc
+      - uses: dtolnay/rust-toolchain@<sha> # stable; pin to the current release SHA at implementation time — look it up, don't trust this doc
+        with: { toolchain: 1.96.0, components: clippy }
       - run: cargo test --workspace
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets -- -D warnings   # deterministic: pinned toolchain
       - name: no-egress (Linux netns)
         if: runner.os == 'Linux'
         run: |
@@ -1091,16 +1174,30 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo test --test privacy
 
+  # New clippy lints surface here without blocking the gate.
+  clippy-latest:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@<sha> # pin to the current v4 SHA at implementation time — look it up, don't trust this doc
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - run: cargo clippy --all-targets -- -D warnings
+
   listen-build:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@<sha> # pin to the current v4 SHA at implementation time — look it up, don't trust this doc
+      - uses: dtolnay/rust-toolchain@<sha> # stable; pin to the current release SHA at implementation time — look it up, don't trust this doc
       - run: cargo build --features listen
       - run: cargo test --features listen
 ```
 
 (Authored here; the runner behavior is verified on the first push — the one thing this environment can't execute. The MSRV check is deliberately not in CI yet: the 1.82 toolchain check is a release-time gate, documented in the plan, to keep CI fast.)
+
+Action/toolchain pinning: pin both `actions/checkout` and `dtolnay/rust-toolchain` by full commit SHA with trailing version comments. The gating clippy job runs on a pinned toolchain (`1.96.0`) so `-D warnings` is deterministic; the separate `clippy-latest` job runs `@stable` with `continue-on-error: true` so new lints surface without blocking. Policy: PRs that change Cargo.lock get a manual network-behavior review note (spec §14's bump audit).
+
+Linux CI honesty: the netns step also exercises **only the text pipeline** (`--from-text`, no models). The FFI no-egress proof is a macOS-dev-machine + release-checklist item (`inference_stack_runs_under_deny_network_sandbox`), recorded as such — not a CI gate.
 
 - [ ] **Step 4: Run what's runnable + commit** — `cargo test --test privacy` (bare + `--features listen`) green locally → `git add tests/privacy.rs .github/ && git commit -m "test: tamper + no-egress privacy proofs; ci workflow"`
 
@@ -1120,6 +1217,8 @@ jobs:
 | cleanup levels work; raw recoverable via `u`; diff-guard rejects over-edits | Plan-3 suite (moat + eval) |
 | core compiles `--no-default-features`, zero network in session | bare build (no features = no ureq/cpal) + T11 no-egress |
 | `held:7` serves one question across 7 days | NEW integration test (below) |
+| write-error recovery (§13) | non-TTY: read-only-dir test exits non-zero (T8); interactive r/c/d: on-machine check |
+| close phrase + entry provenance (§7) | CLOSE_PHRASES authored (T5); held-day line asserted in the held:7 test |
 | terminal restores on quit and panic | Screen RAII (Plan 2) + on-machine check |
 
 - [ ] **Step 1: The held:7 acceptance test** — add to `tests/integration.rs`:
@@ -1131,11 +1230,17 @@ fn held_seven_serves_one_question_across_days() {
     let talk_dir = dir.path().join("talk");
     std::fs::create_dir_all(&talk_dir).unwrap();
     std::fs::write(talk_dir.join("config.toml"), "default_pack = \"held\"\n").unwrap();
+    let mut out7 = String::new();
     for day in 1..=7 {
         let date = format!("2026-06-{:02}", day);
         let out = talk(dir.path(), &["--from-text", "held words", "--date", &date, "--time", "12:00"]);
         assert!(out.status.success());
+        if day == 7 {
+            out7 = String::from_utf8_lossy(&out.stdout).into_owned();
+        }
     }
+    // The day-7 run's path line carries the held-run provenance (T5).
+    assert!(out7.contains("held day 7"), "day-7 provenance line:\n{out7}");
     // All seven landed in ONE held question's file, as seven dated sections.
     let files: Vec<_> = std::fs::read_dir(&talk_dir).unwrap().flatten()
         .map(|e| e.path())
@@ -1163,7 +1268,7 @@ fn held_seven_serves_one_question_across_days() {
 ## Self-Review (completed during authoring)
 
 - **Spec coverage (Plan-4 scope):** real 65-spine vendored from the named source §9 (T1) · four flagship packs + registry + `default_pack` §9/§12 (T2) · `talk download` no-arg lists installed §7 (T2) · thread list + empty state §7 (T3) · streak port §12 (T4) · held label + close provenance §7 (T5) · sidecar raw store §8 (T6) · ephemeral zeroize + zero-bytes test §7/§14 (T7) · write-error recovery retry/clipboard/discard §13 (T8) · first-run disclosure §8 + `download verify` §11 + first-run fetch offer §7 (T9) · BYO near-match §8 (T10) · model-tamper + no-egress tests §14 + CI (T11) · held:7 acceptance + full §17 sweep (T12). **Deliberate deviations, surfaced for review:** remote pack download deferred (no packs exist to fetch — YAGNI; the machinery exists); mlock skipped with stated rationale; resumable-partial model download not implemented (verify-cached-skip covers the practical case); streak-gated depth stays v2 per the spec's resolved decision.
-- **Placeholder scan:** T1's 65 entries are a mechanical conversion from a named, verified source (counts confirmed: 10/15/15/40) with binding rules + worked examples + a shape-asserting test — not invented content, not a placeholder. T2's flagship questions are fully authored in this document. All other tasks carry complete code.
+- **Placeholder scan:** T1's 65 entries are a mechanical conversion from a named, verified source (counts confirmed: 10/15/15/25; spine curated below 65 per the recorded user decision) with binding rules + worked examples + a shape-asserting test — not invented content, not a placeholder. T2's flagship questions are fully authored in this document. All other tasks carry complete code.
 - **Type consistency:** `Pack`/`Question` (existing core) consumed by `packs::{vendored, by_name}` · `reflect_choice(base, byo, time, default_pack)` updated at both call sites · `ReflectChoice.held_day: Option<u32>` ↔ `held_day_for(&Option<(String,u32)>, &str, &str)` ↔ `LiveConfig.held_label: Option<&str>` (formatted into an outliving binding) · `WriteRequest.raw_sidecar` + `RunConfig.raw_sidecar` threaded from `Config.raw_sidecar` · `streak::{Streak, civil_day, record_entry}` used in `run_and_report` (via `Report.date`) + `run_live_session` · `matchq::{similarity, near_match}` live-only · `Frontmatter.{slug, entries, last}` (verify field names at T3 implementation) · disclosure flag `State.disclosed` (serde default).
 - **Test seam discipline:** every interactive behavior (fetch offer, near-match prompt, write-error recovery) is TTY-gated, so the entire `--from-text` test suite is untouched by default; each gets either a pure-logic unit test, an integration test, or a named on-machine check.
 - **Execution venue:** everything is buildable AND verifiable in this environment (it's the user's Mac: sandbox-exec, pbcopy, TTY-via-`script` if needed) except the CI runner behavior (verified on first push) and the final feel-check of interactive prompts.
