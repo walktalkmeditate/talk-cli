@@ -61,7 +61,7 @@ mod tests {
     use super::*;
     use crate::source::FakeTranscript;
 
-    fn cfg(base: &Path, ephemeral: bool) -> RunConfig {
+    fn cfg(base: &Path, ephemeral: bool) -> RunConfig<'_> {
         RunConfig { base, date: "2026-06-08", time: "08:14", keep_raw: true, ephemeral }
     }
 
