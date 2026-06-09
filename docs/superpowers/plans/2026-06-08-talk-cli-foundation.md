@@ -284,13 +284,14 @@ mod tests {
 
     #[test]
     fn unique_slug_suffixes_on_collision() {
+        // "what am i avoiding in life today" → first 6 words → "what-am-i-avoiding-in-life".
         let plain = derive_slug_unique("what am i avoiding in life today", |_| false);
-        assert_eq!(plain, "what-am-i-avoiding-in");
+        assert_eq!(plain, "what-am-i-avoiding-in-life");
         let collided = derive_slug_unique(
             "what am i avoiding in life today",
-            |s| s == "what-am-i-avoiding-in",
+            |s| s == "what-am-i-avoiding-in-life",
         );
-        assert!(collided.starts_with("what-am-i-avoiding-in-"));
+        assert!(collided.starts_with("what-am-i-avoiding-in-life-"));
         assert_ne!(plain, collided);
     }
 
@@ -682,22 +683,46 @@ Expected: PASS (4 tests).
 Append to `crates/talk-core/src/cleanup.rs` (above the `#[cfg(test)]` block):
 
 ```rust
-/// Apply spoken formatting commands deterministically.
+/// Apply spoken formatting commands deterministically. Padding the input with
+/// spaces lets a command at the phrase start or end match too (the replacements
+/// are space-delimited). Note: back-to-back identical commands ("new line new
+/// line") collapse to one — an accepted Plan-1 edge case.
 pub fn apply_spoken_commands(text: &str) -> String {
-    text.replace(" new paragraph ", "\n\n")
+    format!(" {} ", text)
+        .replace(" new paragraph ", "\n\n")
         .replace(" new line ", "\n")
         .replace(" period ", ". ")
         .replace(" comma ", ", ")
+        .trim()
+        .to_string()
 }
 
-/// Remove a self-correction: when a backtrack trigger appears, drop the words
-/// immediately preceding it (the spec's >3-word-reduction guard: only fire when
-/// at least 3 words precede the trigger, so we don't nuke a short true clause).
+/// Find `needle` in `hay` only at word boundaries (so the trigger "actually no"
+/// does NOT match inside "actually nobody"). ASCII-boundary check; English
+/// triggers only.
+fn find_word_bounded(hay: &str, needle: &str) -> Option<usize> {
+    let bytes = hay.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = hay[from..].find(needle) {
+        let pos = from + rel;
+        let before_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
+        let after = pos + needle.len();
+        let after_ok = after == bytes.len() || !bytes[after].is_ascii_alphanumeric();
+        if before_ok && after_ok { return Some(pos); }
+        from = pos + needle.len();
+    }
+    None
+}
+
+/// Remove a self-correction: when a backtrack trigger appears AS A WHOLE PHRASE,
+/// drop the words immediately preceding it (the spec's >3-word-reduction guard:
+/// only fire when at least 3 words precede the trigger, so we don't nuke a short
+/// true clause). Word-bounded so it never deletes content words it matched inside.
 pub fn apply_backtrack(text: &str) -> String {
     const TRIGGERS: &[&str] = &["scratch that", "actually no"];
     let mut result = text.to_string();
     for trigger in TRIGGERS {
-        while let Some(pos) = result.to_lowercase().find(trigger) {
+        while let Some(pos) = find_word_bounded(&result.to_lowercase(), trigger) {
             let before = result[..pos].trim_end();
             let after = &result[pos + trigger.len()..];
             let kept: Vec<&str> = before.split_whitespace().collect();
@@ -782,12 +807,28 @@ Add these tests inside the existing `mod tests`:
         assert!(!out.contains("yes"));
         assert!(out.contains("the answer is no"));
     }
+
+    #[test]
+    fn backtrack_does_not_fire_inside_a_word() {
+        // "actually no" must NOT match inside "actually nobody" (word-bounded).
+        let out = apply_backtrack("well actually nobody knows the truth");
+        assert!(out.contains("nobody"));
+        assert!(out.contains("the truth"));
+    }
+
+    #[test]
+    fn spoken_command_at_phrase_start_and_end() {
+        // Boundary commands are consumed (no stray "new"/"line" words survive);
+        // a boundary newline is trimmed, an interior one is kept (see test above).
+        assert_eq!(apply_spoken_commands("new line b"), "b");
+        assert_eq!(apply_spoken_commands("a new line"), "a");
+    }
 ```
 
 - [ ] **Step 4: Run the tests**
 
 Run: `cargo test -p talk-core cleanup`
-Expected: PASS (8 tests).
+Expected: PASS (10 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -1496,16 +1537,20 @@ mod tests {
     #[test]
     fn reflect_creates_then_appends_same_file() {
         let dir = tempfile::tempdir().unwrap();
-        let mk = |date: &str, clean: &str| WriteRequest {
-            base: dir.path(),
-            target: Target::Reflect {
-                id: "avoidance-core", question: "What am I avoiding?",
-                slug: "what-am-i-avoiding", pack: "examen", addressee: "self",
-            },
-            date, time: "08:14", raw: Some("um"), clean, keep_raw: true, ephemeral: false,
-        };
-        write_entry(&mk("2026-06-06", "First.")).unwrap();
-        let p = write_entry(&mk("2026-06-07", "Second.")).unwrap().unwrap();
+        // A generic fn (not a closure) so the returned WriteRequest's borrows
+        // tie to the inputs — closures can't express late-bound lifetimes.
+        fn mk<'a>(base: &'a Path, date: &'a str, clean: &'a str) -> WriteRequest<'a> {
+            WriteRequest {
+                base,
+                target: Target::Reflect {
+                    id: "avoidance-core", question: "What am I avoiding?",
+                    slug: "what-am-i-avoiding", pack: "examen", addressee: "self",
+                },
+                date, time: "08:14", raw: Some("um"), clean, keep_raw: true, ephemeral: false,
+            }
+        }
+        write_entry(&mk(dir.path(), "2026-06-06", "First.")).unwrap();
+        let p = write_entry(&mk(dir.path(), "2026-06-07", "Second.")).unwrap().unwrap();
 
         let text = std::fs::read_to_string(&p).unwrap();
         let (fm, _) = Frontmatter::parse(&text).unwrap();
@@ -1722,7 +1767,7 @@ mod tests {
     use super::*;
     use crate::source::FakeTranscript;
 
-    fn cfg(base: &Path, ephemeral: bool) -> RunConfig {
+    fn cfg(base: &Path, ephemeral: bool) -> RunConfig<'_> {
         RunConfig { base, date: "2026-06-08", time: "08:14", keep_raw: true, ephemeral }
     }
 
