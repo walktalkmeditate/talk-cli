@@ -6,6 +6,8 @@
 
 **Architecture:** `talk-core` owns the restraint **policy** (the `Formatter` trait, the per-level prompt, the always-safe `DeterministicFormatter`, the diff-guarded `guarded_format` call site, and the checked-in **eval set**) — all pure and CI-tested. The binary's `src/format/` is a thin **Candle** façade (`CandleFormatter`) behind a cargo `formatter` feature that loads a quantized Qwen2.5-0.5B-Instruct GGUF and implements that same trait. At runtime deterministic-Light still settles **instantly**; the LLM runs async on a worker thread and, *iff* it returns inside the swap window **and** passes the content-word guard, replaces the committing block via `settle::upgrade_committing` (never re-flowing settled text). Miss the window or fail the guard → deterministic-Light stays, permanently.
 
+**Scope of the LLM rewrite in Plan 3 — Light only.** The content-word guard (`guard_accepts`) requires the output to preserve *every* content word, so it accepts only meaning-preserving edits (caps/punctuation/filler) — exactly the **Light** level. **Medium** ("remove disfluencies, join fragments") and **High** ("paragraphs, bulleted lists") edit by *removing* content words, which the strict guard rejects by design. So Plan 3 routes **only Light** through the LLM; Medium/High behave as deterministic-Light this plan (their authored prompts ship for forward-compat). Making Medium/High actually function needs a **level-aware subsequence guard** (Medium permits output content-words to be an ordered *subsequence* of input — drops allowed, substitutions/additions/reorders/dropped-negations still forbidden), which is **deferred to a follow-on plan**. This keeps restraint airtight now and matches the spec's framing of Light as the realtime async enhancement.
+
 **Tech Stack:** Rust 1.82; `candle-core` + `candle-transformers` (pure-Rust ML, quantized Qwen2 GGUF, CPU) + `tokenizers` (behind the `formatter` feature); the Plan-2 `download` machinery (`ureq` + `sha2`) for the model assets. No new network surface — Candle is compute-only.
 
 **Origin spec:** `docs/superpowers/specs/2026-06-08-talk-cli-design.md` (§7 settle/async-swap, §10 formatter & restraint, §11 model integrity, §14 eval set). **Roadmap source:** `docs/superpowers/plans/2026-06-08-talk-cli-foundation.md` (Plan 3 entry). Note the roadmap's `upgrade_block` is stale — the real method is `settle::upgrade_committing`.
@@ -16,7 +18,7 @@
 
 This plan splits exactly like Plan 2 did:
 
-- **CI here (pure / no model):** Tasks **2–6** build and unit-test `talk-core`'s formatter policy + eval set, the config cleanup-level wiring, and the diff-guard seam in the non-interactive `session::run` path. They need no Candle, no model, no mic — `cargo test` proves them. They are **independent of the latency spike's result** and can land immediately.
+- **CI here (pure / no model):** Tasks **2–6** build and unit-test `talk-core`'s formatter policy + eval set, the config cleanup-level wiring, and the diff-guard seam in the non-interactive `session::run` path. They need no Candle, no model, no mic — `cargo test` proves them, and they are **independent of the latency spike's result** so they can land immediately. **Order within the CI group:** T2→T3→T4 are mutually independent, but **T6 depends on T5** (it calls `Config::cleanup_for`, introduced in T5) and on T3 (it calls `guarded_format`). Do T2–T5 before T6.
 - **Your machine (model + ML + interactive):** Tasks **1, 7–9** — the latency spike, the real Candle façade, the model download, and the live-loop async swap — need the GGUF model, CPU inference, and (for T9) a real session. Each says so and gives the exact on-machine check.
 
 **Dependency on Plan 2's audio half.** Tasks 7–9 build on the Plan-2 audio half (`src/listen/`, `src/download/`, `src/live.rs`, the `listen`/`download` features) that is verified on your machine. If that half isn't merged yet, do the CI tasks (2–6) now and run 1, 7–9 after Plan 2's audio half lands. Tasks 2–6 touch none of it.
@@ -63,16 +65,21 @@ This is a **measurement**, not shipped code. It answers the one question that ga
 Plan 2 created the `[features]` table (`listen`, `download`). Add `formatter` to it and the three optional deps. Use these exact lines:
 
 ```toml
-# Add to the existing [features] table:
-formatter = ["dep:candle-core", "dep:candle-transformers", "dep:tokenizers"]
+# Add to the existing [features] table — formatter pulls in `download` so the
+# verify-before-load machinery (T8) compiles whenever the formatter is enabled:
+formatter = ["download", "dep:candle-core", "dep:candle-transformers", "dep:tokenizers"]
 
-# Add to [dependencies]:
-candle-core = { version = "0.9.2", optional = true }          # crates.io stable; main is ahead (0.10.x) — pin to a released tag
-candle-transformers = { version = "0.8.3", optional = true }  # provides models::quantized_qwen2
-tokenizers = { version = "0.23.1", optional = true }          # Tokenizer::from_file
+# Add to [dependencies] — candle-core and candle-transformers MUST share the same
+# minor or Cargo links two incompatible candle-core copies (from_gguf then sees a
+# 0.9 Content where it wants 0.8 — a type mismatch that won't compile):
+candle-core = { version = "0.9.2", optional = true }            # crates.io stable; main is ahead (0.10.x)
+candle-transformers = { version = "0.9.2", optional = true }    # MUST match candle-core's minor; provides models::quantized_qwen2
+tokenizers = { version = "0.23.1", optional = true }            # Tokenizer::from_file (local-file load only)
 ```
 
-> **Pin step (do this first, on your machine):** confirm the latest released `candle-core`/`candle-transformers`/`tokenizers` on crates.io and that they build on Rust 1.82 (neither declares an MSRV; 1.82 is known-good). Pin exact patch versions and record them in a comment. Read `candle-examples/examples/quantized-qwen2-instruct/main.rs` at the matching tag — it is the authoritative reference for every Candle symbol in this plan. Use `quantized_qwen2`, **not** `quantized_llama` (the latter has a wrong-RoPE issue for Qwen2, k2/candle #3410).
+> **Pin step (do this first, on your machine):** run `cargo +1.82 build --features formatter` and confirm a SINGLE `candle-core` resolves (`cargo tree -p candle-core` shows one version) — version skew between `candle-core` and `candle-transformers` is the #1 Candle build failure. Pin both to the same released minor (0.9.2 above; bump together if you move). Read `candle-examples/examples/quantized-qwen2-instruct/main.rs` at the matching tag — the authoritative reference for every Candle symbol here. Use `quantized_qwen2`, **not** `quantized_llama` (wrong RoPE for Qwen2, candle #3410).
+>
+> **Network audit (privacy — spec §11/§14):** the `formatter` deps are compute-only, but verify it: `cargo tree -e features --features formatter | grep -Ei 'hf.?hub|reqwest|^.*\bhttp\b'` must show **no** `hf-hub`/`http`/network feature on `candle-*` or `tokenizers` (the session path stays zero-network even with `formatter` on; `Tokenizer::from_file` is local-only and `tokenizers`' `http`/`hf-hub` features are off by default — assert they stay off). Do **not** blanket `default-features = false` on `tokenizers` — that drops `onig`, which Qwen's pretokenizer needs.
 
 - [ ] **Step 2: Download the model assets (manual, one-time)**
 
@@ -123,8 +130,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let content = gguf_file::Content::read(&mut file)?;
     let mut model = ModelWeights::from_gguf(content, &mut file, &device)?;
     let tokenizer = Tokenizer::from_file(tok).map_err(|e| e.to_string())?;
-    let eos = *tokenizer.get_vocab(true).get("<|im_start|>assistant").unwrap_or(&0);
-    let _ = eos;
     let eos = *tokenizer.get_vocab(true).get("<|im_end|>").ok_or("no <|im_end|>")?;
     println!("cold load: {} ms", load0.elapsed().as_millis());
 
@@ -136,7 +141,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ids: Vec<u32> = tokenizer.encode(prompt, true).map_err(|e| e.to_string())?.get_ids().to_vec();
 
         let t0 = Instant::now();
-        model.clear_kv_cache();
+        // No clear_kv_cache() — it doesn't exist in candle-transformers 0.9.x;
+        // forward(&input, 0) (the prefill below) resets the KV cache for each phrase.
         let mut lp = LogitsProcessor::from_sampling(0, Sampling::ArgMax);
         let input = Tensor::new(ids.as_slice(), &device)?.unsqueeze(0)?;
         let logits = model.forward(&input, 0)?.squeeze(0)?;
@@ -160,7 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-> Confirm `ModelWeights::from_gguf(content, &mut file, &device)`, `model.forward(&input, pos)` (returns last-position logits), `model.clear_kv_cache()`, and `LogitsProcessor::from_sampling(seed, Sampling::ArgMax)` against the pinned `quantized-qwen2-instruct` example. ArgMax = deterministic decode (restraint: no sampling randomness).
+> Confirm `ModelWeights::from_gguf(content, &mut file, &device)`, `model.forward(&input, pos)` (returns last-position logits), and `LogitsProcessor::from_sampling(seed, Sampling::ArgMax)` against the pinned `quantized-qwen2-instruct` example. ArgMax = deterministic decode (restraint: no sampling randomness). The prefill `forward(&input, 0)` resets the KV cache per phrase — there is no `clear_kv_cache` at 0.9.x.
 
 - [ ] **Step 4: Measure on two CPUs and record the decision**
 
@@ -239,6 +245,8 @@ pub fn rewrite_prompt(level: Level, text: &str) -> RewritePrompt {
 }
 ```
 
+> The Medium/High prompts are authored here for forward-compatibility, but Plan 3 does **not** invoke the LLM at those levels (the strict content-word guard would reject their word-removing edits — see the Architecture "Light only" note and Task 3). They cost nothing to keep and document the intended policy for the follow-on subsequence-guard work.
+
 Add these tests to the `#[cfg(test)] mod tests` block in `cleanup.rs`:
 
 ```rust
@@ -287,7 +295,9 @@ git commit -m "feat(core): cleanup level parsing + constrained rewrite prompt"
 - Create: `crates/talk-core/src/format.rs`
 - Modify: `crates/talk-core/src/lib.rs` (`pub mod format;`)
 
-The seam every formatter implements, plus `guarded_format` — the moat applied at the **call site**: run the deterministic pre-layer (spoken commands, backtrack), then the formatter, then **accept the formatter's output only if the content-word guard passes**, else fall back to deterministic-Light. The returned text is *always* guard-safe, so a hallucinating LLM can never change meaning in a file. This consolidates the pre-layer that Plan 1 inlined into `session.rs` (and Plan 2 into `live.rs`) into one place.
+The seam every formatter implements, plus `guarded_format` — the moat applied at the **call site**: run the deterministic pre-layer (spoken commands, backtrack), then the formatter, then **accept the formatter's output only if the content-word guard passes**, else fall back to deterministic-Light. The returned text is *always* guard-safe, so a hallucinating LLM can never change meaning in a file. `guarded_format` is the single entry point for the **non-interactive** `session::run` path (T6). The live loop (T9) runs the pre-layer inline — synchronous pre-processing must finish before the async formatter thread is spawned — but calls the same `guard_accepts`/`deterministic_light` from `cleanup`, so the restraint logic lives in one module even though the call structure differs.
+
+**Guard strictness = Light only (see Architecture).** `guard_accepts` demands every content word survive, so it accepts only Light-grade edits. A Medium/High rewrite that *removes* words is rejected and falls back to deterministic-Light — which is why Plan 3 routes only Light to the LLM (T9). The `guard_rejects_a_dropped_negation_and_falls_back` test below already exercises the word-removal rejection that makes this true.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -382,7 +392,7 @@ mod tests {
 
     #[test]
     fn faithful_output_passes_the_guard_unchanged() {
-        assert_eq!(guarded_format(&Faithful, Level::Light, "um so i keep avoiding it"), "I keep avoiding it.");
+        assert_eq!(guarded_format(&Faithful, Level::Light, "um so i keep avoiding it"), "Keep avoiding it.");
     }
 }
 ```
@@ -409,7 +419,9 @@ git commit -m "feat(core): Formatter trait + diff-guarded format (the restraint 
 - Create: `crates/talk-core/src/eval.rs`
 - Modify: `crates/talk-core/src/lib.rs` (`pub mod eval;`)
 
-The checked-in eval set makes "the formatter never changes meaning" a **falsifiable** CI gate (spec §10/§14). Each fixture lists impermissible substrings a faithful cleanup must never introduce; `score` returns the fraction with zero impermissible edits. A faithful formatter scores **green (1.0)**; a deliberately over-editing mock **must score red (<1.0)** — that test is the proof the metric can fail. A third test shows the runtime guard makes even the bad mock safe (belt + suspenders).
+The checked-in eval set is a **regression harness** for known meaning-flip classes (sentiment swaps, dropped negations, intensity-softening). Each fixture lists impermissible substrings a faithful cleanup must never introduce; `score` returns the fraction with zero impermissible edits. A faithful formatter scores **green (1.0)**; a deliberately over-editing mock **must score red (<1.0)** — proof the metric can detect those classes. A third test shows the runtime guard makes even the bad mock safe (belt + suspenders).
+
+> **Honest scope of this CI gate.** It runs against *mock* formatters only — the real `CandleFormatter` needs the model and is your-machine-only, so CI never scores it. So this is a guard against *regressions in the known meaning-flip classes*, not a proof the real model is restrained. The real model's restraint is enforced at **runtime** by `guard_accepts` (fail-safe to deterministic-Light) and **spot-checked on-machine** in T7 Step 3 (which records `score(&CandleFormatter, …)` against `FIXTURES`). Expand `FIXTURES` whenever you observe a new over-edit class on-machine.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -442,6 +454,7 @@ pub const FIXTURES: &[Fixture] = &[
     Fixture { raw: "the result felt good for everyone", impermissible: &["bad", "terrible"] },
     Fixture { raw: "i am not angry about it anymore", impermissible: &["i am angry", "still angry"] },
     Fixture { raw: "um so the thing i keep avoiding is the call", impermissible: &["easy", "trivial"] },
+    Fixture { raw: "i was furious about the whole thing", impermissible: &["annoyed", "frustrated", "upset"] }, // intensity-softening, not just sentiment-flip
 ];
 
 /// Fraction of fixtures the formatter cleans without an impermissible edit
@@ -531,7 +544,7 @@ git commit -m "feat(core): checked-in restraint eval set (faithful green, over-e
 **Files:**
 - Modify: `src/config.rs`
 
-Spec §12: config pins a per-mode cleanup level; §7: the template documents each level with a one-line example so the choice is informed. Reflect defaults Light, journal defaults Medium.
+Spec §12: config pins a per-mode cleanup level; §7: the template documents each level with a one-line example so the choice is informed. Reflect defaults Light, journal defaults Medium. The defaults preserve the spec's intent, but in Plan 3 Medium/High resolve to deterministic-Light at runtime (the LLM enhances Light only — see Architecture); the config still parses and stores all four levels so the follow-on subsequence-guard plan activates Medium/High without a config change.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -590,7 +603,7 @@ impl Config {
              default_pack = \"{pack}\"\n\
              # cleanup levels: none · light · medium · high\n\
              reflect_cleanup = \"{rc}\"        # light: caps + punctuation + leading filler. \"um so i guess\" → \"I guess.\"\n\
-             journal_cleanup = \"{jc}\"       # medium: + disfluencies/false-starts removed, fragments joined\n",
+             journal_cleanup = \"{jc}\"       # medium/high: deterministic-only in v1 (LLM enhances light); full LLM rewrite is future work\n",
             mode = d.default_mode, keep = d.keep_raw,
             silence = d.auto_end_silence_seconds, pack = d.default_pack,
             rc = d.reflect_cleanup, jc = d.journal_cleanup,
@@ -650,6 +663,8 @@ git commit -m "feat: per-mode cleanup level in config (documented template)"
 - Modify: `src/main.rs`
 
 The Plan-1 roadmap requires `guard_accepts` wired into the session path **before** any LLM rewrite. Route `session::run`'s commit through `guarded_format` via an injected `&dyn Formatter` (defaulting to `DeterministicFormatter`). Behavior is byte-identical for the default (deterministic always passes the guard), but the seam now exists and is provably safe — an over-editing formatter cannot corrupt a file.
+
+> **Depends on Task 5** (`Config::cleanup_for`) and Task 3 (`guarded_format`/`DeterministicFormatter`). Do T2–T5 first.
 
 - [ ] **Step 1: Update session.rs**
 
@@ -748,9 +763,9 @@ fn run_and_report(base: &Path, target: Target, date: &str, time: &str, text: &st
 }
 ```
 
-Update the four `run_and_report` call sites to pass the level from config:
+Update the four `run_and_report` call sites to pass the level:
 - Journal (`Command::Journal`, line ~35): append `, cfg.cleanup_for("journal")`.
-- Unburden/Vent (line ~39): append `, cfg.cleanup_for("journal")`.
+- Unburden/Vent (line ~39): append `, talk_core::cleanup::Level::None`. Ephemeral shows text momentarily then discards it — spending any formatting (let alone LLM inference, T9) on text that is never saved is wasted work. `guarded_format` with `Level::None` returns the pre-processed text directly (spoken commands + backtrack still apply), which is the right transient display for "this keeps nothing."
 - Bare-`talk`-journal branch (line ~50): append `, cfg.cleanup_for("journal")`.
 - Inside `reflect` (line ~88): append `, cfg.cleanup_for("reflect")`.
 
@@ -787,7 +802,8 @@ The thin Candle façade behind the `formatter` feature: load the quantized Qwen2
 Create `src/format/mod.rs`:
 
 ```rust
-use std::cell::RefCell;
+use std::path::Path;
+use std::sync::Mutex;
 use std::fs::File;
 use candle_core::quantized::gguf_file;
 use candle_core::{Device, Tensor};
@@ -801,11 +817,13 @@ const MAX_NEW_TOKENS: usize = 96;
 
 /// On-device constrained rewrite via a quantized Qwen2.5-0.5B-Instruct GGUF.
 /// Restraint is enforced twice: argmax decoding (no sampling randomness) here, and
-/// the content-word diff-guard at the call site (`guarded_format`). One session =
-/// one thread, so `RefCell` around the model (whose `forward` needs `&mut`) is fine
-/// and keeps `format(&self, …)` matching the trait.
+/// the content-word diff-guard at the call site (`guarded_format`). The model sits
+/// behind a `Mutex` (its `forward` needs `&mut`) so `CandleFormatter` is `Send +
+/// Sync` from the start — the live loop (T9) shares it with a worker thread via
+/// `Arc<dyn Formatter + Send + Sync>`. One phrase formats at a time, so the lock is
+/// uncontended.
 pub struct CandleFormatter {
-    model: RefCell<ModelWeights>,
+    model: Mutex<ModelWeights>,
     tokenizer: Tokenizer,
     device: Device,
     eos: u32,
@@ -814,8 +832,9 @@ pub struct CandleFormatter {
 impl CandleFormatter {
     /// `gguf` = quantized model file; `tokenizer` = Qwen2.5 tokenizer.json (a
     /// SEPARATE asset, not bundled in the GGUF). Both MUST be SHA-256 verified by
-    /// the caller (T8) before this is constructed.
-    pub fn load(gguf: &str, tokenizer: &str) -> Result<CandleFormatter, String> {
+    /// the caller (T8) before this is constructed. Takes `&Path` (not `&str`) so a
+    /// non-UTF-8 models dir can't force a `to_str().unwrap()` panic at startup.
+    pub fn load(gguf: &Path, tokenizer: &Path) -> Result<CandleFormatter, String> {
         let device = Device::Cpu;
         let mut file = File::open(gguf).map_err(|e| e.to_string())?;
         let content = gguf_file::Content::read(&mut file).map_err(|e| e.to_string())?;
@@ -823,7 +842,7 @@ impl CandleFormatter {
         let tokenizer = Tokenizer::from_file(tokenizer).map_err(|e| e.to_string())?;
         let eos = tokenizer.get_vocab(true).get("<|im_end|>").copied()
             .ok_or_else(|| "tokenizer missing <|im_end|>".to_string())?;
-        Ok(CandleFormatter { model: RefCell::new(model), tokenizer, device, eos })
+        Ok(CandleFormatter { model: Mutex::new(model), tokenizer, device, eos })
     }
 
     fn generate(&self, level: Level, text: &str) -> Result<String, String> {
@@ -835,8 +854,9 @@ impl CandleFormatter {
         let ids: Vec<u32> = self.tokenizer.encode(prompt, true).map_err(|e| e.to_string())?
             .get_ids().to_vec();
 
-        let mut model = self.model.borrow_mut();
-        model.clear_kv_cache(); // each phrase is independent
+        let mut model = self.model.lock().unwrap();
+        // No clear_kv_cache() — absent in candle-transformers 0.9.x. The prefill
+        // forward(&input, 0) below resets the KV cache, so each phrase starts clean.
         let mut lp = LogitsProcessor::from_sampling(0, Sampling::ArgMax);
 
         // Prefill the whole prompt, then decode one token at a time.
@@ -872,7 +892,7 @@ impl Formatter for CandleFormatter {
 
 Add to `src/main.rs` (with the other `mod` lines): `#[cfg(feature = "formatter")] mod format;`
 
-> Confirm against the pinned `quantized-qwen2-instruct` example: `ModelWeights::from_gguf`, `forward(&input, pos)` returning **last-position** logits of shape `(1, vocab)` (hence `squeeze(0)`), `clear_kv_cache()`, `LogitsProcessor::from_sampling(seed, Sampling::ArgMax)`, and `tokenizer.get_vocab(true)`/`decode(skip_special=true)`. If `forward` returns full-sequence logits in your version, take the last row before `squeeze`.
+> Confirm against the pinned `quantized-qwen2-instruct` example: `ModelWeights::from_gguf`, `forward(&input, pos)` returning **last-position** logits of shape `(1, vocab)` (hence `squeeze(0)`), `LogitsProcessor::from_sampling(seed, Sampling::ArgMax)`, and `tokenizer.get_vocab(true)`/`decode(skip_special=true)`. If `forward` returns full-sequence logits in your version, take the last row before `squeeze`. (`clear_kv_cache` is intentionally **not** called — it doesn't exist at 0.9.x; the `index_pos == 0` prefill resets the cache.)
 
 - [ ] **Step 2: Build with the feature**
 
@@ -881,7 +901,7 @@ Expected: both compile cleanly on macOS. There are no unit tests for the inferen
 
 - [ ] **Step 3: Smoke-test against a real phrase (your machine)**
 
-Add a temporary `examples/format_probe.rs` that constructs `CandleFormatter::load(gguf, tok)` and prints `guarded_format(&fmt, Level::Light, "um so the thing i keep avoiding is the hard conversation")`. Run `cargo run --features formatter --example format_probe`. Confirm the output is clean, meaning-preserving prose (e.g. "The thing I keep avoiding is the hard conversation."), and that a deliberately tricky negation ("i never said i was fine") keeps its negation. Delete the example.
+Add a temporary `examples/format_probe.rs` that **verifies the assets first** (`download::verify(path, sha)` — never load unverified weights, per `CandleFormatter::load`'s own contract), then constructs `CandleFormatter::load(Path::new(gguf), Path::new(tok))` and prints `guarded_format(&fmt, Level::Light, "um so the thing i keep avoiding is the hard conversation")`. Run `cargo run --features formatter --example format_probe`. Confirm the output is clean, meaning-preserving prose (e.g. "The thing I keep avoiding is the hard conversation."), and that a deliberately tricky negation ("i never said i was fine") keeps its negation. **Also record `talk_core::eval::score(&fmt, Level::Light, talk_core::eval::FIXTURES)`** — the one CI-uncovered measurement of the *real* model's restraint; it should be `1.0`. Note the number in the Self-Review. Delete the example after.
 
 - [ ] **Step 4: Commit**
 
@@ -900,7 +920,9 @@ git commit -m "feat(format): CandleFormatter — quantized Qwen2.5-0.5B constrai
 
 Per spec §11: the formatter model is fetched once, **pinned SHA-256 verified before load**, then offline forever. Reuse the Plan-2 `download::fetch`/`verify` gate verbatim.
 
-> **HF redirect caveat (decide here).** Plan 2's `download::fetch` uses `.redirects(0)` (a redirect could downgrade HTTPS). HuggingFace `resolve/main` URLs **302-redirect to a CDN**, so they will fail that gate. **Recommended:** re-host the GGUF + tokenizer.json as assets on the project's own GitHub release (redirect-free, and it satisfies §11's "model host + pinned versions live in a lockfile so a fetch is reproducible") and pin those URLs. **Alternative:** relax `fetch` to follow redirects but refuse any non-`https://` redirect target — the pinned SHA-256 is the real integrity guarantee, so an HTTPS→HTTPS redirect can't substitute weights. Pick one and note it; the manifest below assumes re-hosted URLs.
+> **HF redirect caveat (decide here).** Plan 2's `download::fetch` uses `.redirects(0)` (a redirect could downgrade HTTPS). HuggingFace `resolve/main` URLs **302-redirect to a CDN**, so they will fail that gate. **Recommended:** re-host the GGUF + tokenizer.json as assets on the project's own GitHub release (redirect-free, and it satisfies §11's "model host + pinned versions live in a lockfile so a fetch is reproducible") and pin those URLs. **Alternative:** relax `fetch` to follow redirects but refuse any non-`https://` redirect target — the pinned SHA-256 is the real integrity guarantee, so an HTTPS→HTTPS redirect can't substitute weights.
+>
+> **Decision (recorded): option A — re-host on the project GitHub release.** The `FORMATTER_MODELS` URLs below are redirect-free release assets; HF `resolve/main` URLs must **not** be used directly (they fail Plan 2's `redirects(0)` gate). This keeps the `download::fetch` redirect policy unchanged and satisfies spec §11's reproducible-lockfile intent. If a future asset must come from a redirecting host, that is a deliberate policy change to `fetch` (the alternative above), not a silent per-URL workaround.
 
 - [ ] **Step 1: Add the formatter manifest**
 
@@ -983,10 +1005,14 @@ Wire the async upgrade into the live loop. On each committed phrase, determinist
 
 - [ ] **Step 1: Add a formatter handle to the loop**
 
-In `src/live.rs`, extend `LiveConfig` with an optional formatter and the level (the loop stays compilable without the `formatter` feature — when `None`, no swap happens and deterministic-Light is the final text):
+In `src/live.rs`, extend `LiveConfig` with an optional formatter and the level. The loop stays compilable without the `formatter` feature — when `formatter` is `None` (or `level != Light`), no swap happens and deterministic-Light is the final text. `CandleFormatter` is already `Send + Sync` (T7 uses a `Mutex`), so **no change to `src/format/mod.rs` is needed here**.
 
 ```rust
-const SWAP_WINDOW: Duration = Duration::from_millis(250); // from the T1 spike; widen to measured p95 if needed
+// From the T1 spike. If measured p95 > 250 ms, set this to that p95: the committing
+// block may linger longer (only SETTLED text is immutable), so a slower swap still
+// lands without ever re-flowing settled text. If p95 is multiple seconds, take the
+// T1 no-go branch (the realtime swap is disabled and this constant goes unused).
+const SWAP_WINDOW: Duration = Duration::from_millis(250);
 
 pub struct LiveConfig<'a> {
     pub mode: RMode,
@@ -995,19 +1021,47 @@ pub struct LiveConfig<'a> {
     pub cleanup: &'a str,
     pub ephemeral: bool,
     pub level: talk_core::cleanup::Level,
-    /// The async formatter (Some(CandleFormatter) with the feature + a verified
-    /// model; None otherwise → deterministic-Light only). Arc so the worker thread
-    /// can hold it; the trait object is Send + Sync because CandleFormatter's fields
-    /// are (model behind a Mutex — see below).
+    /// Some(CandleFormatter) with the `formatter` feature + a verified model; None
+    /// otherwise → deterministic-Light only. Arc + Send + Sync so the single worker
+    /// thread (Step 2) can hold it.
     pub formatter: Option<std::sync::Arc<dyn talk_core::format::Formatter + Send + Sync>>,
 }
 ```
 
-> `CandleFormatter` as written (T7) uses `RefCell`, which is `!Sync`. For the worker thread, swap that `RefCell<ModelWeights>` for `std::sync::Mutex<ModelWeights>` and `borrow_mut()` → `lock().unwrap()` so the type is `Send + Sync`. (One phrase formats at a time, so the Mutex is uncontended.) Make this change in `src/format/mod.rs` as part of this task.
+- [ ] **Step 2: One formatter worker; upgrade the committing block on guard-pass**
 
-- [ ] **Step 2: Spawn the formatter per phrase; upgrade on guard-pass**
+The async swap uses a **single long-lived worker thread** — not one thread per phrase (which leaked threads and kept inference running after cancel). The worker owns the `Arc<Formatter>`, reads jobs from a channel, and **drains to the newest queued job** before each inference so a fast talker can't build a backlog and stale phrases are skipped. The loop matches results to the current committing block by a monotonic `id`, so a late result for a superseded phrase is dropped.
 
-In `run_loop`, replace the `Event::Commit` arm so it settles deterministic-Light instantly **and** kicks off the async rewrite. Add a per-phrase results channel and an "in-flight" record. The commit arm:
+Near the top of `run_loop`, before the main loop, set up the worker (only when there's a real formatter to run):
+
+```rust
+    struct Job { id: u64, level: talk_core::cleanup::Level, pre: String }
+    struct Pending { id: u64, pre: String, deadline: Instant }
+
+    let (job_tx, res_rx) = match cfg.formatter.clone() {
+        Some(fmt) => {
+            let (jtx, jrx) = std::sync::mpsc::channel::<Job>();
+            let (rtx, rrx) = std::sync::mpsc::channel::<(u64, String)>();
+            std::thread::spawn(move || {
+                // recv() ends (Err) when job_tx drops at run_loop return → clean exit.
+                while let Ok(first) = jrx.recv() {
+                    let mut job = first;
+                    while let Ok(newer) = jrx.try_recv() { job = newer; } // newest-wins: skip stale
+                    let out = fmt.format(job.level, &job.pre);
+                    if rtx.send((job.id, out)).is_err() { break; } // loop gone
+                }
+            });
+            (Some(jtx), Some(rrx))
+        }
+        None => (None, None),
+    };
+    let mut pending: Option<Pending> = None;
+    let mut next_id: u64 = 0;
+```
+
+> Shutdown is implicit and non-blocking: when `run_loop` returns, `job_tx` drops, the worker's `recv()` errors, and the worker exits after finishing at most its current inference (≤ one phrase's latency). It holds only an `Arc` clone of the model, released on exit — so quitting is instant and nothing leaks. No `JoinHandle` to manage.
+
+Replace the `Event::Commit` arm so it settles deterministic-Light instantly **and** queues the async rewrite — **at Light only** (the one level the guard accepts; Medium/High and ephemeral's `Level::None` never queue):
 
 ```rust
                 Event::Commit(raw) => {
@@ -1016,49 +1070,55 @@ In `run_loop`, replace the `Event::Commit` arm so it settles deterministic-Light
                     let clean = talk_core::cleanup::deterministic_light(&pre);
                     settle.commit(&raw, &clean); // instant, locked-in text
 
-                    // Kick off the async upgrade for THIS committing block.
-                    if let Some(fmt) = cfg.formatter.clone() {
-                        let (ftx, frx) = std::sync::mpsc::channel::<String>();
-                        let (pre2, lvl) = (pre.clone(), cfg.level);
-                        std::thread::spawn(move || {
-                            let _ = ftx.send(fmt.format(lvl, &pre2));
-                        });
-                        pending = Some(Pending { pre, rx: frx, deadline: Instant::now() + SWAP_WINDOW });
+                    if let (Some(jtx), talk_core::cleanup::Level::Light) = (job_tx.as_ref(), cfg.level) {
+                        next_id += 1;
+                        let _ = jtx.send(Job { id: next_id, level: cfg.level, pre: pre.clone() });
+                        pending = Some(Pending { id: next_id, pre, deadline: Instant::now() + SWAP_WINDOW });
                     }
                 }
 ```
 
-Add the `Pending` type and a per-tick poll that applies the upgrade iff it arrives in time and passes the guard. Near the top of `run_loop` (with the other `let mut` state):
+In the per-tick body (after draining transcript events, before painting), apply any ready result that still matches the current committing block and beat its window:
 
 ```rust
-    struct Pending { pre: String, rx: std::sync::mpsc::Receiver<String>, deadline: Instant }
-    let mut pending: Option<Pending> = None;
-```
-
-And in the per-tick body (after draining transcript events, before painting):
-
-```rust
-        // Async LLM swap: apply iff it returned in time AND the guard passes. The
-        // committing block is still the one we kicked off for (a NEW commit clears
-        // `pending` via the commit arm above, so we never upgrade the wrong block).
-        if let Some(p) = pending.as_ref() {
-            match p.rx.try_recv() {
-                Ok(candidate) => {
+        // Async LLM swap: upgrade iff the result is for the CURRENT pending block,
+        // arrived within its window, and passes the content-word guard.
+        if let Some(rx) = res_rx.as_ref() {
+            while let Ok((id, candidate)) = rx.try_recv() {
+                if pending.as_ref().is_some_and(|p| p.id == id) {
+                    let p = pending.take().unwrap();
                     if Instant::now() <= p.deadline
                         && talk_core::cleanup::guard_accepts(&p.pre, &candidate) {
                         settle.upgrade_committing(&candidate); // no-op if already finalized
                     }
-                    pending = None;
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    if Instant::now() > p.deadline { pending = None; } // missed the window → keep deterministic
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => { pending = None; }
+                // id != current pending → a superseded phrase's result; drop it.
             }
         }
 ```
 
-> The `upgrade_committing` no-ops once the block has finalized (its window closed), so a late worker result can never mutate settled text — the settle machine enforces the invariant, the loop just tries. A brand-new `Event::Commit` reassigns `pending` (finalizing the prior committing block first via `settle::commit` → `finalize`), so a stale rewrite for the previous phrase is simply dropped.
+> **Newest-wins, and the dropped rewrite is intentional.** When a new phrase commits before the previous phrase's rewrite returns, `pending` is reassigned to the new block. The previous block was already finalized by the new `settle.commit` (→ `finalize`), so even if its rewrite arrived `upgrade_committing` would no-op — and the id check drops it anyway. Only the most-recent committing block is ever a swap candidate; superseded rewrites are discarded by design (they'd have nowhere to land). The worker's drain-to-newest means a backlog never builds.
+
+> **The last phrase must still get its chance (finish path).** Plan 2's `drain_until_done` (run after `[space]`) loops on `source.next()` and never reads `res_rx`, so without this the final phrase — the one the user is watching — could never upgrade. In the `Action::Finish` path, **after** `drain_until_done` returns and **before** the closing `settle.finalize()`, give the outstanding `pending` a bounded chance:
+> ```rust
+>         // Last phrase: wait up to one window for its rewrite before finalizing.
+>         if let (Some(p), Some(rx)) = (pending.take(), res_rx.as_ref()) {
+>             let wait_until = Instant::now() + SWAP_WINDOW;
+>             while Instant::now() < wait_until {
+>                 match rx.try_recv() {
+>                     Ok((id, candidate)) if id == p.id => {
+>                         if talk_core::cleanup::guard_accepts(&p.pre, &candidate) {
+>                             settle.upgrade_committing(&candidate);
+>                         }
+>                         break;
+>                     }
+>                     Ok(_) => {}                                   // a superseded result; ignore
+>                     Err(_) => std::thread::sleep(Duration::from_millis(10)),
+>                 }
+>             }
+>         }
+> ```
+> If you'd rather keep finish instant, document explicitly instead that the last phrase always stays deterministic-Light — but do not leave it silently broken.
 
 - [ ] **Step 3: Construct the formatter in main.rs**
 
@@ -1068,7 +1128,7 @@ In `src/main.rs`, where the live session is built (Plan 2 T11, when `--from-text
     #[cfg(feature = "formatter")]
     let formatter: Option<std::sync::Arc<dyn talk_core::format::Formatter + Send + Sync>> =
         match verified_formatter_paths() {
-            Ok((gguf, tok)) => match format::CandleFormatter::load(gguf.to_str().unwrap(), tok.to_str().unwrap()) {
+            Ok((gguf, tok)) => match format::CandleFormatter::load(&gguf, &tok) {
                 Ok(f) => Some(std::sync::Arc::new(f)),
                 Err(e) => { eprintln!("formatter disabled: {e}"); None }
             },
@@ -1078,7 +1138,7 @@ In `src/main.rs`, where the live session is built (Plan 2 T11, when `--from-text
     let formatter: Option<std::sync::Arc<dyn talk_core::format::Formatter + Send + Sync>> = None;
 ```
 
-Pass `formatter` and `level: cfg.cleanup_for(mode_str)` into the `LiveConfig` the loop receives. A missing/disabled formatter degrades gracefully to deterministic-Light — never a crash.
+(`gguf`/`tok` are `PathBuf` from `verified_formatter_paths`; `load` takes `&Path`, so pass them by reference — no `to_str().unwrap()` that would panic on a non-UTF-8 models dir.) Pass `formatter` and the per-mode `level` into the `LiveConfig` the loop receives: reflect → `cfg.cleanup_for("reflect")` (Light), journal → `cfg.cleanup_for("journal")` (Medium → deterministic, no LLM), and **ephemeral/unburden → `Level::None`** (no formatting on discarded text, matching T6). A missing/disabled formatter degrades gracefully to deterministic-Light — never a crash.
 
 - [ ] **Step 4: End-to-end on your machine**
 
@@ -1099,10 +1159,21 @@ git commit -m "feat: async LLM swap in the live loop (instant deterministic, gua
 
 ## Self-Review (completed during authoring)
 
-- **Spec coverage (Plan-3 scope):** formatter policy + prompt in `talk-core` §10 (T2) · the `Formatter` seam + diff-guarded `guarded_format` moat (content-word preservation, fail-safe to deterministic-Light/raw) §10 (T3) · the checked-in **eval set** with faithful-green / over-editing-red / guard-makes-safe, making restraint a test that can fail §10/§14 (T4) · per-mode cleanup level in config with a documented example diff §7/§12 (T5) · guard wired into the session path (the Plan-1 roadmap prerequisite) §10 (T6) · the **Candle 0.5B façade** behind a `formatter` feature, argmax decode, identity-on-error fallback §10/§13 (T7) · model fetch with **pinned SHA-256 verify-before-load** §11 (T8) · async swap via `settle::upgrade_committing` inside the window, settled text never re-flows, instant deterministic-Light layer §7 (T9) · the **latency spike** gating the realtime path §5/§7 (T1). **Correctly deferred to Plan 4:** real spine + flagship packs, ephemeral zeroize/mlock, sidecar raw store, streak/thread views, the sandboxed no-egress + model-tamper + ephemeral-zero-bytes tests, the first-run model-fetch UI. The roadmap's stale `upgrade_block` is corrected to `upgrade_committing` throughout.
-- **Placeholder scan:** the only deferrals are the two `sha256: "FILL_AT_PIN_TIME"` values (physically unknowable until the asset is hashed — T8 Step 3 pins them in one command; the verify code that consumes them is complete and a FILL guard refuses to load until pinned) and the **recorded spike numbers** (T1 — a measurement that can only happen on hardware; the example that produces them is complete). The Candle symbols are sourced from the `quantized-qwen2-instruct` example and marked "confirm against the pinned version," exactly as Plan 2 did for sherpa-onnx — version-sensitive bindings, not logic placeholders. **Spike numbers (M1 / x86): _to be recorded by you in T1 Step 4._**
-- **Type consistency:** `Level` (now live — `parse_level`/`rewrite_prompt`/`cleanup_for`/`guarded_format`/`score`/`CandleFormatter`/`LiveConfig` all use the same enum) · `RewritePrompt { system, user }` produced by `cleanup::rewrite_prompt`, consumed by `CandleFormatter::generate` · the `Formatter` trait (`format(&self, Level, &str) -> String`) implemented by `DeterministicFormatter`, the eval mocks, the `session.rs` `Flip` test, and `CandleFormatter` · `guarded_format(&dyn Formatter, Level, &str)` called identically from `session::run` and `live::run_loop` · `settle::upgrade_committing(&str) -> bool` (the existing method, no-op after finalize) used for the swap · `RunConfig`/`LiveConfig` gain `formatter` + `level` consistently · `download::{Artifact, fetch, verify}` (Plan 2) reused for `FORMATTER_MODELS`. All cross-task signatures line up.
-- **Execution venue:** T2–T6 are pure `talk-core` + config + the session seam — built and unit-tested in CI here (bare `cargo build` and `cargo test` with no features). T1, T7–T9 need the GGUF model, CPU inference, the Plan-2 audio half, and a mic; they are written against the cited Candle example and verified on your machine via the named checks. The `formatter` feature is off by default, so the lean binary and the zero-network session guarantee are preserved (Candle is compute-only; the model fetch lives behind `download`).
+- **Spec coverage (Plan-3 scope):** formatter policy + prompt in `talk-core` §10 (T2) · the `Formatter` seam + diff-guarded `guarded_format` moat (content-word preservation, fail-safe to deterministic-Light/raw) §10 (T3) · the checked-in **eval set** as a regression harness for known meaning-flip classes (faithful-green / over-editing-red / guard-makes-safe), with the real model spot-checked on-machine §10/§14 (T4) · per-mode cleanup level in config with a documented example diff §7/§12 (T5) · guard wired into the session path (the Plan-1 roadmap prerequisite) §10 (T6) · the **Candle 0.5B façade** behind a `formatter` feature, argmax decode, identity-on-error fallback §10/§13 (T7) · model fetch with **pinned SHA-256 verify-before-load** §11 (T8) · async swap via `settle::upgrade_committing` inside the window, settled text never re-flows, instant deterministic-Light layer §7 (T9) · the **latency spike** gating the realtime path §5/§7 (T1). **Scope note (resolved):** the LLM rewrite ships at **Light only** this plan; Medium/High are deterministic-only until a level-aware subsequence guard lands (deferred). **Correctly deferred to Plan 4:** real spine + flagship packs, ephemeral zeroize/mlock, sidecar raw store, streak/thread views, the model-fetch UI, and the **sandboxed no-egress + model-tamper + ephemeral-zero-bytes tests — which MUST run with AND without `--features formatter` (both emit zero outbound connections) and the tamper test MUST cover `FORMATTER_MODELS`** (the link-time check misses runtime HTTP, so the formatter deps need the runtime no-egress test). The roadmap's stale `upgrade_block` is corrected to `upgrade_committing` throughout.
+- **Product framing (spec carried this forward to planning):** the formatter is a **quality/satisfaction bet**, not the primary retention lever — the spec flags the 2–3-entry drop-off as the real success case, and that lever is question selection + the held-thread feel (Plan 4), not prettier text. Plan 3 keeps the bet's surface small and honest: deterministic-Light is always the instant, always-present experience; the LLM is an **opt-in, Light-only, off-by-default** enhancement that can never block or corrupt the save. The 491MB model + the solo-maintainer re-hosting/re-pinning obligation (T8) are accepted costs of an opt-in feature, not imposed on the default binary.
+- **Placeholder scan:** the only deferrals are the `sha256: "FILL_AT_PIN_TIME"` values (physically unknowable until the asset is hashed — T8 pins them in one command; the verify code is complete and the FILL guard refuses to load until pinned), the **recorded spike numbers** (T1 — hardware-only), and the **on-machine real-model eval score** (T7 Step 3). The Candle symbols are sourced from the `quantized-qwen2-instruct` example at the pinned tag — version-sensitive bindings, not logic placeholders. **To record on-machine: spike p50/p95 (M1 / x86) in T1 Step 4; `score(&CandleFormatter, Light, FIXTURES)` in T7 Step 3.**
+- **Type consistency:** `Level` (live — `parse_level`/`rewrite_prompt`/`cleanup_for`/`guarded_format`/`score`/`CandleFormatter`/`LiveConfig` all use the same enum) · `RewritePrompt { system, user }` produced by `cleanup::rewrite_prompt`, consumed by `CandleFormatter::generate` · the `Formatter` trait (`format(&self, Level, &str) -> String`) implemented by `DeterministicFormatter`, the eval mocks, the `session.rs` `Flip` test, and `CandleFormatter` · `guarded_format(&dyn Formatter, Level, &str)` is the entry point for `session::run`; `live::run_loop` runs the same `cleanup` pre-layer + `guard_accepts` inline (async split) · `CandleFormatter` is `Mutex<ModelWeights>` (Send + Sync) and `load(&Path, &Path)` from the start — no T7→T9 churn, no startup panic · `settle::upgrade_committing(&str) -> bool` (no-op after finalize) drives the swap · `RunConfig`/`LiveConfig` gain `formatter` + `level` consistently · `download::{Artifact, fetch, verify}` (Plan 2) reused for `FORMATTER_MODELS`, and the `formatter` feature pulls in `download` so the verify path compiles. Candle pins share one minor (0.9.2); `clear_kv_cache` is not called (absent at 0.9.x; prefill resets the cache).
+- **Execution venue:** T2–T6 are pure `talk-core` + config + the session seam — built and unit-tested in CI here (bare `cargo build` and `cargo test` with no features). T1, T7–T9 need the GGUF model, CPU inference, the Plan-2 audio half, and a mic; verified on your machine via the named checks. The `formatter` feature is off by default, so the lean binary and the zero-network session guarantee are preserved (Candle + tokenizers are compute-only, audited via `cargo tree` in T1; the model fetch lives behind `download`).
+
+## Review decisions (resolved 2026-06-09)
+
+A multi-persona `/ce-doc-review` (coherence, feasibility, product, security, scope, adversarial) ran on the draft and surfaced 3 P0s + ~17 more; all were auto-resolved with best judgment:
+
+- **P0 — guard vs Medium/High** (adversarial): the content-word guard rejects every Medium/High rewrite by design. **Resolved:** the LLM ships at **Light only**; Medium/High are deterministic-only; the level-aware subsequence guard is deferred (Architecture + T2/T3/T5/T9).
+- **P0 — `clear_kv_cache` absent** at candle-transformers 0.9.x (feasibility): **removed** the calls; the `index_pos == 0` prefill resets the cache (T1, T7).
+- **P0 — Candle version skew** (feasibility): `candle-transformers` pinned to **0.9.2** to match `candle-core` 0.9.2 (T1).
+- **P1s:** test asserted `"I keep avoiding it."` → `"Keep avoiding it."` (T3); `CandleFormatter` is **`Mutex` from the start** (T7, no T7→T9 churn); T6's dependency on T5 declared; **single drain-to-newest worker** replaces per-phrase spawn (T9, no thread leak / post-cancel inference); **finish-path polls `pending`** so the last phrase can upgrade (T9); `tokenizers` network surface audited via `cargo tree` (T1); smoke-probe **verifies before load** (T7); product 2–3-entry framing acknowledged (above).
+- **P2/P3:** `formatter` feature pulls in `download` (T1); ephemeral runs **`Level::None`** (T6/T9); T3's "consolidation" claim scoped to the session path; the stale-rewrite drop documented (T9); `SWAP_WINDOW` tied to the spike (T9); eval "test that can fail" reframed honestly (T4); no-egress test must run `--features formatter` (above); HF-redirect **decision recorded** (option A, T8); `load` takes `&Path` (no non-UTF-8 panic, T7).
 
 ---
 
