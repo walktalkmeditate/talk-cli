@@ -1,5 +1,5 @@
-/// Cleanup intensity. Plan 3 wires this into the LLM rewrite; Plan 1 ships deterministic-Light only.
-#[allow(dead_code)]
+/// Cleanup intensity. Plan 3 wires this into the LLM rewrite; deterministic-Light
+/// is the instant, always-present layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level { None, Light, Medium, High }
 
@@ -127,6 +127,40 @@ fn ensure_terminal(text: &str) -> String {
     }
 }
 
+/// Parse a config string into a `Level` (defaults to Light — the safe, restrained
+/// default — on anything unrecognized).
+pub fn parse_level(s: &str) -> Level {
+    match s.trim().to_lowercase().as_str() {
+        "none" => Level::None,
+        "medium" => Level::Medium,
+        "high" => Level::High,
+        _ => Level::Light,
+    }
+}
+
+/// The constrained-rewrite prompt for the LLM formatter (consumed by the Candle
+/// façade in T7). `system` is hard restraint that holds at every level; the
+/// per-level rule only *widens* which edits are permitted. Restraint is the
+/// wording, so it lives here in the pure core, not in the inference façade.
+pub struct RewritePrompt {
+    pub system: String,
+    pub user: String,
+}
+
+pub fn rewrite_prompt(level: Level, text: &str) -> RewritePrompt {
+    let restraint = "You clean up raw voice transcripts. Return ONLY the cleaned text, nothing else — no preamble, no quotes. NEVER change meaning: never swap a word for a different one, never add words that change meaning, never drop a negation, never reorder clauses. When unsure, leave it as it is.";
+    let rule = match level {
+        Level::None => "Return the text exactly as given.",
+        Level::Light => "Fix only capitalization and punctuation, and drop leading filler (um, uh, like). Remove no other words.",
+        Level::Medium => "Also remove disfluencies and false starts and join fragments into sentences. Keep every meaning-bearing word.",
+        Level::High => "Also break into paragraphs at topic shifts and turn spoken lists into bullets. Keep every meaning-bearing word.",
+    };
+    RewritePrompt {
+        system: format!("{restraint} {rule}"),
+        user: format!("Clean this transcript:\n{text}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +232,29 @@ mod tests {
         let out = apply_backtrack("aa bb ẞ scratch that ẞ tail");
         assert!(out.contains("tail"));
         assert!(!out.contains("scratch that"));
+    }
+
+    #[test]
+    fn parse_level_maps_known_and_defaults_to_light() {
+        assert_eq!(parse_level("none"), Level::None);
+        assert_eq!(parse_level("Medium"), Level::Medium);
+        assert_eq!(parse_level("HIGH"), Level::High);
+        assert_eq!(parse_level("light"), Level::Light);
+        assert_eq!(parse_level("nonsense"), Level::Light);
+    }
+
+    #[test]
+    fn rewrite_prompt_widens_by_level_and_carries_the_text() {
+        assert!(rewrite_prompt(Level::Light, "x").system.to_lowercase().contains("capitalization"));
+        assert!(rewrite_prompt(Level::Medium, "x").system.to_lowercase().contains("disfluencies"));
+        assert!(rewrite_prompt(Level::High, "x").system.to_lowercase().contains("paragraph"));
+        assert!(rewrite_prompt(Level::Light, "the raw phrase").user.contains("the raw phrase"));
+    }
+
+    #[test]
+    fn rewrite_prompt_always_states_the_restraint() {
+        for lvl in [Level::Light, Level::Medium, Level::High] {
+            assert!(rewrite_prompt(lvl, "x").system.to_lowercase().contains("never change meaning"));
+        }
     }
 }
