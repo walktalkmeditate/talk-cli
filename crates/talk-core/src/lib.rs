@@ -3,6 +3,7 @@
 pub mod cleanup;
 pub mod clock;
 pub mod entry;
+pub mod eval;
 pub mod format;
 pub mod frontmatter;
 pub mod palette;
