@@ -68,3 +68,25 @@ fn config_default_mode_journal_routes_bare_talk_to_journal() {
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     assert!(dir.path().join("talk/2026-06-08.md").exists(), "bare talk should have written a journal file");
 }
+
+#[test]
+fn thread_returns_the_right_file_on_slug_collision() {
+    let dir = tempfile::tempdir().unwrap();
+    // Both questions share the first 6 words → same base slug; the 2nd is suffixed on write.
+    let q1 = "what am i avoiding in life";
+    let q2 = "what am i avoiding in life today and tomorrow";
+    talk(dir.path(), &[q1, "--from-text", "first answer", "--date", "2026-06-08", "--time", "08:00"]);
+    talk(dir.path(), &[q2, "--from-text", "second answer", "--date", "2026-06-08", "--time", "09:00"]);
+    let out = talk(dir.path(), &["thread", q2]);
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("second answer"), "thread for q2 returned the wrong file: {s}");
+    assert!(!s.contains("first answer"));
+}
+
+#[test]
+fn date_traversal_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = talk(dir.path(), &["journal", "--from-text", "x", "--date", "../escape", "--time", "08:14"]);
+    assert!(!out.status.success(), "a traversal date should fail, not write outside base");
+    assert!(!dir.path().join("escape.md").exists());
+}

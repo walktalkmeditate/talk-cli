@@ -27,6 +27,14 @@ pub fn write_entry(req: &WriteRequest) -> std::io::Result<Option<PathBuf>> {
         return Ok(None);
     }
     let path = target_path(req.base, &req.target, req.date);
+    // Defense-in-depth: the entry must land directly under base. A crafted slug
+    // or date (e.g. "../x") would otherwise escape the base dir.
+    if path.parent() != Some(req.base) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to write outside the base directory",
+        ));
+    }
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
 
     let raw = if req.keep_raw { req.raw } else { None };

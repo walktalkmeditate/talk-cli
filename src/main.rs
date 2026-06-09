@@ -118,7 +118,13 @@ fn print_thread(base: &Path, question: Option<&str>) {
     match question {
         Some(q) => {
             let direct = base.join(format!("{}.md", talk_core::slug::derive_slug(q)));
-            let path = if direct.exists() { Some(direct) } else { find_by_question(base, q) };
+            // Trust the direct hit only if it's actually THIS question's file;
+            // a different BYO question may own the un-suffixed slug (the write
+            // path suffixes collisions, so the read path must verify, not assume).
+            let direct_ok = std::fs::read_to_string(&direct).ok()
+                .and_then(|t| talk_core::frontmatter::Frontmatter::parse(&t).map(|(fm, _)| fm.question == q))
+                .unwrap_or(false);
+            let path = if direct_ok { Some(direct) } else { find_by_question(base, q) };
             match path.and_then(|p| std::fs::read_to_string(p).ok()) {
                 Some(text) => print!("{}", text),
                 None => println!("No thread yet for \"{}\".", q),
