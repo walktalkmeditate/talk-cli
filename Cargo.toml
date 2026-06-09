@@ -20,6 +20,11 @@ path = "src/main.rs"
 [features]
 listen = ["download", "dep:cpal", "dep:sherpa-onnx", "dep:coreaudio-sys"]
 download = ["dep:ureq"]
+# formatter pulls in `download` so the verify-before-load machinery compiles
+# whenever the formatter is enabled. NOTE: this opt-in feature's dep graph needs
+# rustc >= 1.83 (zip via candle-core declares 1.83); the default/listen/download
+# builds hold the package MSRV of 1.82 (verified with cargo +1.82).
+formatter = ["download", "dep:candle-core", "dep:candle-transformers", "dep:tokenizers"]
 
 [dependencies]
 talk-core = { path = "crates/talk-core", version = "0.1.0" }
@@ -33,6 +38,11 @@ crossterm = "0.28"
 cpal = { version = "0.16", optional = true }          # match the sherpa-onnx rust-api-examples
 sherpa-onnx = { version = "1.13", optional = true }   # verify symbols vs the pinned rust-api-examples
 ureq = { version = "2", optional = true }             # v2: resp.into_reader() exists (removed in v3)
+# candle-core and candle-transformers MUST share the same minor or Cargo links two
+# incompatible candle-core copies (from_gguf then sees mismatched Content/Device types).
+candle-core = { version = "0.9.2", optional = true }
+candle-transformers = { version = "0.9.2", optional = true }
+tokenizers = { version = "0.23.1", optional = true }  # Tokenizer::from_file (local-file load only)
 sha2 = "0.10"
 tar = "0.4"
 bzip2 = "0.4"
