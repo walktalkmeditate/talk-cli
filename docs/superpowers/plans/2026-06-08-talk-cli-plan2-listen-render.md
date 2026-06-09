@@ -679,6 +679,13 @@ impl Capture {
         stream.play().map_err(|e| e.to_string())?;
         Ok(Capture { _stream: stream, samples: rx, sample_rate })
     }
+
+    /// Split into (the live Stream — keep it on the OWNING thread; cpal::Stream
+    /// is !Send on macOS), the sample Receiver (Send — safe to move to a worker),
+    /// and the sample rate.
+    pub fn into_parts(self) -> (cpal::Stream, std::sync::mpsc::Receiver<Vec<f32>>, u32) {
+        (self._stream, self.samples, self.sample_rate)
+    }
 }
 
 /// Average interleaved channels down to mono.
@@ -758,7 +765,7 @@ impl Segmenter {
         cfg.silero_vad.min_speech_duration = 0.25;
         cfg.silero_vad.window_size = WINDOW as i32;
         cfg.sample_rate = 16_000;
-        let vad = VoiceActivityDetector::create(&cfg, 30.0).map_err(|e| e.to_string())?;
+        let vad = VoiceActivityDetector::create(&cfg, 30.0).ok_or_else(|| "failed to create VAD (check silero_vad.onnx path)".to_string())?;
         Ok(Segmenter { vad, buf: Vec::new(), sample_rate: 16_000 })
     }
 
@@ -777,8 +784,7 @@ impl Segmenter {
 
     fn drain(&mut self) -> Vec<Segment> {
         let mut out = Vec::new();
-        while !self.vad.is_empty() {
-            let seg = self.vad.front();
+        while let Some(seg) = self.vad.front() {
             out.push(Segment { samples: seg.samples().to_vec(), sample_rate: self.sample_rate });
             self.vad.pop();
         }
@@ -817,7 +823,7 @@ git commit -m "feat(listen): Silero VAD segmentation (settle-on-pause)"
 - Create: `src/listen/stt.rs`
 - Modify: `src/listen/mod.rs` (`pub mod stt;` + the `LiveSource`)
 
-`stt.rs` wraps offline Moonshine (from `moonshine_v2.rs`). `LiveSource` ties capture → resample-to-16k → VAD → STT, running the VAD+STT on a **worker thread** so the UI loop never blocks (the synchronous transcribe-on-the-loop was the P1 jank). It implements `TranscriptSource`; `next()` is non-blocking and drains a results channel of `Event::Commit(text)` per segment. `Partial` is no longer emitted (the loop derives "listening" from `is_speaking()` with a latch). `Event::Done` is produced by the worker after `finish()` flushes.
+`stt.rs` wraps offline Moonshine (from `moonshine_v2.rs`). `LiveSource` ties capture → resample-to-16k → VAD → STT, running the VAD+STT on a **worker thread** so the UI loop never blocks (the synchronous transcribe-on-the-loop was the P1 jank). The cpal **Stream stays on the owning thread** — only the sample `Receiver` (Send) moves to the worker, because `cpal::Stream` is `!Send` on macOS; the worker takes the Receiver plus `seg`/`stt` (both Send per sherpa-onnx). It implements `TranscriptSource`; `next()` is non-blocking and drains a results channel of `Event::Commit(text)` per segment. `Partial` is no longer emitted (the loop derives "listening" from a cloned `speaking` Arc handle with a latch). Finish/speaking are driven via **cloned `Arc<AtomicBool>` control handles** (`finish_handle()`/`speaking_handle()`) rather than methods, so the loop can drive them without borrowing the `&mut dyn TranscriptSource`. `Event::Done` is produced by the worker after the finish flag flushes, and `next()` also returns `Done` on a disconnected channel (worker exit or panic) so the loop can't spin.
 
 - [ ] **Step 1: Implement the Moonshine recognizer**
 
@@ -840,7 +846,7 @@ impl Stt {
         cfg.model_config.tokens = Some(tokens.to_string());
         cfg.model_config.provider = Some("cpu".to_string());
         cfg.model_config.num_threads = 2;
-        let recognizer = OfflineRecognizer::create(&cfg).map_err(|e| e.to_string())?;
+        let recognizer = OfflineRecognizer::create(&cfg).ok_or_else(|| "failed to create Moonshine recognizer (check model paths)".to_string())?;
         Ok(Stt { recognizer })
     }
 
@@ -876,6 +882,7 @@ use vad::Segmenter;
 /// Live mic → VAD → Moonshine, running the VAD+STT on a WORKER THREAD so the UI
 /// loop never blocks. `next()` is non-blocking: it drains a results channel.
 pub struct LiveSource {
+    _stream: cpal::Stream,            // kept alive HERE on the owning thread (!Send)
     results: Receiver<Event>,
     speaking: Arc<AtomicBool>,
     finish_flag: Arc<AtomicBool>,
@@ -884,16 +891,16 @@ pub struct LiveSource {
 
 impl LiveSource {
     pub fn new(capture: Capture, mut seg: Segmenter, stt: Stt) -> Self {
+        // Only the Receiver (Send) + seg + stt (both Send per sherpa-onnx) move to
+        // the worker; the cpal Stream (!Send) stays on this thread.
+        let (stream, samples, cap_rate) = capture.into_parts();
         let (tx, rx): (Sender<Event>, Receiver<Event>) = std::sync::mpsc::channel();
         let speaking = Arc::new(AtomicBool::new(false));
         let finish_flag = Arc::new(AtomicBool::new(false));
         let (sp, ff) = (speaking.clone(), finish_flag.clone());
-        let cap_rate = capture.sample_rate;
         let worker = thread::spawn(move || {
             loop {
-                // Drain available audio (bounded recv with a short timeout so we
-                // can notice the finish flag promptly).
-                match capture.samples.recv_timeout(std::time::Duration::from_millis(50)) {
+                match samples.recv_timeout(std::time::Duration::from_millis(50)) {
                     Ok(chunk) => {
                         let resampled = resample_to_16k(&chunk, cap_rate);
                         for s in seg.push(&resampled) {
@@ -905,7 +912,7 @@ impl LiveSource {
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                         sp.store(seg.is_speaking(), Ordering::Relaxed);
                     }
-                    Err(_) => break, // capture dropped
+                    Err(_) => { let _ = tx.send(Event::Done); break; } // capture stopped → end cleanly
                 }
                 if ff.load(Ordering::Relaxed) {
                     for s in seg.flush() {
@@ -917,20 +924,21 @@ impl LiveSource {
                 }
             }
         });
-        LiveSource { results: rx, speaking, finish_flag, worker: Some(worker) }
+        LiveSource { _stream: stream, results: rx, speaking, finish_flag, worker: Some(worker) }
     }
 
-    /// Called by the loop on `[space]`: signal the worker to flush + finish.
-    pub fn finish(&mut self) { self.finish_flag.store(true, Ordering::Relaxed); }
-
-    /// For the listening indicator (the loop latches this to avoid flicker).
-    pub fn is_speaking(&self) -> bool { self.speaking.load(Ordering::Relaxed) }
+    /// Cloneable control handles, so the live loop can drive finish / read
+    /// "speaking" WITHOUT borrowing the LiveSource (which run_loop holds as
+    /// `&mut dyn TranscriptSource`). Passing these Arcs avoids the double-borrow.
+    pub fn finish_handle(&self) -> Arc<AtomicBool> { self.finish_flag.clone() }
+    pub fn speaking_handle(&self) -> Arc<AtomicBool> { self.speaking.clone() }
 }
 
 impl Drop for LiveSource {
     fn drop(&mut self) {
         self.finish_flag.store(true, Ordering::Relaxed);
         if let Some(h) = self.worker.take() { let _ = h.join(); }
+        // `_stream` drops last, stopping capture after the worker has joined.
     }
 }
 
@@ -938,8 +946,8 @@ impl TranscriptSource for LiveSource {
     fn next(&mut self) -> Option<Event> {
         match self.results.try_recv() {
             Ok(ev) => Some(ev),
-            Err(TryRecvError::Empty) => None,      // non-blocking: nothing ready
-            Err(TryRecvError::Disconnected) => None,
+            Err(TryRecvError::Empty) => None,            // non-blocking: nothing ready yet
+            Err(TryRecvError::Disconnected) => Some(Event::Done), // worker gone → end the session
         }
     }
 }
@@ -979,7 +987,7 @@ mod tests {
 - [ ] **Step 3: Test the pure resampler; integration-verify on your machine**
 
 Run: `cargo test --features listen listen::tests` (the resample tests). Expected: PASS (2).
-On your machine, the full mic→VAD→STT path is exercised by Task 11's end-to-end. The STT now runs on a worker thread (no UI blocking); the loop consumes `Commit`/`Done` non-blockingly; `Partial` is no longer emitted (the loop derives "listening" from `is_speaking()` with a latch). `Done` is produced by the worker after `finish()` flushes.
+On your machine, the full mic→VAD→STT path is exercised by Task 11's end-to-end. The STT now runs on a worker thread (no UI blocking) — the cpal Stream stays on the owning thread; only the Receiver moves to the worker (`cpal::Stream` is `!Send`). The loop consumes `Commit`/`Done` non-blockingly; `Partial` is no longer emitted (the loop derives "listening" from a cloned `speaking` Arc handle with a latch). Finish/speaking are driven via cloned `Arc` control handles, not methods. `Done` is produced by the worker after the finish flag flushes, and `next()` returns `Done` on disconnect (worker exit or panic) so the loop can't spin.
 
 - [ ] **Step 4: Commit**
 
@@ -1235,13 +1243,14 @@ git add src/paths.rs && git commit -m "feat: TALK_BASE_DIR env override for base
 
 The interactive loop: enter the `Screen`, then each ~50ms tick: consume the off-thread `LiveSource` via `next()` (Commit/Done only — no Partial) into the `Settle` machine, poll a keypress (`crossterm::event::poll`/`read` → `keymap::action_for`), repaint via `render::paint`, and on `Finish` finalize (signal LiveSource to flush, write via the Plan-1 `writer`, paint the close/released screen). Reuses the Plan-1 `writer`, `state`, selection, and config wiring from `reflect`/journal.
 
-Behaviors layered in this revision: a **listening latch** (hangover so the indicator doesn't flicker), **cancel-confirm** (esc shows a discard prompt before discarding; ephemeral cancels immediately), **pause** (freezes the timer and stops draining the source), **resize** handling, an **overflow clamp** (clamp-to-recent so the live edge stays visible), an **empty-write skip** (no file when nothing was captured), and a **close dwell** (the close/released screen waits for a keypress).
+Behaviors layered in this revision: a **listening latch** (hangover so the indicator doesn't flicker), **cancel-confirm** (esc shows a discard prompt before discarding; ephemeral cancels immediately), **pause** (freezes the timer and stops draining the source), **resize** handling, an **overflow clamp** (clamp-to-recent so the live edge stays visible), an **empty-write skip** (no file when nothing was captured), and a **close dwell** (the close/released screen waits for a keypress). On-machine: the latch hangover (350ms) stacks on the VAD's 0.8s `min_silence_duration`, so the indicator can linger ~1s after speech — verify it feels responsive; if laggy, drive the latch off segment-completion or shorten the hangover.
 
 - [ ] **Step 1: Implement the loop**
 
 Create `src/live.rs`:
 
 ```rust
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use crossterm::event::{self, Event as CtEvent, KeyCode};
 use talk_core::render_model::{compose_close, compose_released, Mode as RMode, View};
@@ -1268,12 +1277,14 @@ pub struct LiveResult {
 }
 
 /// Run the interactive loop. `source` is a LiveSource (mic) in production; tests
-/// pass a scripted source. `is_speaking` reports live VAD state (tests pass a
-/// closure returning false). Returns the joined raw+clean transcript (or cancelled).
+/// pass a scripted source. `speaking` reports live VAD state via a cloned Arc
+/// handle (tests pass `Arc::new(AtomicBool::new(false))`). `finish_flag` is the
+/// cloned finish handle the [space] action sets. Returns the joined raw+clean
+/// transcript (or cancelled).
 pub fn run_loop(
     source: &mut dyn TranscriptSource,
-    finish: &mut dyn FnMut(),         // LiveSource::finish — flushes VAD on [space]
-    is_speaking: &dyn Fn() -> bool,   // LiveSource::is_speaking — drives the latch
+    finish_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    speaking: std::sync::Arc<std::sync::atomic::AtomicBool>,
     cfg: &LiveConfig,
 ) -> std::io::Result<LiveResult> {
     let _screen = Screen::enter()?;
@@ -1288,21 +1299,21 @@ pub fn run_loop(
     let mut finished = false;
 
     loop {
-        // 1. drain transcript events (only while not paused)
-        if !paused {
-            while let Some(ev) = source.next() {
-                match ev {
-                    Event::Commit(raw) => {
-                        let pre = talk_core::cleanup::apply_backtrack(
-                            &talk_core::cleanup::apply_spoken_commands(&raw));
-                        settle.commit(&raw, &talk_core::cleanup::deterministic_light(&pre));
-                    }
-                    Event::Done => { finished = true; break; }
-                    Event::Partial(_) => {} // no longer emitted; ignore if present
+        // 1. drain transcript events (ALWAYS drain to keep the channel from growing;
+        // discard them while paused)
+        while let Some(ev) = source.next() {
+            match ev {
+                Event::Done => { finished = true; break; }
+                _ if paused => {} // drain-and-discard while paused: don't record, don't grow the channel
+                Event::Commit(raw) => {
+                    let pre = talk_core::cleanup::apply_backtrack(
+                        &talk_core::cleanup::apply_spoken_commands(&raw));
+                    settle.commit(&raw, &talk_core::cleanup::deterministic_light(&pre));
                 }
+                Event::Partial(_) => {}
             }
-            if is_speaking() { last_speech = Instant::now(); }
         }
+        if !paused && speaking.load(Ordering::Relaxed) { last_speech = Instant::now(); }
 
         // 2. paint
         let listening = !paused && last_speech.elapsed() < SPEECH_HANGOVER; // latch → no flicker
@@ -1334,7 +1345,7 @@ pub fn run_loop(
                         continue;
                     }
                     match action_for(k) {
-                        Action::Finish => { finish(); drain_until_done(source, &mut settle)?; break; }
+                        Action::Finish => { finish_flag.store(true, Ordering::Relaxed); drain_until_done(source, &mut settle)?; break; }
                         Action::Cancel => {
                             if cfg.ephemeral {
                                 settle.finalize(); // nothing at risk — cancel immediately
@@ -1365,26 +1376,30 @@ pub fn run_loop(
     Ok(LiveResult { raw, clean, cancelled: false })
 }
 
-/// After [space]: finish() signaled the worker to flush trailing Commit(s) + Done.
-/// Because `next()` is non-blocking (off-thread worker), BLOCK here (poll with a
-/// short sleep + an 8s deadline) until Done — otherwise a `while let Some` loop
-/// exits on the first empty poll and drops the trailing phrase. Paint a calm
-/// "settling…" frame so [space] gives immediate feedback while the last segment
-/// transcribes (no silent hang).
+/// After [space]: setting finish_flag signaled the worker to flush trailing
+/// Commit(s) + Done. Because `next()` is non-blocking (off-thread worker), BLOCK
+/// here (poll with a short sleep + an 8s LIVENESS deadline, reset on every event)
+/// until Done — otherwise a `while let Some` loop exits on the first empty poll and
+/// drops the trailing phrase. The liveness deadline means a slow-but-progressing
+/// transcribe is never cut off; only a genuinely hung worker (no progress for 8s)
+/// is. Paint a calm "settling…" frame so [space] gives immediate feedback while the
+/// last segment transcribes (no silent hang).
 fn drain_until_done(source: &mut dyn TranscriptSource, settle: &mut Settle) -> std::io::Result<()> {
     paint_plain(&["  settling…".to_string()])?;
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let idle_limit = Duration::from_secs(8);
+    let mut last_event = Instant::now();
     loop {
         match source.next() {
             Some(Event::Commit(raw)) => {
                 let pre = talk_core::cleanup::apply_backtrack(
                     &talk_core::cleanup::apply_spoken_commands(&raw));
                 settle.commit(&raw, &talk_core::cleanup::deterministic_light(&pre));
+                last_event = Instant::now();
             }
             Some(Event::Done) => break,
-            Some(Event::Partial(_)) => {}
+            Some(Event::Partial(_)) => { last_event = Instant::now(); }
             None => {
-                if Instant::now() >= deadline { break; } // worker stuck — never hang forever
+                if last_event.elapsed() >= idle_limit { break; } // no progress for 8s → worker hung
                 std::thread::sleep(Duration::from_millis(20));
             }
         }
@@ -1425,11 +1440,11 @@ Add `mod live;` to `src/main.rs`.
 
 > **Pause semantics:** while paused the timer is frozen (`paused_total`/`paused_at` exclude paused time from `elapsed`) and the source is not drained. The capture worker keeps running but its channel is bounded, so the backlog can't grow without bound; on resume the buffered audio is processed (acceptable) — drop it instead if it proves disruptive.
 
-> **Testability note:** `run_loop` takes a `&mut dyn TranscriptSource`, a `finish` closure, and an `is_speaking` closure (tests pass one returning false), so it can be driven by a `FakeTranscript` in a headless test that pipes scripted `Commit`/`Done` events and a synthetic finish — but the crossterm `Screen`/`event::poll` make a true unit test impractical here. The pure pieces it composes (`compose`, `action_for`, `settle`, `cleanup`) are all already unit-tested. This loop is verified end-to-end on your machine in Step 3.
+> **Testability note:** `run_loop` takes a `&mut dyn TranscriptSource` plus two cloned `Arc<AtomicBool>` control handles — `finish_flag` and `speaking` (tests pass `Arc::new(AtomicBool::new(false))` for both) — so it can be driven by a `FakeTranscript` in a headless test that pipes scripted `Commit`/`Done` events and a synthetic finish — but the crossterm `Screen`/`event::poll` make a true unit test impractical here. The pure pieces it composes (`compose`, `action_for`, `settle`, `cleanup`) are all already unit-tested. This loop is verified end-to-end on your machine in Step 3.
 
 - [ ] **Step 2: Wire main.rs**
 
-In `src/main.rs`, when `--from-text` is **absent** and the `listen` feature is on, the real session uses the mic: build `Capture` → `Segmenter` (verified `silero_vad.onnx`) → `Stt` (verified Moonshine paths), wrap in `LiveSource`, pick the question/mode exactly as the Plan-1 `reflect`/journal/unburden paths do, then call `live::run_loop`, passing `LiveSource::finish` and `LiveSource::is_speaking` as the closures. On a non-cancelled result: if the joined `clean` is empty/whitespace, skip the write and show the "nothing captured" frame; otherwise write via the existing `writer` (or skip for ephemeral) and `live::show_close`/`show_released`. When `--from-text` is present, keep the Plan-1 `session::run` path unchanged (so all existing tests pass). Build models-missing handling: if a model file is absent or fails `download::verify`, print "run `talk download models`" and exit cleanly (no panic).
+In `src/main.rs`, when `--from-text` is **absent** and the `listen` feature is on, the real session uses the mic: build `Capture` → `Segmenter` (verified `silero_vad.onnx`) → `Stt` (verified Moonshine paths), wrap in `LiveSource`, pick the question/mode exactly as the Plan-1 `reflect`/journal/unburden paths do. Before the loop, obtain the cloned control handles from the `LiveSource`: `let finish_flag = source.finish_handle(); let speaking = source.speaking_handle();`. Then call `live::run_loop(&mut source, finish_flag, speaking, &cfg)?`, passing the cloned `Arc` handles (not closures) — this avoids borrowing `source` twice. (Tests pass `Arc::new(AtomicBool::new(false))` for both.) On a non-cancelled result: if the joined `clean` is empty/whitespace, skip the write and show the "nothing captured" frame; otherwise write via the existing `writer` (or skip for ephemeral) and `live::show_close`/`show_released`. When `--from-text` is present, keep the Plan-1 `session::run` path unchanged (so all existing tests pass). Build models-missing handling: if a model file is absent or fails `download::verify`, print "run `talk download models`" and exit cleanly (no panic).
 
 - [ ] **Step 3: End-to-end on your machine**
 
@@ -1452,7 +1467,8 @@ git commit -m "feat: live interactive session loop (mic → settle → file)"
 
 - **Spec coverage (Plan-2 scope):** restore palette §2 (T1) · settle render incl. status line + question box + close + ephemeral + paused + confirm-cancel + empty-state screens, with dim/bright tone via `LineKind` §7 (T2–T3, T5) · in-session keys §7 (T4; confirm `y`/`n` is loop state, not a keymap variant) · cpal mic capture with I16/I32/U8/F32 arms + a bounded channel §5 (T6) · Silero VAD (verified `VoiceActivityDetector`/`VadModelConfig` API, fixed 512-sample windows, `min_silence_duration` 0.8) + offline Moonshine merged-decoder, with STT on a **worker thread** (no UI blocking) §5/§7 (T7–T8) · `● local · no network` + privacy chrome §7/§11 (T2) · model download with **archive extraction**, **no redirects**, **verify-before-load** gate, 0700 models dir, and a FILL guard §11 (T9) · `TALK_BASE_DIR`/`TALK_MODELS_DIR` env overrides **validated** (absolute, no `..`) (T10) · live session → file with cancel-confirm, paused (frozen timer + halted draining), resize, overflow clamp (clamp-to-recent), listening latch, off-thread consumption, empty-write skip, and close dwell §17 (T11). **Deferred to Plan 3/4 (correctly):** the 0.5B formatter + its latency spike (Plan 3); real spine + flagship packs, ephemeral zeroize/mlock, sidecar raw store, streak display, no-egress/tamper tests (Plan 4). The settle-on-pause amendment is recorded in the spec and the Design-delta section.
 - **Placeholder scan:** the only remaining deferral is the two `sha256: "FILL_AT_PIN_TIME"` values (a hash is physically unknowable until the asset is fetched — Task 9 Step 5 pins them in one command; the *verify code* that consumes them is complete, and a FILL guard refuses to fetch/load until they are pinned). The corrected `sherpa-onnx` v1.13.x API is verified against the k2-fsa `rust-api-examples`; the exact field set is still marked "confirm against the pinned example" — legitimate because the binding is version-sensitive and the authoritative source is named; not a logic placeholder.
-- **Type consistency:** `View` fields (now incl. `paused`/`confirm_cancel`), `compose` (now `Vec<(String, LineKind)>`) / `compose_close` / `compose_released` (plain `Vec<String>`), `LineKind` (consumed by `render::paint`), `Action`, `Capture`/`Segmenter`/`Stt`/`LiveSource`, `Event` (reused from Plan 1's `source.rs`; `Partial` no longer emitted), and `Settle`'s `commit`/`finalize`/`settled`/`committing` are used consistently across tasks. `LiveSource` implements the existing `TranscriptSource` and exposes `finish`/`is_speaking` closures to `run_loop`, so the Plan-1 `session::run` and the new `live::run_loop` accept the same seam.
+- **Type consistency:** `View` fields (now incl. `paused`/`confirm_cancel`), `compose` (now `Vec<(String, LineKind)>`) / `compose_close` / `compose_released` (plain `Vec<String>`), `LineKind` (consumed by `render::paint`), `Action`, `Capture`/`Segmenter`/`Stt`/`LiveSource`, `Event` (reused from Plan 1's `source.rs`; `Partial` no longer emitted), and `Settle`'s `commit`/`finalize`/`settled`/`committing` are used consistently across tasks. `LiveSource` implements the existing `TranscriptSource` and exposes cloned `Arc<AtomicBool>` control handles (`finish_handle`/`speaking_handle`) to `run_loop`, so the Plan-1 `session::run` and the new `live::run_loop` accept the same seam.
+- **Round-2 review fixes applied:** sherpa-onnx constructors are **Option-returning**, so `VoiceActivityDetector::create`/`OfflineRecognizer::create` use `ok_or_else` (not `map_err`), and the VAD `drain` loop uses `while let Some(seg) = self.vad.front()`. The cpal **Stream is kept on the owning thread** (`LiveSource._stream`) via `Capture::into_parts`; only the sample `Receiver` (Send) moves to the worker (`cpal::Stream` is `!Send`). `run_loop` takes **cloned `Arc` control handles** instead of closures (avoids borrowing `source` twice). The worker emits `Done` on **every** exit (finish-flush, capture-stop) and `next()` returns `Done` on a **disconnected** channel (worker exit/panic) so the loop can't spin. `drain_until_done` uses a **liveness deadline** (reset on every event) so a slow-but-progressing transcribe is never cut off. The event-drain loop **always drains** the channel, **discarding while paused**, so it can't grow without bound.
 - **Execution venue:** T1–T5, T10 are built + unit-tested in CI here (bare `cargo build` must compile with no features); T6–T9, T11 need a mic / model files / network and are verified on your machine via the named manual checks.
 
 ---
