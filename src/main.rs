@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod keymap;
 mod paths;
 mod session;
 mod source;
