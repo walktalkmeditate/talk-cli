@@ -33,9 +33,26 @@ fn bare_reflect_selects_from_spine_by_time_of_day() {
     ]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
 
-    let text = std::fs::read_to_string(dir.path().join("talk/morning-intention.md")).unwrap();
-    assert!(text.contains("id: morning-intention"));
+    let text = std::fs::read_to_string(dir.path().join("talk/grateful-this-moment.md")).unwrap();
+    assert!(text.contains("id: grateful-this-moment"));
     assert!(text.contains("pack: spine"));
+}
+
+#[test]
+fn spine_is_the_curated_spine() {
+    let spine = talk_core::questions::Pack::from_toml(include_str!("../questions/spine.toml")).unwrap();
+    let n = spine.questions.len();
+    // Pinned at conversion time: 60 = 65 sourced - 5 dropped by the curation gate.
+    assert_eq!(n, 60);
+    let morning = spine.questions.iter().filter(|q| q.slot.as_deref() == Some("morning")).count();
+    let evening = spine.questions.iter().filter(|q| q.slot.as_deref() == Some("evening")).count();
+    assert_eq!(morning, 10); // pinned: all 10 morning.yaml survivors
+    assert_eq!(evening, 13); // pinned: 13 evening.yaml survivors (15 - 2 dropped)
+    let mut ids: Vec<&str> = spine.questions.iter().map(|q| q.id.as_str()).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), n, "ids must be unique");
+    assert!(ids.iter().all(|id| id.chars().all(|c| c.is_ascii_lowercase() || c == '-')));
 }
 
 #[test]

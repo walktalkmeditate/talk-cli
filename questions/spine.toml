@@ -1,12 +1,271 @@
 name = "spine"
-description = "Placeholder spine — the real 65 are vendored in Plan 4."
+description = "The curated spine — human-authored, drawn and pruned from walktalkmeditate."
 
 [[questions]]
-id = "carrying-not-yours"
-text = "What are you carrying that isn't yours?"
+id = "grateful-this-moment"
+text = "What are you grateful for in this moment?"
+slot = "morning"
+
+[[questions]]
+id = "fully-present-today"
+text = "What would it mean to be fully present today?"
+slot = "morning"
+
+[[questions]]
+id = "ready-to-let-go"
+text = "What are you ready to let go of?"
+slot = "morning"
+
+[[questions]]
+id = "highest-self-today"
+text = "What does your highest self look like today?"
+slot = "morning"
+
+[[questions]]
+id = "silence-between-thoughts"
+text = "What is the silence between your thoughts trying to tell you?"
+slot = "morning"
+
+[[questions]]
+id = "body-holds-peace"
+text = "Where in your body do you hold peace?"
+slot = "morning"
+
+[[questions]]
+id = "today-no-fear"
+text = "What would you do today if you had no fear?"
+slot = "morning"
+
+[[questions]]
+id = "be-without-becoming"
+text = "How does it feel to simply be, without needing to become?"
+slot = "morning"
+
+[[questions]]
+id = "kindest-offer-yourself"
+text = "What is the kindest thing you can offer yourself today?"
+slot = "morning"
+
+[[questions]]
+id = "nothing-to-prove"
+text = "What would it mean to walk through today with nothing to prove?"
+slot = "morning"
+
+[[questions]]
+id = "define-wisdom-changed"
+text = "How do you define wisdom — and has your definition changed over time?"
 slot = "evening"
 
 [[questions]]
-id = "morning-intention"
-text = "What do you want to protect today?"
-slot = "morning"
+id = "meaningful-life-looks-like"
+text = "What does leading a meaningful life look like to you?"
+slot = "evening"
+
+[[questions]]
+id = "unconditional-love-experienced"
+text = "What does unconditional love mean to you? Have you experienced it?"
+slot = "evening"
+
+[[questions]]
+id = "transformational-personal-growth"
+text = "What experiences proved transformational or catalytic in your personal growth?"
+slot = "evening"
+
+[[questions]]
+id = "facing-own-mortality"
+text = "How has facing your own mortality impacted or shaped you?"
+slot = "evening"
+
+[[questions]]
+id = "insights-changed-profoundly"
+text = "What key insights or shifts in perspective changed you profoundly?"
+slot = "evening"
+
+[[questions]]
+id = "complexities-still-mystify"
+text = "What complexities around life and human nature still mystify you?"
+slot = "evening"
+
+[[questions]]
+id = "surrender-beyond-control"
+text = "How do you nurture acceptance, surrender, or trust in what is beyond your control?"
+slot = "evening"
+
+[[questions]]
+id = "old-stories-shed"
+text = "What old stories, narratives, or identities have you intentionally shed or transformed?"
+slot = "evening"
+
+[[questions]]
+id = "reconcile-past-present"
+text = "How do you reconcile the past to live more fully in the present?"
+slot = "evening"
+
+[[questions]]
+id = "dying-with-dignity"
+text = "What does dying with dignity look like to you?"
+slot = "evening"
+
+[[questions]]
+id = "impact-life-have"
+text = "What impact do you most hope your life will have?"
+slot = "evening"
+
+[[questions]]
+id = "life-continues-without-you"
+text = "How comfortable are you with the reality that life continues on without you?"
+slot = "evening"
+
+[[questions]]
+id = "false-belief-liberated"
+text = "What false belief did you shed that liberated you?"
+
+[[questions]]
+id = "most-influence-became"
+text = "Who had the most influence on the person you became — and what did you learn from them?"
+
+[[questions]]
+id = "important-lesson-life-taught"
+text = "What is the most important lesson life has taught you?"
+
+[[questions]]
+id = "journey-self-discovery"
+text = "What journey of self-discovery are you still on?"
+
+[[questions]]
+id = "past-still-holding-onto"
+text = "What from the past are you still holding onto — and why can't you let it go?"
+
+[[questions]]
+id = "aligned-life-purpose"
+text = "When do you feel fully aligned with your life's purpose?"
+
+[[questions]]
+id = "cultivate-self-honesty"
+text = "How do you cultivate self-honesty, even around uncomfortable truths?"
+
+[[questions]]
+id = "freedom-authenticity-peace"
+text = "What new levels of freedom, authenticity, or peace have you uncovered?"
+
+[[questions]]
+id = "harsh-experiences-valuable"
+text = "What harsh experiences proved most valuable in hindsight?"
+
+[[questions]]
+id = "self-forgiveness-compassion"
+text = "How do you practice self-forgiveness and have compassion for your own mistakes?"
+
+[[questions]]
+id = "awe-wonder-transcendence"
+text = "What provides you with a sense of awe, wonder, or transcendence?"
+
+[[questions]]
+id = "remembered-after-gone"
+text = "How do you want to be remembered after you're gone?"
+
+[[questions]]
+id = "legacy-leave-behind"
+text = "What legacy do you hope to leave behind?"
+
+[[questions]]
+id = "advice-younger-self"
+text = "If you could go back in time, what advice would you give your younger self?"
+
+[[questions]]
+id = "causes-willing-to-fight"
+text = "What causes or values are you willing to fight for?"
+
+[[questions]]
+id = "treasured-childhood-memory"
+text = "What is your most treasured childhood memory?"
+
+[[questions]]
+id = "live-anywhere-world"
+text = "If you could live anywhere in the world, where would it be — and why?"
+
+[[questions]]
+id = "brings-true-happiness"
+text = "What brings you true happiness?"
+
+[[questions]]
+id = "positive-habits-improved-life"
+text = "What positive habits have improved your life over time?"
+
+[[questions]]
+id = "energizes-start-day"
+text = "What energizes you and makes you excited to start your day?"
+
+[[questions]]
+id = "most-adventurous-thing"
+text = "What is the most adventurous thing you've ever done?"
+
+[[questions]]
+id = "perfect-day-for-you"
+text = "What would constitute a 'perfect' day for you?"
+
+[[questions]]
+id = "creative-gifts-aliveness"
+text = "What creative gifts or passions fill you with a sense of aliveness?"
+
+[[questions]]
+id = "simple-pleasures-peace"
+text = "What simple pleasures or rituals bring you peace?"
+
+[[questions]]
+id = "feel-most-alive"
+text = "When do you feel most alive?"
+
+[[questions]]
+id = "still-hope-to-learn"
+text = "What do you still hope to learn or understand better?"
+
+[[questions]]
+id = "values-priorities-evolved"
+text = "How have your values and priorities evolved throughout your life?"
+
+[[questions]]
+id = "flow-wonder-timelessness"
+text = "What brings you into a state of flow, wonder, and timelessness?"
+
+[[questions]]
+id = "inspired-curious-over-time"
+text = "How do you stay inspired and curious over time?"
+
+[[questions]]
+id = "deep-contentment-satisfaction"
+text = "What experiences create deep contentment or satisfaction for you?"
+
+[[questions]]
+id = "teachings-love-empathy-forgiveness"
+text = "What teachings about love, empathy, or forgiveness have you taken to heart?"
+
+[[questions]]
+id = "presence-transforms-everyday"
+text = "How does practicing presence transform your experience of everyday life?"
+
+[[questions]]
+id = "perspectives-currently-integrating"
+text = "What new perspectives or meanings are you currently integrating into your life?"
+
+[[questions]]
+id = "matters-now-not-before"
+text = "What matters to you now that didn't used to — or vice versa?"
+
+[[questions]]
+id = "nurture-gratitude-wonder-joy"
+text = "How do you actively nurture gratitude, wonder, and joy?"
+
+[[questions]]
+id = "memories-elicit-joy"
+text = "What memories elicit a deep sense of joy when recalled?"
+
+[[questions]]
+id = "grateful-one-thing-today"
+text = "What is one thing you're grateful for today?"
+
+# dropped: "How do you approach understanding differing worldviews or perspectives?" — theorizes about understanding others' perspectives in the abstract, not pointed inward.
+# dropped: "When is sitting together in silence more powerful than speaking?" — presupposes a group ("together"); not answerable alone.
+# dropped: "How do you reconcile differing personalities or interests in relationships?" — theorizes about relationships in the abstract rather than the speaker's own inner life.
+# dropped: "What spiritual practices or rituals enrich your closest relationships?" — points outward at relationships as the object to be enriched, not inward at the self.
+# dropped: "If happiness was the national currency, what kind of work would make you rich?" — a parlor gambit (clever conversation starter), not a contemplative prompt.
