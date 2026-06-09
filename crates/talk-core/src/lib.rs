@@ -6,6 +6,7 @@ pub mod entry;
 pub mod frontmatter;
 pub mod palette;
 pub mod questions;
+pub mod render_model;
 pub mod selection;
 pub mod settle;
 pub mod slug;
