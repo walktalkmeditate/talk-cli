@@ -15,15 +15,16 @@ pub struct RunConfig<'a> {
     pub level: Level,
 }
 
-/// Consume the whole source, running the deterministic cleanup layer
-/// (spoken-commands → backtrack → Light) on each committed phrase, settling it,
+/// Consume the whole source, cleaning each committed phrase through
+/// `guarded_format` (the deterministic pre-layer + the injected `Formatter`, gated
+/// by the content-word guard with a deterministic-Light fallback), settling it,
 /// then persisting. `settle` is the single source of truth for the output (raw
-/// verbatim + Light clean), so the file matches what Plan 2 will render.
+/// verbatim + clean), so the file matches what the live renderer shows.
 ///
-/// Note: the Light layer normalizes whitespace, so a spoken `new line` removes
-/// the command words but does not yet preserve structural newlines — structured
-/// formatting is a Plan 3 (High cleanup / LLM) concern. Plan 1 only guarantees
-/// the literal command words don't survive.
+/// Note: the Light layer normalizes whitespace, so a spoken `new line` removes the
+/// command words but does not preserve structural newlines — structured formatting
+/// (Medium/High) is a follow-on concern; this path only guarantees the literal
+/// command words don't survive.
 pub fn run(
     source: &mut dyn TranscriptSource,
     target: Target,
