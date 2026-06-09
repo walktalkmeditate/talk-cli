@@ -19,7 +19,7 @@ Research against k2-fsa's `sherpa-onnx` Rust crate (`rust-api-examples/moonshine
 1. **Moonshine is offline (non-streaming) in the Rust toolchain.** So Plan 2 uses **settle-on-pause**: Silero VAD detects a speech segment; on your pause, offline Moonshine transcribes that segment and the clean phrase settles in at once. The dim "live edge" is a calm **listening indicator**, not jittering partials. (Spec §7 amended.) A streaming-Zipformer "live jitter" mode is a deliberate later option, not in Plan 2.
 2. **The `talk-core::settle::Settle` machine is unchanged.** The listen façade calls `commit(raw, clean)` on each VAD endpoint; `on_partial` is used only to drive the listening indicator. `Live`/`Committing`/`Settled` and never-re-flow still hold.
 3. **No LLM in Plan 2.** Cleanup stays deterministic-Light (already in `talk-core`). The 0.5B formatter and its **latency spike move to Plan 3** (they gate the formatter, not the STT engine, which is now settled).
-4. **Execution venue is split.** The render/keymap/paths tasks (T1–T5, T11) are pure or crossterm-thin and are **built + tested in CI here**. The mic/VAD/STT/download/live-session tasks (T6–T10, T12) need **a real microphone, the model files, and network** — their code is written against the cited authoritative examples and is **verified on your machine** (each such task says so and gives the exact manual check).
+4. **Execution venue is split.** The render/keymap/paths tasks (T1–T5, T10) are pure or crossterm-thin and are **built + tested in CI here**. The mic/VAD/STT/download/live-session tasks (T6–T9, T11) need **a real microphone, the model files, and network** — their code is written against the cited authoritative examples and is **verified on your machine** (each such task says so and gives the exact manual check).
 
 ---
 
@@ -27,10 +27,10 @@ Research against k2-fsa's `sherpa-onnx` Rust crate (`rust-api-examples/moonshine
 
 ```
 talk-cli/
-  Cargo.toml                       # + cpal, sherpa-onnx (feature "listen"), sha2; ureq already behind "download"
+  Cargo.toml                       # + [features] table; cpal, sherpa-onnx, coreaudio-sys (feature "listen"); ureq (feature "download"); sha2, tar, bzip2
   crates/talk-core/src/
     palette.rs                     # restore palette() synthesis (deferred from Plan 1)
-    render_model.rs                # NEW: pure View model + compose() → Vec<String> (no I/O) [here-testable]
+    render_model.rs                # NEW: pure View model + compose() → Vec<(String, LineKind)> (no I/O) [here-testable]
   src/
     paths.rs                       # + TALK_BASE_DIR override + models_dir()
     keymap.rs                      # NEW: pure KeyEvent → Action mapping [here-testable]
@@ -138,6 +138,11 @@ use crate::settle::Settle;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode { Reflect, Journal, Ephemeral }
 
+/// The tone a line paints in: Settled = bright core text, Edge = dim live edge,
+/// Chrome = the dimmest border/hint/status tone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LineKind { Chrome, Settled, Edge }
+
 /// Everything the screen needs, with no I/O. The live session rebuilds this each
 /// frame from the Settle machine + clock + listening flag.
 pub struct View<'a> {
@@ -149,40 +154,49 @@ pub struct View<'a> {
     pub elapsed: &'a str,          // "2:14"
     pub cleanup: &'a str,          // "Light"
     pub show_raw: bool,            // `u` toggle: show raw verbatim instead of clean
+    pub paused: bool,              // `p` toggle: timer frozen, source not drained
+    pub confirm_cancel: bool,      // esc pressed once: showing the discard prompt
 }
 
-/// Compose the full screen as lines (top to bottom). Pure — unit-testable.
-pub fn compose(v: &View) -> Vec<String> {
-    let mut out = Vec::new();
-    out.push(header_line(v));
-    out.push(String::new());
+/// Compose the full screen as (line, tone) pairs (top to bottom). Pure — unit-testable.
+pub fn compose(v: &View) -> Vec<(String, LineKind)> {
+    let mut out: Vec<(String, LineKind)> = Vec::new();
+    out.push((header_line(v), LineKind::Chrome));
+    out.push((String::new(), LineKind::Chrome));
 
     if let (Mode::Reflect, Some(q)) = (v.mode, v.question) {
         if let Some(h) = v.held_label {
-            out.push(format!("┌─ {} ", h) + &"─".repeat(60));
+            out.push((format!("┌─ {} ", h) + &"─".repeat(60), LineKind::Chrome));
         } else {
-            out.push("┌".to_string() + &"─".repeat(64));
+            out.push(("┌".to_string() + &"─".repeat(64), LineKind::Chrome));
         }
-        out.push(format!("│  {}", q));
-        out.push("└".to_string() + &"─".repeat(64));
-        out.push(String::new());
+        out.push((format!("│  {}", q), LineKind::Chrome));
+        out.push(("└".to_string() + &"─".repeat(64), LineKind::Chrome));
+        out.push((String::new(), LineKind::Chrome));
     }
     if v.mode == Mode::Ephemeral {
-        out.push("Say it. This keeps nothing.".to_string());
-        out.push(String::new());
+        out.push(("Say it. This keeps nothing.".to_string(), LineKind::Chrome));
+        out.push((String::new(), LineKind::Chrome));
     }
 
     // Settled blocks (bright/locked), then the committing block, then the edge.
+    let mut body = 0usize;
     for b in v.settle.settled() {
-        out.push(if v.show_raw { b.raw.clone() } else { b.clean.clone() });
+        out.push((if v.show_raw { b.raw.clone() } else { b.clean.clone() }, LineKind::Settled));
+        body += 1;
     }
     if let Some(c) = v.settle.committing() {
-        out.push(if v.show_raw { c.raw.clone() } else { c.clean.clone() });
+        out.push((if v.show_raw { c.raw.clone() } else { c.clean.clone() }, LineKind::Settled));
+        body += 1;
     }
-    out.push(String::new());
-    out.push(edge_line(v));
-    out.push("─".repeat(66));
-    out.push(status_line(v));
+    // Empty body, not listening: a single dim placeholder keeps the region deterministic.
+    if body == 0 && !v.listening {
+        out.push(("  …".to_string(), LineKind::Edge));
+    }
+    out.push((String::new(), LineKind::Chrome));
+    out.push((edge_line(v), LineKind::Edge));
+    out.push(("─".repeat(66), LineKind::Chrome));
+    out.push((status_line(v), LineKind::Chrome));
     out
 }
 
@@ -210,6 +224,12 @@ fn edge_line(v: &View) -> String {
 }
 
 fn status_line(v: &View) -> String {
+    if v.confirm_cancel {
+        return "discard this reflection? [y] yes · [n] keep going".to_string();
+    }
+    if v.paused {
+        return format!("⏸ paused  {}   {}    [p] resume · [space] done · esc cancel", v.elapsed, v.cleanup);
+    }
     let dot = if v.listening { "● listening" } else { "○ ready" };
     match v.mode {
         Mode::Ephemeral => format!("{}  {}   ✦ ephemeral    [space] release · esc cancel", dot, v.elapsed),
@@ -225,6 +245,11 @@ mod tests {
     use super::*;
     use crate::settle::Settle;
 
+    /// Join just the line text (drops the LineKind) for `.contains` asserts.
+    fn text(v: &View) -> String {
+        compose(v).iter().map(|(s, _)| s.clone()).collect::<Vec<_>>().join("\n")
+    }
+
     fn settled_one() -> Settle {
         let mut s = Settle::new();
         s.commit("um the raw words", "The clean words.");
@@ -232,16 +257,22 @@ mod tests {
         s
     }
 
+    fn base<'a>(mode: Mode, settle: &'a Settle) -> View<'a> {
+        View {
+            mode, question: None, held_label: None, settle, listening: false,
+            elapsed: "0:01", cleanup: "Light", show_raw: false,
+            paused: false, confirm_cancel: false,
+        }
+    }
+
     #[test]
     fn reflect_shows_question_box_and_settled_text() {
         let s = settled_one();
-        let v = View {
-            mode: Mode::Reflect, question: Some("What am I avoiding?"),
-            held_label: Some("held 3 days"), settle: &s, listening: false,
-            elapsed: "2:14", cleanup: "Light", show_raw: false,
-        };
-        let lines = compose(&v);
-        let joined = lines.join("\n");
+        let mut v = base(Mode::Reflect, &s);
+        v.question = Some("What am I avoiding?");
+        v.held_label = Some("held 3 days");
+        v.elapsed = "2:14";
+        let joined = text(&v);
         assert!(joined.contains("talk · reflect") && joined.contains("● local · no network"));
         assert!(joined.contains("What am I avoiding?"));
         assert!(joined.contains("held 3 days"));
@@ -252,11 +283,10 @@ mod tests {
     #[test]
     fn raw_toggle_shows_verbatim() {
         let s = settled_one();
-        let v = View {
-            mode: Mode::Reflect, question: Some("Q?"), held_label: None,
-            settle: &s, listening: false, elapsed: "0:05", cleanup: "Light", show_raw: true,
-        };
-        let joined = compose(&v).join("\n");
+        let mut v = base(Mode::Reflect, &s);
+        v.question = Some("Q?");
+        v.show_raw = true;
+        let joined = text(&v);
         assert!(joined.contains("um the raw words"));
         assert!(!joined.contains("The clean words."));
     }
@@ -264,11 +294,10 @@ mod tests {
     #[test]
     fn ephemeral_shows_keeps_nothing_chrome() {
         let s = Settle::new();
-        let v = View {
-            mode: Mode::Ephemeral, question: None, held_label: None, settle: &s,
-            listening: true, elapsed: "0:48", cleanup: "Light", show_raw: false,
-        };
-        let joined = compose(&v).join("\n");
+        let mut v = base(Mode::Ephemeral, &s);
+        v.listening = true;
+        v.elapsed = "0:48";
+        let joined = text(&v);
         assert!(joined.contains("✦ nothing saved"));
         assert!(joined.contains("Say it. This keeps nothing."));
         assert!(joined.contains("[space] release"));
@@ -278,12 +307,39 @@ mod tests {
     fn listening_flag_drives_the_indicator() {
         let s = Settle::new();
         let mk = |listening| {
-            let v = View { mode: Mode::Journal, question: None, held_label: None, settle: &s,
-                listening, elapsed: "0:01", cleanup: "Medium", show_raw: false };
-            compose(&v).join("\n")
+            let mut v = base(Mode::Journal, &s);
+            v.listening = listening;
+            v.cleanup = "Medium";
+            text(&v)
         };
         assert!(mk(true).contains("● listening"));
         assert!(mk(false).contains("○ ready"));
+    }
+
+    #[test]
+    fn empty_state_renders_edge_and_status_without_panicking() {
+        let s = Settle::new();
+        let v = base(Mode::Reflect, &s); // settled+committing empty, not listening
+        let lines = compose(&v);
+        let joined = lines.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("talk · reflect")); // chrome present
+        assert!(joined.contains("○ ready"));        // status present
+    }
+
+    #[test]
+    fn paused_status_renders_paused_marker() {
+        let s = Settle::new();
+        let mut v = base(Mode::Reflect, &s);
+        v.paused = true;
+        assert!(text(&v).contains("⏸ paused"));
+    }
+
+    #[test]
+    fn confirm_cancel_renders_discard_prompt() {
+        let s = Settle::new();
+        let mut v = base(Mode::Reflect, &s);
+        v.confirm_cancel = true;
+        assert!(text(&v).contains("discard this reflection?"));
     }
 }
 ```
@@ -293,7 +349,7 @@ Add to `crates/talk-core/src/lib.rs`: `pub mod render_model;`
 - [ ] **Step 2: Run the tests**
 
 Run: `cargo test -p talk-core render_model`
-Expected: PASS (4 tests).
+Expected: PASS (7 tests).
 
 - [ ] **Step 3: Commit**
 
@@ -351,7 +407,7 @@ Add to the tests module:
 - [ ] **Step 2: Run the tests**
 
 Run: `cargo test -p talk-core render_model`
-Expected: PASS (6 tests).
+Expected: PASS (9 tests).
 
 - [ ] **Step 3: Commit**
 
@@ -368,6 +424,8 @@ git add crates/talk-core/src/render_model.rs && git commit -m "feat(core): close
 - Modify: `src/main.rs` (add `mod keymap;`)
 
 Map a crossterm `KeyEvent` to an `Action`, purely, so the live loop's input handling is unit-tested. (Mirrors meditate-cli's keymap pattern.)
+
+> Note: the cancel-confirm `y`/`n` decision needs no new keymap variant — it's handled as loop state in `live::run_loop`'s `confirm_cancel` branch (the loop reads the raw next key while confirming), so `keymap.rs` stays as-is.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -456,7 +514,7 @@ Create `src/render/mod.rs`:
 use std::io::{self, Write};
 use crossterm::{cursor, execute, queue, style, terminal};
 use talk_core::palette::{palette, Rgb};
-use talk_core::render_model::{compose, View};
+use talk_core::render_model::{compose, LineKind, View};
 
 /// RAII terminal guard — restores the terminal on drop (incl. on panic), exactly
 /// like meditate-cli's session guard.
@@ -479,13 +537,19 @@ impl Drop for Screen {
 
 fn rust(c: Rgb) -> style::Color { style::Color::Rgb { r: c.r, g: c.g, b: c.b } }
 
-/// Paint a full frame. Clears, then writes each composed line in the rust tone.
+/// Paint a full frame. Clears, then writes each composed line in its tone:
+/// Settled → core (bright), Edge → dim, Chrome → edge (dimmest).
 pub fn paint(view: &View) -> io::Result<()> {
     let p = palette();
     let mut out = io::stdout();
     queue!(out, terminal::Clear(terminal::ClearType::All), cursor::MoveTo(0, 0))?;
-    for line in compose(view) {
-        queue!(out, style::SetForegroundColor(rust(p.core)), style::Print(line), cursor::MoveToNextLine(1))?;
+    for (line, kind) in compose(view) {
+        let tone = match kind {
+            LineKind::Settled => p.core,
+            LineKind::Edge => p.dim,
+            LineKind::Chrome => p.edge,
+        };
+        queue!(out, style::SetForegroundColor(rust(tone)), style::Print(line), cursor::MoveToNextLine(1))?;
     }
     queue!(out, style::ResetColor)?;
     out.flush()
@@ -507,7 +571,7 @@ Add `mod render;` to `src/main.rs`.
 - [ ] **Step 2: Verify it compiles**
 
 Run: `cargo build`
-Expected: clean compile (no warnings). There are no unit tests for the crossterm I/O itself — its logic lives in `compose()` (Task 2/3, already tested). A visual check happens in Task 12 on your machine.
+Expected: clean compile (no warnings). There are no unit tests for the crossterm I/O itself — its logic lives in `compose()` (Task 2/3, already tested). A visual check happens in Task 11 on your machine.
 
 - [ ] **Step 3: Commit**
 
@@ -529,22 +593,27 @@ Capture mono f32 samples from the default input device into an `mpsc` channel. M
 
 - [ ] **Step 1: Cargo.toml — add deps behind a `listen` feature**
 
-Add to `[features]`:
+talk-cli has NO `[features]` table or `ureq` today — both must be added. Use this exact block:
+
 ```toml
-listen = ["dep:cpal", "dep:sherpa-onnx"]
-```
-Add to `[dependencies]`:
-```toml
-cpal = { version = "0.15", optional = true }
-sherpa-onnx = { version = "0.x", optional = true }   # pin to the latest k2-fsa release at implementation time; see rust-api-examples
+# Add a [features] table (none exists yet):
+[features]
+listen = ["dep:cpal", "dep:sherpa-onnx", "dep:coreaudio-sys"]
+download = ["dep:ureq"]
+
+# Add to [dependencies]:
+cpal = { version = "0.16", optional = true }          # match the sherpa-onnx rust-api-examples
+sherpa-onnx = { version = "1.13", optional = true }   # pin exact patch at impl time; verify symbols vs examples
+ureq = { version = "2", optional = true }             # v2: resp.into_reader() exists (removed in v3)
 sha2 = "0.10"
-```
-On macOS, cpal needs the same `coreaudio-sys` MSRV pin meditate uses:
-```toml
+tar = "0.4"        # extract the model archive
+bzip2 = "0.4"      # .tar.bz2 decompression
+
 [target.'cfg(target_os = "macos")'.dependencies]
-coreaudio-sys = { version = "=0.2.16", optional = true }
+coreaudio-sys = { version = "=0.2.16", optional = true }   # MSRV pin, mirrors meditate-cli
 ```
-(Add `coreaudio-sys` to the `listen` feature's dep list too.)
+
+Verify `cargo build --features listen` AND a bare `cargo build` (no features) both compile on macOS before proceeding — the non-`listen` build must still work (CI runs the render/paths tests without `listen`).
 
 > **Pin step (do this first, on your machine):** check the current `sherpa-onnx` crate version on crates.io and the matching `rust-api-examples` tag; pin both `sherpa-onnx` and the model URLs (Task 9) to that release so the API and model formats agree. Record the exact version in a comment.
 
@@ -553,7 +622,7 @@ coreaudio-sys = { version = "=0.2.16", optional = true }
 Create `src/listen/capture.rs`:
 
 ```rust
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 pub struct Capture {
@@ -570,24 +639,41 @@ impl Capture {
         let supported = device.default_input_config().map_err(|e| e.to_string())?;
         let sample_rate = supported.sample_rate().0;
         let channels = supported.config().channels as usize;
-        let (tx, rx): (Sender<Vec<f32>>, Receiver<Vec<f32>>) = mpsc::channel();
+        // Bounded: prevents an unbounded backlog if STT lags. Full → drop the chunk.
+        let (tx, rx): (SyncSender<Vec<f32>>, Receiver<Vec<f32>>) = mpsc::sync_channel(64);
 
         let err_fn = |e| eprintln!("audio stream error: {e}");
         let stream = match supported.sample_format() {
             cpal::SampleFormat::F32 => device.build_input_stream(
                 &supported.config(),
-                move |data: &[f32], _: &_| { let _ = tx.send(downmix(data, channels)); },
+                move |data: &[f32], _: &_| { let _ = tx.try_send(downmix(data, channels)); },
                 err_fn, None,
             ),
             cpal::SampleFormat::I16 => device.build_input_stream(
                 &supported.config(),
                 move |data: &[i16], _: &_| {
                     let f: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
-                    let _ = tx.send(downmix(&f, channels));
+                    let _ = tx.try_send(downmix(&f, channels));
                 },
                 err_fn, None,
             ),
-            other => return Err(format!("unsupported sample format: {other:?}")),
+            cpal::SampleFormat::I32 => device.build_input_stream(
+                &supported.config(),
+                move |data: &[i32], _: &_| {
+                    let f: Vec<f32> = data.iter().map(|&s| s as f32 / i32::MAX as f32).collect();
+                    let _ = tx.try_send(downmix(&f, channels));
+                },
+                err_fn, None,
+            ),
+            cpal::SampleFormat::U8 => device.build_input_stream(
+                &supported.config(),
+                move |data: &[u8], _: &_| {
+                    let f: Vec<f32> = data.iter().map(|&s| (s as f32 - 128.0) / 128.0).collect();
+                    let _ = tx.try_send(downmix(&f, channels));
+                },
+                err_fn, None,
+            ),
+            other => return Err(format!("unsupported audio input format {other:?} — try a different input device")),
         }.map_err(|e| e.to_string())?;
 
         stream.play().map_err(|e| e.to_string())?;
@@ -639,71 +725,82 @@ git commit -m "feat(listen): cpal microphone capture → mono f32 channel"
 - Create: `src/listen/vad.rs`
 - Modify: `src/listen/mod.rs` (`pub mod vad;`)
 
-Wrap sherpa-onnx's Silero VAD to turn a stream of f32 chunks into completed **speech segments** (settle-on-pause = one segment per utterance). The exact `VoiceActivityDetector` API (config fields, `accept_waveform`, `is_speech` / `front` / `pop` / `flush`) must be **read from the cited example** at pin time — k2-fsa `rust-api-examples/<the *_simulate_streaming_microphone>.rs` is authoritative for the pinned version. The shape below matches those examples.
+Wrap sherpa-onnx's Silero VAD to turn a stream of f32 chunks into completed **speech segments** (settle-on-pause = one segment per utterance). The corrected `VoiceActivityDetector` API (`VoiceActivityDetector::create(&cfg, buffer_secs)`, `accept_waveform`, `detected()`, `is_empty()`, `front()`, `pop()`, `flush()`, `SpeechSegment::samples()` as a method, `VadModelConfig` with `silero_vad.{model, threshold, min_silence_duration, min_speech_duration, window_size}` and `sample_rate`) is verified against the k2-fsa `rust-api-examples`; still confirm the exact field set against the pinned version. Silero requires fixed **512-sample windows**, so the wrapper buffers and feeds the VAD only in 512-sample chunks.
 
 - [ ] **Step 1: Implement the VAD wrapper**
 
 Create `src/listen/vad.rs`:
 
 ```rust
-use sherpa_onnx::{Vad, VadConfig, SileroVadConfig};
+use sherpa_onnx::{VoiceActivityDetector, VadModelConfig};
 
-/// A completed speech segment (mono f32 @ the model's sample rate, 16k).
+/// A completed speech segment (mono f32 @ 16 kHz).
 pub struct Segment {
     pub samples: Vec<f32>,
     pub sample_rate: i32,
 }
 
+const WINDOW: usize = 512; // Silero VAD requires fixed 512-sample windows.
+
 pub struct Segmenter {
-    vad: Vad,
+    vad: VoiceActivityDetector,
+    buf: Vec<f32>,
     sample_rate: i32,
 }
 
 impl Segmenter {
-    /// `model` = path to silero_vad.onnx. 16 kHz mono is required; the caller
-    /// resamples capture to 16k before feeding (see LiveSource in T8).
+    /// `model` = path to silero_vad.onnx. Input must be 16 kHz mono (caller resamples).
     pub fn new(model: &str) -> Result<Segmenter, String> {
-        let mut cfg = VadConfig::default();
-        cfg.silero_vad = SileroVadConfig {
-            model: model.to_string(),
-            threshold: 0.5,
-            min_silence_duration: 0.5, // settle-on-pause: ~half-second pause ends a phrase
-            min_speech_duration: 0.25,
-            ..Default::default()
-        };
+        let mut cfg = VadModelConfig::default();
+        cfg.silero_vad.model = Some(model.to_string());
+        cfg.silero_vad.threshold = 0.5;
+        cfg.silero_vad.min_silence_duration = 0.8; // reflection has long mid-thought pauses; tune on-machine
+        cfg.silero_vad.min_speech_duration = 0.25;
+        cfg.silero_vad.window_size = WINDOW as i32;
         cfg.sample_rate = 16_000;
-        let vad = Vad::new(&cfg, 30.0).map_err(|e| e.to_string())?; // 30s buffer
-        Ok(Segmenter { vad, sample_rate: 16_000 })
+        let vad = VoiceActivityDetector::create(&cfg, 30.0).map_err(|e| e.to_string())?;
+        Ok(Segmenter { vad, buf: Vec::new(), sample_rate: 16_000 })
     }
 
     /// Feed a chunk; returns any segments that completed (speaker paused).
+    /// Buffers and feeds the VAD ONLY in fixed 512-sample windows.
     pub fn push(&mut self, chunk: &[f32]) -> Vec<Segment> {
-        self.vad.accept_waveform(chunk);
-        let mut done = Vec::new();
+        self.buf.extend_from_slice(chunk);
+        let mut offset = 0;
+        while offset + WINDOW <= self.buf.len() {
+            self.vad.accept_waveform(&self.buf[offset..offset + WINDOW]);
+            offset += WINDOW;
+        }
+        self.buf.drain(..offset);
+        self.drain()
+    }
+
+    fn drain(&mut self) -> Vec<Segment> {
+        let mut out = Vec::new();
         while !self.vad.is_empty() {
             let seg = self.vad.front();
-            done.push(Segment { samples: seg.samples.clone(), sample_rate: self.sample_rate });
+            out.push(Segment { samples: seg.samples().to_vec(), sample_rate: self.sample_rate });
             self.vad.pop();
         }
-        done
+        out
     }
 
     /// True while the VAD currently hears speech (drives the listening indicator).
-    pub fn is_speaking(&self) -> bool { self.vad.is_speech() }
+    pub fn is_speaking(&self) -> bool { self.vad.detected() }
 
     /// On finish, flush any in-progress segment.
     pub fn flush(&mut self) -> Vec<Segment> {
         self.vad.flush();
-        self.push(&[])
+        self.drain()
     }
 }
 ```
 
-> The method names (`Vad::new`, `accept_waveform`, `is_empty`, `front`, `pop`, `is_speech`, `flush`, and the `VadConfig`/`SileroVadConfig` fields) are the documented shape; **confirm them against the pinned `sherpa-onnx` docs.rs + the example** in Step 2 and adjust to the exact symbols (the binding occasionally renames `Vad` ↔ `VoiceActivityDetector`). This is the one task where the persona must read the upstream example before writing.
+> The API is now verified against the pinned k2-fsa `rust-api-examples` (`VoiceActivityDetector`/`VadModelConfig`, `detected()`, `samples()` as a method); the exact field set should still be confirmed against the pinned example before writing.
 
 - [ ] **Step 2: Verify against the example + a recorded wav (your machine)**
 
-Download `silero_vad.onnx` (Task 9 manifest). Add a temporary `examples/vad_probe.rs` that loads a wav of you saying two sentences with a pause, feeds it through `Segmenter`, and prints the number of segments + each duration. Run `cargo run --features listen --example vad_probe`. Expect 2 segments. Adjust `min_silence_duration` if it over/under-splits. Delete the example.
+Download `silero_vad.onnx` (Task 9 manifest). Add a temporary `examples/vad_probe.rs` that loads a wav of you saying two sentences with a pause, feeds it through `Segmenter`, and prints the number of segments + each duration. Run `cargo run --features listen --example vad_probe`. Expect 2 segments. `min_silence_duration` is 0.8 (reflection has long mid-thought pauses) — tune it with *reflective* (not read-aloud) speech if it over/under-splits. Delete the example.
 
 - [ ] **Step 3: Commit**
 
@@ -720,7 +817,7 @@ git commit -m "feat(listen): Silero VAD segmentation (settle-on-pause)"
 - Create: `src/listen/stt.rs`
 - Modify: `src/listen/mod.rs` (`pub mod stt;` + the `LiveSource`)
 
-`stt.rs` wraps offline Moonshine (from `moonshine_v2.rs`). `LiveSource` ties capture → resample-to-16k → VAD → STT and implements `TranscriptSource`, emitting `Event::Commit(text)` per segment and `Event::Partial("")` to pulse the listening indicator. `Event::Done` is produced by the live loop (T12) on `[space]`, not here.
+`stt.rs` wraps offline Moonshine (from `moonshine_v2.rs`). `LiveSource` ties capture → resample-to-16k → VAD → STT, running the VAD+STT on a **worker thread** so the UI loop never blocks (the synchronous transcribe-on-the-loop was the P1 jank). It implements `TranscriptSource`; `next()` is non-blocking and drains a results channel of `Event::Commit(text)` per segment. `Partial` is no longer emitted (the loop derives "listening" from `is_speaking()` with a latch). `Event::Done` is produced by the worker after `finish()` flushes.
 
 - [ ] **Step 1: Implement the Moonshine recognizer**
 
@@ -734,7 +831,8 @@ pub struct Stt {
 }
 
 impl Stt {
-    /// Paths from the unpacked Moonshine tiny model dir.
+    /// Paths from the unpacked quantized merged-decoder Moonshine tiny model dir:
+    /// `encoder_model.ort`, `decoder_model_merged.ort`, `tokens.txt`.
     pub fn new(encoder: &str, decoder: &str, tokens: &str) -> Result<Stt, String> {
         let mut cfg = OfflineRecognizerConfig::default();
         cfg.model_config.moonshine.encoder = Some(encoder.to_string());
@@ -766,62 +864,88 @@ pub mod capture;
 pub mod stt;
 pub mod vad;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::Arc;
+use std::thread;
 use crate::source::{Event, TranscriptSource};
 use capture::Capture;
 use stt::Stt;
 use vad::Segmenter;
 
-/// Live mic → VAD → Moonshine, as a TranscriptSource. Non-blocking `next()`:
-/// returns Commit when a segment completed, Partial("") while speech is heard,
-/// or None when no new audio is ready (the loop polls keys in between).
+/// Live mic → VAD → Moonshine, running the VAD+STT on a WORKER THREAD so the UI
+/// loop never blocks. `next()` is non-blocking: it drains a results channel.
 pub struct LiveSource {
-    capture: Capture,
-    seg: Segmenter,
-    stt: Stt,
-    pending: std::collections::VecDeque<Event>,
-    finished: bool,
+    results: Receiver<Event>,
+    speaking: Arc<AtomicBool>,
+    finish_flag: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
 }
 
 impl LiveSource {
-    pub fn new(capture: Capture, seg: Segmenter, stt: Stt) -> Self {
-        Self { capture, seg, stt, pending: Default::default(), finished: false }
-    }
-
-    /// Mark the turn finished (called by the loop on `[space]`): flush the VAD,
-    /// transcribe any trailing segment, then a final Done.
-    pub fn finish(&mut self) {
-        for s in self.seg.flush() {
-            let text = self.stt.transcribe(&s.samples, s.sample_rate);
-            if !text.trim().is_empty() { self.pending.push_back(Event::Commit(text)); }
-        }
-        self.pending.push_back(Event::Done);
-        self.finished = true;
-    }
-
-    /// Drain available audio into VAD segments → transcripts. Call each loop tick.
-    fn pump(&mut self) {
-        while let Ok(chunk) = self.capture.samples.try_recv() {
-            let resampled = resample_to_16k(&chunk, self.capture.sample_rate);
-            for s in self.seg.push(&resampled) {
-                let text = self.stt.transcribe(&s.samples, s.sample_rate);
-                if !text.trim().is_empty() { self.pending.push_back(Event::Commit(text)); }
+    pub fn new(capture: Capture, mut seg: Segmenter, stt: Stt) -> Self {
+        let (tx, rx): (Sender<Event>, Receiver<Event>) = std::sync::mpsc::channel();
+        let speaking = Arc::new(AtomicBool::new(false));
+        let finish_flag = Arc::new(AtomicBool::new(false));
+        let (sp, ff) = (speaking.clone(), finish_flag.clone());
+        let cap_rate = capture.sample_rate;
+        let worker = thread::spawn(move || {
+            loop {
+                // Drain available audio (bounded recv with a short timeout so we
+                // can notice the finish flag promptly).
+                match capture.samples.recv_timeout(std::time::Duration::from_millis(50)) {
+                    Ok(chunk) => {
+                        let resampled = resample_to_16k(&chunk, cap_rate);
+                        for s in seg.push(&resampled) {
+                            let text = stt.transcribe(&s.samples, s.sample_rate);
+                            if !text.trim().is_empty() { let _ = tx.send(Event::Commit(text)); }
+                        }
+                        sp.store(seg.is_speaking(), Ordering::Relaxed);
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        sp.store(seg.is_speaking(), Ordering::Relaxed);
+                    }
+                    Err(_) => break, // capture dropped
+                }
+                if ff.load(Ordering::Relaxed) {
+                    for s in seg.flush() {
+                        let text = stt.transcribe(&s.samples, s.sample_rate);
+                        if !text.trim().is_empty() { let _ = tx.send(Event::Commit(text)); }
+                    }
+                    let _ = tx.send(Event::Done);
+                    break;
+                }
             }
-        }
-        if !self.finished && self.seg.is_speaking() {
-            self.pending.push_back(Event::Partial(String::new()));
-        }
+        });
+        LiveSource { results: rx, speaking, finish_flag, worker: Some(worker) }
+    }
+
+    /// Called by the loop on `[space]`: signal the worker to flush + finish.
+    pub fn finish(&mut self) { self.finish_flag.store(true, Ordering::Relaxed); }
+
+    /// For the listening indicator (the loop latches this to avoid flicker).
+    pub fn is_speaking(&self) -> bool { self.speaking.load(Ordering::Relaxed) }
+}
+
+impl Drop for LiveSource {
+    fn drop(&mut self) {
+        self.finish_flag.store(true, Ordering::Relaxed);
+        if let Some(h) = self.worker.take() { let _ = h.join(); }
     }
 }
 
 impl TranscriptSource for LiveSource {
     fn next(&mut self) -> Option<Event> {
-        if self.pending.is_empty() { self.pump(); }
-        self.pending.pop_front()
+        match self.results.try_recv() {
+            Ok(ev) => Some(ev),
+            Err(TryRecvError::Empty) => None,      // non-blocking: nothing ready
+            Err(TryRecvError::Disconnected) => None,
+        }
     }
 }
 
-/// Linear resample to 16 kHz (good enough for VAD/STT; replace with a higher-
-/// quality resampler if WER suffers — note it in a comment if you do).
+/// Linear resample to 16 kHz (anti-aliasing is a known follow-up; the on-machine
+/// WER check in T11 decides whether to swap in a filtered resampler like `rubato`).
 fn resample_to_16k(input: &[f32], from_hz: u32) -> Vec<f32> {
     if from_hz == 16_000 || input.is_empty() { return input.to_vec(); }
     let ratio = 16_000.0 / from_hz as f32;
@@ -838,16 +962,14 @@ fn resample_to_16k(input: &[f32], from_hz: u32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::resample_to_16k;
-
     #[test]
     fn resample_is_identity_at_16k() {
         let s = vec![0.1, 0.2, 0.3];
         assert_eq!(resample_to_16k(&s, 16_000), s);
     }
-
     #[test]
     fn resample_downsamples_length_proportionally() {
-        let s = vec![0.0; 48_000]; // 1s @ 48k → ~16k samples
+        let s = vec![0.0; 48_000];
         let out = resample_to_16k(&s, 48_000);
         assert!((out.len() as i32 - 16_000).abs() < 10);
     }
@@ -857,7 +979,7 @@ mod tests {
 - [ ] **Step 3: Test the pure resampler; integration-verify on your machine**
 
 Run: `cargo test --features listen listen::tests` (the resample tests). Expected: PASS (2).
-On your machine, the full mic→VAD→STT path is exercised by Task 12's end-to-end.
+On your machine, the full mic→VAD→STT path is exercised by Task 11's end-to-end. The STT now runs on a worker thread (no UI blocking); the loop consumes `Commit`/`Done` non-blockingly; `Partial` is no longer emitted (the loop derives "listening" from `is_speaking()` with a latch). `Done` is produced by the worker after `finish()` flushes.
 
 - [ ] **Step 4: Commit**
 
@@ -872,7 +994,7 @@ git add src/listen/ && git commit -m "feat(listen): Moonshine STT + LiveSource (
 **Files:**
 - Create: `src/download/models.rs` (pinned manifest)
 - Create: `src/download/mod.rs`
-- Modify: `Cargo.toml` (`download` feature already exists for `ureq`; add `sha2` use), `src/main.rs` (`talk download models` + load paths)
+- Modify: `Cargo.toml` (`download` feature + `ureq`, `tar`, `bzip2` added in Task 6; `sha2` used here), `src/main.rs` (`talk download models` + load paths)
 - Modify: `src/paths.rs` (`models_dir()`)
 
 Per spec §11: models fetched once, **pinned SHA-256 verified before load**, then offline forever.
@@ -885,14 +1007,13 @@ Add to `src/paths.rs`:
 /// Where downloaded models live (separate from journal entries). Honors
 /// TALK_BASE_DIR's sibling cache, else the platform cache dir, else ~/.talk/models.
 pub fn models_dir() -> PathBuf {
-    if let Ok(custom) = std::env::var("TALK_MODELS_DIR") {
-        return PathBuf::from(custom);
-    }
+    if let Some(p) = safe_env_dir("TALK_MODELS_DIR") { return p; }
     directories::ProjectDirs::from("org", "walktalkmeditate", "talk")
         .map(|d| d.cache_dir().join("models"))
         .unwrap_or_else(|| base_dir(None).join("models"))
 }
 ```
+(`safe_env_dir` is the shared validator added in Task 10; it rejects non-absolute or `..`-containing values.)
 
 - [ ] **Step 2: Pinned manifest**
 
@@ -910,9 +1031,12 @@ pub struct Artifact {
 /// Plan-2 models: Moonshine tiny (en, int8) + Silero VAD. URLs are k2-fsa
 /// release assets; HASHES MUST be filled in at pin time (they are release-stable).
 pub const MODELS: &[Artifact] = &[
+    // Quantized merged-decoder Moonshine tiny. Extracts to the subdir
+    // `sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27/`; the loader (T8) uses
+    // `encoder_model.ort`, `decoder_model_merged.ort`, `tokens.txt` from it.
     Artifact {
-        name: "sherpa-onnx-moonshine-tiny-en-int8.tar.bz2",
-        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-tiny-en-int8.tar.bz2",
+        name: "sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27.tar.bz2",
+        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27.tar.bz2",
         sha256: "FILL_AT_PIN_TIME",
     },
     Artifact {
@@ -933,6 +1057,7 @@ Create `src/download/mod.rs`:
 pub mod models;
 
 use sha2::{Digest, Sha256};
+use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use models::Artifact;
@@ -940,7 +1065,15 @@ use models::Artifact;
 /// Fetch `art` to `dir` over HTTPS, verifying its pinned SHA-256 before keeping it.
 /// A mismatch deletes the bad file and errors — never load an unverified model.
 pub fn fetch(art: &Artifact, dir: &Path) -> Result<(), String> {
+    if art.sha256.starts_with("FILL") {
+        return Err(format!("{} hash not pinned — run the pin step", art.name));
+    }
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
     let dest = dir.join(art.name);
     if dest.exists() && verify(&dest, art.sha256).unwrap_or(false) {
         return Ok(()); // already present + valid
@@ -948,7 +1081,9 @@ pub fn fetch(art: &Artifact, dir: &Path) -> Result<(), String> {
     if !art.url.starts_with("https://") {
         return Err(format!("refusing non-HTTPS url: {}", art.url));
     }
-    let resp = ureq::get(art.url).call().map_err(|e| e.to_string())?;
+    // No redirects: a redirect could downgrade HTTPS, so it must error instead.
+    let agent = ureq::AgentBuilder::new().redirects(0).build();
+    let resp = agent.get(art.url).call().map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     resp.into_reader().read_to_end(&mut bytes).map_err(|e| e.to_string())?;
     let got = hex(Sha256::digest(&bytes));
@@ -956,13 +1091,27 @@ pub fn fetch(art: &Artifact, dir: &Path) -> Result<(), String> {
         return Err(format!("checksum mismatch for {}: got {got}, want {}", art.name, art.sha256));
     }
     std::fs::write(&dest, &bytes).map_err(|e| e.to_string())?;
+    if art.name.ends_with(".tar.bz2") {
+        extract_tar_bz2(&dest, dir)?;
+    }
     Ok(())
 }
 
 /// Verify an existing file's SHA-256 (used before loading a cached model).
 pub fn verify(path: &Path, want: &str) -> Result<bool, String> {
+    if want.starts_with("FILL") {
+        return Err(format!("{} hash not pinned — run the pin step", path.display()));
+    }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     Ok(hex(Sha256::digest(&bytes)) == want)
+}
+
+/// Extract a verified `.tar.bz2` model archive into `dir`.
+fn extract_tar_bz2(archive: &Path, dir: &Path) -> Result<(), String> {
+    let file = File::open(archive).map_err(|e| e.to_string())?;
+    tar::Archive::new(bzip2::read::BzDecoder::new(file))
+        .unpack(dir)
+        .map_err(|e| e.to_string())
 }
 
 fn hex(d: impl AsRef<[u8]>) -> String {
@@ -986,7 +1135,9 @@ mod tests {
 }
 ```
 
-Wire `talk download models` in `main.rs` (loop `MODELS`, `download::fetch(art, &paths::models_dir())`, print progress). Gate `mod download;` on the `download` feature. Before the binary loads a model (T8 setup, called from T12), it must `download::verify` the file against the pinned hash and refuse to run on mismatch.
+Wire `talk download models` in `main.rs` (loop `MODELS`, `download::fetch(art, &paths::models_dir())`, print progress). Gate `mod download;` on the `download` feature.
+
+**Load-time integrity gate:** the binary must call `download::verify(path, art.sha256)` for each model file before loading it (in T11's setup), refusing to run on mismatch — this is the load-time gate, not just download-time. A `.tar.bz2` artifact is extracted into the models dir on a successful verified download; the loader reads the extracted files (`encoder_model.ort`, `decoder_model_merged.ort`, `tokens.txt`) from the archive's subdir.
 
 - [ ] **Step 4: Test the verify logic here**
 
@@ -1018,16 +1169,30 @@ The round-1 review and the Plan-1 roadmap both noted `paths::base_dir` should ho
 In `src/paths.rs`, change `base_dir` to consult the env first:
 
 ```rust
+/// Read an env-supplied directory override, accepting it only if it's absolute and
+/// contains no `..` component; otherwise warn and return None (fall back to default).
+fn safe_env_dir(var: &str) -> Option<PathBuf> {
+    let raw = std::env::var(var).ok()?;
+    if raw.is_empty() { return None; }
+    let path = PathBuf::from(&raw);
+    if path.is_absolute() && !path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        Some(path)
+    } else {
+        eprintln!("ignoring {var}={raw:?}: must be an absolute path with no `..`");
+        None
+    }
+}
+
 pub fn base_dir(override_path: Option<PathBuf>) -> PathBuf {
     if let Some(p) = override_path { return p; }
-    if let Ok(custom) = std::env::var("TALK_BASE_DIR") {
-        if !custom.is_empty() { return PathBuf::from(custom); }
-    }
+    if let Some(p) = safe_env_dir("TALK_BASE_DIR") { return p; }
     directories::UserDirs::new()
         .map(|d| d.home_dir().join("talk"))
         .unwrap_or_else(|| PathBuf::from("talk"))
 }
 ```
+
+Apply the same `safe_env_dir` validation to `models_dir` (Task 9 Step 1): replace its `std::env::var("TALK_MODELS_DIR")` block with `if let Some(p) = safe_env_dir("TALK_MODELS_DIR") { return p; }`.
 
 Add a test (note: env tests must not run in parallel with other env users; this var is unique to talk):
 
@@ -1041,6 +1206,10 @@ Add a test (note: env tests must not run in parallel with other env users; this 
         // explicit override still wins
         std::env::set_var("TALK_BASE_DIR", "/tmp/ignored");
         assert_eq!(base_dir(Some(PathBuf::from("/tmp/explicit"))), PathBuf::from("/tmp/explicit"));
+        std::env::remove_var("TALK_BASE_DIR");
+        // a `..`-containing value is rejected → falls back to the default
+        std::env::set_var("TALK_BASE_DIR", "/tmp/../etc/talk");
+        assert_ne!(base_dir(None), PathBuf::from("/tmp/../etc/talk"));
         std::env::remove_var("TALK_BASE_DIR");
     }
 ```
@@ -1064,7 +1233,9 @@ git add src/paths.rs && git commit -m "feat: TALK_BASE_DIR env override for base
 - Create: `src/live.rs`
 - Modify: `src/main.rs` (`mod live;` + route the real session to it when no `--from-text`)
 
-The interactive loop: enter the `Screen`, then each ~50ms tick: pump `LiveSource` events into the `Settle` machine, poll a keypress (`crossterm::event::poll`/`read` → `keymap::action_for`), repaint via `render::paint`, and on `Finish` finalize (flush LiveSource, write via the Plan-1 `writer`, paint the close/released screen). Reuses the Plan-1 `writer`, `state`, selection, and config wiring from `reflect`/journal.
+The interactive loop: enter the `Screen`, then each ~50ms tick: consume the off-thread `LiveSource` via `next()` (Commit/Done only — no Partial) into the `Settle` machine, poll a keypress (`crossterm::event::poll`/`read` → `keymap::action_for`), repaint via `render::paint`, and on `Finish` finalize (signal LiveSource to flush, write via the Plan-1 `writer`, paint the close/released screen). Reuses the Plan-1 `writer`, `state`, selection, and config wiring from `reflect`/journal.
+
+Behaviors layered in this revision: a **listening latch** (hangover so the indicator doesn't flicker), **cancel-confirm** (esc shows a discard prompt before discarding; ephemeral cancels immediately), **pause** (freezes the timer and stops draining the source), **resize** handling, an **overflow clamp** (clamp-to-recent so the live edge stays visible), an **empty-write skip** (no file when nothing was captured), and a **close dwell** (the close/released screen waits for a keypress).
 
 - [ ] **Step 1: Implement the loop**
 
@@ -1072,12 +1243,14 @@ Create `src/live.rs`:
 
 ```rust
 use std::time::{Duration, Instant};
-use crossterm::event::{self, Event as CtEvent};
+use crossterm::event::{self, Event as CtEvent, KeyCode};
 use talk_core::render_model::{compose_close, compose_released, Mode as RMode, View};
 use talk_core::settle::Settle;
 use crate::keymap::{action_for, Action};
 use crate::render::{paint, paint_plain, Screen};
 use crate::source::{Event, TranscriptSource};
+
+const SPEECH_HANGOVER: Duration = Duration::from_millis(350);
 
 pub struct LiveConfig<'a> {
     pub mode: RMode,
@@ -1095,43 +1268,50 @@ pub struct LiveResult {
 }
 
 /// Run the interactive loop. `source` is a LiveSource (mic) in production; tests
-/// pass a scripted source. Returns the joined raw+clean transcript (or cancelled).
+/// pass a scripted source. `is_speaking` reports live VAD state (tests pass a
+/// closure returning false). Returns the joined raw+clean transcript (or cancelled).
 pub fn run_loop(
     source: &mut dyn TranscriptSource,
-    finish: &mut dyn FnMut(),   // LiveSource::finish — flushes VAD on [space]
+    finish: &mut dyn FnMut(),         // LiveSource::finish — flushes VAD on [space]
+    is_speaking: &dyn Fn() -> bool,   // LiveSource::is_speaking — drives the latch
     cfg: &LiveConfig,
 ) -> std::io::Result<LiveResult> {
     let _screen = Screen::enter()?;
     let mut settle = Settle::new();
-    let mut listening = false;
     let mut show_raw = false;
     let mut paused = false;
+    let mut confirm_cancel = false;
     let started = Instant::now();
+    let mut paused_total = Duration::ZERO;     // accumulated paused time (excluded from elapsed)
+    let mut paused_at: Option<Instant> = None;
+    let mut last_speech = started - SPEECH_HANGOVER; // start un-latched
     let mut finished = false;
 
     loop {
-        // 1. drain transcript events
+        // 1. drain transcript events (only while not paused)
         if !paused {
             while let Some(ev) = source.next() {
                 match ev {
-                    Event::Partial(_) => listening = true,
                     Event::Commit(raw) => {
                         let pre = talk_core::cleanup::apply_backtrack(
                             &talk_core::cleanup::apply_spoken_commands(&raw));
-                        let clean = talk_core::cleanup::deterministic_light(&pre);
-                        settle.commit(&raw, &clean);
-                        listening = false;
+                        settle.commit(&raw, &talk_core::cleanup::deterministic_light(&pre));
                     }
                     Event::Done => { finished = true; break; }
+                    Event::Partial(_) => {} // no longer emitted; ignore if present
                 }
             }
+            if is_speaking() { last_speech = Instant::now(); }
         }
 
         // 2. paint
-        let elapsed = fmt_elapsed(started.elapsed());
+        let listening = !paused && last_speech.elapsed() < SPEECH_HANGOVER; // latch → no flicker
+        let elapsed = fmt_elapsed(started.elapsed() - paused_total
+            - paused_at.map(|t| t.elapsed()).unwrap_or(Duration::ZERO));
         let v = View {
             mode: cfg.mode, question: cfg.question, held_label: cfg.held_label,
-            settle: &settle, listening, elapsed: &elapsed, cleanup: cfg.cleanup, show_raw,
+            settle: &settle, listening, elapsed: &elapsed, cleanup: cfg.cleanup,
+            show_raw, paused, confirm_cancel,
         };
         paint(&v)?;
 
@@ -1139,17 +1319,42 @@ pub fn run_loop(
 
         // 3. poll a key for ~50ms
         if event::poll(Duration::from_millis(50))? {
-            if let CtEvent::Key(k) = event::read()? {
-                match action_for(k) {
-                    Action::Finish => { finish(); finished_drain(source, &mut settle); break; }
-                    Action::Cancel => {
-                        settle.finalize();
-                        return Ok(LiveResult { raw: String::new(), clean: String::new(), cancelled: true });
+            match event::read()? {
+                CtEvent::Resize(_, _) => {} // next compose recomputes from terminal size
+                CtEvent::Key(k) => {
+                    // While confirming a cancel, read the raw y/n decision here.
+                    if confirm_cancel {
+                        match k.code {
+                            KeyCode::Char('y') | KeyCode::Esc => {
+                                settle.finalize();
+                                return Ok(LiveResult { raw: String::new(), clean: String::new(), cancelled: true });
+                            }
+                            _ => { confirm_cancel = false; } // any other key resumes
+                        }
+                        continue;
                     }
-                    Action::ToggleRaw => show_raw = !show_raw,
-                    Action::TogglePause => paused = !paused,
-                    Action::None => {}
+                    match action_for(k) {
+                        Action::Finish => { finish(); finished_drain(source, &mut settle); break; }
+                        Action::Cancel => {
+                            if cfg.ephemeral {
+                                settle.finalize(); // nothing at risk — cancel immediately
+                                return Ok(LiveResult { raw: String::new(), clean: String::new(), cancelled: true });
+                            }
+                            confirm_cancel = true; // show the discard prompt; decide next key
+                        }
+                        Action::ToggleRaw => show_raw = !show_raw,
+                        Action::TogglePause => {
+                            paused = !paused;
+                            if paused {
+                                paused_at = Some(Instant::now());
+                            } else if let Some(t) = paused_at.take() {
+                                paused_total += t.elapsed();
+                            }
+                        }
+                        Action::None => {}
+                    }
                 }
+                _ => {}
             }
         }
     }
@@ -1160,7 +1365,7 @@ pub fn run_loop(
     Ok(LiveResult { raw, clean, cancelled: false })
 }
 
-/// After [space]: finish() was called (queues trailing Commit(s) + Done); drain them.
+/// After [space]: finish() was called (worker flushes trailing Commit(s) + Done); drain them.
 fn finished_drain(source: &mut dyn TranscriptSource, settle: &mut Settle) {
     while let Some(ev) = source.next() {
         match ev {
@@ -1180,22 +1385,39 @@ fn fmt_elapsed(d: Duration) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
-/// Print the close screen (caller passes path/provenance/phrase) or released.
-pub fn show_close(path: &str, provenance: &str, phrase: &str) -> std::io::Result<()> {
-    paint_plain(&compose_close(path, provenance, phrase))
+/// Wait for a single keypress (discarding non-key events) so a contemplative
+/// close screen isn't flashed away before the reader sees it.
+fn await_keypress() -> std::io::Result<()> {
+    loop {
+        if let CtEvent::Key(_) = event::read()? { return Ok(()); }
+    }
 }
+
+/// Print the close screen (caller passes path/provenance/phrase), then dwell.
+pub fn show_close(path: &str, provenance: &str, phrase: &str) -> std::io::Result<()> {
+    paint_plain(&compose_close(path, provenance, phrase))?;
+    await_keypress()
+}
+/// Print the released screen, then dwell.
 pub fn show_released() -> std::io::Result<()> {
-    paint_plain(&compose_released())
+    paint_plain(&compose_released())?;
+    await_keypress()
 }
 ```
 
 Add `mod live;` to `src/main.rs`.
 
-> **Testability note:** `run_loop` takes a `&mut dyn TranscriptSource` and a `finish` closure, so it can be driven by a `FakeTranscript` in a headless test that pipes scripted `Commit`/`Done` events and a synthetic finish — but the crossterm `Screen`/`event::poll` make a true unit test impractical here. The pure pieces it composes (`compose`, `action_for`, `settle`, `cleanup`) are all already unit-tested. This loop is verified end-to-end on your machine in Step 3.
+> **Overflow clamp:** when the settled body exceeds the terminal height minus chrome, render only the most-recent blocks that fit (clamp-to-recent) so the live edge stays visible. Derive the separator width / `privacy_gap` and the body budget from `crossterm::terminal::size()` rather than the hardcoded 66 — read the terminal width once per paint and clamp to it (the spec's `Resize` handler just repaints, letting the next `compose` recompute).
+
+> **Empty-write skip (caller, Step 2):** after a non-cancelled finish, if the joined `clean` is empty/whitespace, do **not** write a file (show a "nothing captured" plain frame instead) — only write when there's content. Applies to reflect + journal; ephemeral never writes regardless.
+
+> **Pause semantics:** while paused the timer is frozen (`paused_total`/`paused_at` exclude paused time from `elapsed`) and the source is not drained. The capture worker keeps running but its channel is bounded, so the backlog can't grow without bound; on resume the buffered audio is processed (acceptable) — drop it instead if it proves disruptive.
+
+> **Testability note:** `run_loop` takes a `&mut dyn TranscriptSource`, a `finish` closure, and an `is_speaking` closure (tests pass one returning false), so it can be driven by a `FakeTranscript` in a headless test that pipes scripted `Commit`/`Done` events and a synthetic finish — but the crossterm `Screen`/`event::poll` make a true unit test impractical here. The pure pieces it composes (`compose`, `action_for`, `settle`, `cleanup`) are all already unit-tested. This loop is verified end-to-end on your machine in Step 3.
 
 - [ ] **Step 2: Wire main.rs**
 
-In `src/main.rs`, when `--from-text` is **absent** and the `listen` feature is on, the real session uses the mic: build `Capture` → `Segmenter` (verified `silero_vad.onnx`) → `Stt` (verified Moonshine paths), wrap in `LiveSource`, pick the question/mode exactly as the Plan-1 `reflect`/journal/unburden paths do, call `live::run_loop`, then on a non-cancelled result write via the existing `writer` (or skip for ephemeral) and `live::show_close`/`show_released`. When `--from-text` is present, keep the Plan-1 `session::run` path unchanged (so all existing tests pass). Build models-missing handling: if a model file is absent or fails `download::verify`, print "run `talk download models`" and exit cleanly (no panic).
+In `src/main.rs`, when `--from-text` is **absent** and the `listen` feature is on, the real session uses the mic: build `Capture` → `Segmenter` (verified `silero_vad.onnx`) → `Stt` (verified Moonshine paths), wrap in `LiveSource`, pick the question/mode exactly as the Plan-1 `reflect`/journal/unburden paths do, then call `live::run_loop`, passing `LiveSource::finish` and `LiveSource::is_speaking` as the closures. On a non-cancelled result: if the joined `clean` is empty/whitespace, skip the write and show the "nothing captured" frame; otherwise write via the existing `writer` (or skip for ephemeral) and `live::show_close`/`show_released`. When `--from-text` is present, keep the Plan-1 `session::run` path unchanged (so all existing tests pass). Build models-missing handling: if a model file is absent or fails `download::verify`, print "run `talk download models`" and exit cleanly (no panic).
 
 - [ ] **Step 3: End-to-end on your machine**
 
@@ -1203,7 +1425,7 @@ In `src/main.rs`, when `--from-text` is **absent** and the `listen` feature is o
 talk download models                 # fetch + verify (Task 9 Step 5 first)
 talk reflect                         # speak a sentence, pause, speak another, press space
 ```
-Confirm: the question shows, `● listening` pulses while you speak, each phrase settles in clean on your pause, `u` toggles raw⇄clean, `space` writes `~/talk/<slug>.md` and shows the close phrase, `esc` discards. Then `talk journal`, and `talk unburden` (confirm "Released. Nothing was written." + no file). Verify `cargo test` (the `--from-text` paths) still all pass.
+Confirm: the question shows, `● listening` pulses while you speak (latched, no flicker), each phrase settles in clean on your pause, `u` toggles raw⇄clean, `p` pauses (timer freezes; status shows `⏸ paused`) and resumes, `esc` shows the discard prompt (`y` discards, `n`/any key keeps going), `space` writes `~/talk/<slug>.md` and shows the close phrase (which dwells until a keypress). Resize the terminal mid-session and confirm it repaints cleanly; a very long session clamps to the most-recent blocks with the live edge visible; finishing with nothing said writes no file. Then `talk journal`, and `talk unburden` (confirm "Released. Nothing was written." + no file, `esc` cancels immediately with no prompt). Verify `cargo test` (the `--from-text` paths) still all pass.
 
 - [ ] **Step 4: Commit**
 
@@ -1216,10 +1438,10 @@ git commit -m "feat: live interactive session loop (mic → settle → file)"
 
 ## Self-Review (completed during authoring)
 
-- **Spec coverage (Plan-2 scope):** restore palette §2 (T1) · settle render incl. status line + question box + close + ephemeral screens §7 (T2–T3, T5) · in-session keys §7 (T4) · cpal mic capture §5 (T6) · Silero VAD + Moonshine settle-on-pause §5/§7 (T7–T8) · `● local · no network` + privacy chrome §7/§11 (T2) · model download + pinned-SHA-256 verify gate §11 (T9) · `TALK_BASE_DIR` (T10) · live session → file §17 (T11). **Deferred to Plan 3/4 (correctly):** the 0.5B formatter + its latency spike (Plan 3); real spine + flagship packs, ephemeral zeroize/mlock, sidecar raw store, streak display, no-egress/tamper tests (Plan 4). The settle-on-pause amendment is recorded in the spec and the Design-delta section.
-- **Placeholder scan:** the only deferral is the two `sha256: "FILL_AT_PIN_TIME"` values (a hash is physically unknowable until the asset is fetched — Task 9 Step 5 pins them in one command; the *verify code* that consumes them is complete). The `sherpa-onnx` version + a few binding symbol names (`Vad`/`VoiceActivityDetector`, VAD config fields) are marked "confirm against the pinned example" — legitimate because the binding is version-sensitive and the authoritative source is named; not a logic placeholder.
-- **Type consistency:** `View` fields, `compose`/`compose_close`/`compose_released`, `Action`, `Capture`/`Segmenter`/`Stt`/`LiveSource`, `Event` (reused from Plan 1's `source.rs`), and `Settle`'s `commit`/`finalize`/`settled`/`committing` are used consistently across tasks. `LiveSource` implements the existing `TranscriptSource` so the Plan-1 `session::run` and the new `live::run_loop` accept the same seam.
-- **Execution venue:** T1–T5, T10 are built + unit-tested in CI here; T6–T9, T11 need a mic / model files / network and are verified on your machine via the named manual checks.
+- **Spec coverage (Plan-2 scope):** restore palette §2 (T1) · settle render incl. status line + question box + close + ephemeral + paused + confirm-cancel + empty-state screens, with dim/bright tone via `LineKind` §7 (T2–T3, T5) · in-session keys §7 (T4; confirm `y`/`n` is loop state, not a keymap variant) · cpal mic capture with I16/I32/U8/F32 arms + a bounded channel §5 (T6) · Silero VAD (verified `VoiceActivityDetector`/`VadModelConfig` API, fixed 512-sample windows, `min_silence_duration` 0.8) + offline Moonshine merged-decoder, with STT on a **worker thread** (no UI blocking) §5/§7 (T7–T8) · `● local · no network` + privacy chrome §7/§11 (T2) · model download with **archive extraction**, **no redirects**, **verify-before-load** gate, 0700 models dir, and a FILL guard §11 (T9) · `TALK_BASE_DIR`/`TALK_MODELS_DIR` env overrides **validated** (absolute, no `..`) (T10) · live session → file with cancel-confirm, paused (frozen timer + halted draining), resize, overflow clamp (clamp-to-recent), listening latch, off-thread consumption, empty-write skip, and close dwell §17 (T11). **Deferred to Plan 3/4 (correctly):** the 0.5B formatter + its latency spike (Plan 3); real spine + flagship packs, ephemeral zeroize/mlock, sidecar raw store, streak display, no-egress/tamper tests (Plan 4). The settle-on-pause amendment is recorded in the spec and the Design-delta section.
+- **Placeholder scan:** the only remaining deferral is the two `sha256: "FILL_AT_PIN_TIME"` values (a hash is physically unknowable until the asset is fetched — Task 9 Step 5 pins them in one command; the *verify code* that consumes them is complete, and a FILL guard refuses to fetch/load until they are pinned). The corrected `sherpa-onnx` v1.13.x API is verified against the k2-fsa `rust-api-examples`; the exact field set is still marked "confirm against the pinned example" — legitimate because the binding is version-sensitive and the authoritative source is named; not a logic placeholder.
+- **Type consistency:** `View` fields (now incl. `paused`/`confirm_cancel`), `compose` (now `Vec<(String, LineKind)>`) / `compose_close` / `compose_released` (plain `Vec<String>`), `LineKind` (consumed by `render::paint`), `Action`, `Capture`/`Segmenter`/`Stt`/`LiveSource`, `Event` (reused from Plan 1's `source.rs`; `Partial` no longer emitted), and `Settle`'s `commit`/`finalize`/`settled`/`committing` are used consistently across tasks. `LiveSource` implements the existing `TranscriptSource` and exposes `finish`/`is_speaking` closures to `run_loop`, so the Plan-1 `session::run` and the new `live::run_loop` accept the same seam.
+- **Execution venue:** T1–T5, T10 are built + unit-tested in CI here (bare `cargo build` must compile with no features); T6–T9, T11 need a mic / model files / network and are verified on your machine via the named manual checks.
 
 ---
 
