@@ -32,11 +32,11 @@ fn main() -> std::io::Result<()> {
     match args.command {
         Some(Command::Journal) => {
             let text = require_text(&args.from_text);
-            run_and_report(&base, Target::Journal, &date, &time, &text, cfg.keep_raw, false)?;
+            run_and_report(&base, Target::Journal, &date, &time, &text, cfg.keep_raw, false, cfg.cleanup_for("journal"))?;
         }
         Some(Command::Unburden) | Some(Command::Vent) => {
             let text = require_text(&args.from_text);
-            run_and_report(&base, Target::Journal, &date, &time, &text, cfg.keep_raw, true)?;
+            run_and_report(&base, Target::Journal, &date, &time, &text, cfg.keep_raw, true, talk_core::cleanup::Level::None)?;
             println!("Released. Nothing was written.");
         }
         Some(Command::Config { action }) => return handle_config(action.as_deref()),
@@ -47,7 +47,7 @@ fn main() -> std::io::Result<()> {
         _ => {
             if args.question.is_none() && cfg.default_mode == "journal" {
                 let text = require_text(&args.from_text);
-                run_and_report(&base, Target::Journal, &date, &time, &text, cfg.keep_raw, false)?;
+                run_and_report(&base, Target::Journal, &date, &time, &text, cfg.keep_raw, false, cfg.cleanup_for("journal"))?;
             } else {
                 reflect(&base, &args.question, &date, &time, &require_text(&args.from_text), &cfg)?;
             }
@@ -85,14 +85,18 @@ fn reflect(base: &Path, byo: &Option<String>, date: &str, time: &str, text: &str
     };
 
     let target = Target::Reflect { id: &id, question: &question, slug: &slug, pack: &pack, addressee: &addressee };
-    run_and_report(base, target, date, time, text, cfg.keep_raw, false)?;
+    run_and_report(base, target, date, time, text, cfg.keep_raw, false, cfg.cleanup_for("reflect"))?;
     paths::write_private(&state_path(base), &st.save())?;
     Ok(())
 }
 
-fn run_and_report(base: &Path, target: Target, date: &str, time: &str, text: &str, keep_raw: bool, ephemeral: bool) -> std::io::Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn run_and_report(base: &Path, target: Target, date: &str, time: &str, text: &str, keep_raw: bool, ephemeral: bool, level: talk_core::cleanup::Level) -> std::io::Result<()> {
     let path = run(&mut FakeTranscript::from_text(text), target,
-        &RunConfig { base, date, time, keep_raw, ephemeral })?;
+        &RunConfig {
+            base, date, time, keep_raw, ephemeral,
+            formatter: &talk_core::format::DeterministicFormatter, level,
+        })?;
     if let Some(p) = path {
         println!("→ {}", p.display());
     }
