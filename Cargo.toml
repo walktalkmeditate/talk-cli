@@ -18,7 +18,7 @@ name = "talk"
 path = "src/main.rs"
 
 [features]
-listen = ["dep:cpal", "dep:sherpa-onnx", "dep:coreaudio-sys"]
+listen = ["download", "dep:cpal", "dep:sherpa-onnx", "dep:coreaudio-sys"]
 download = ["dep:ureq"]
 
 [dependencies]
