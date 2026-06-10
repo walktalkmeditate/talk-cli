@@ -154,3 +154,6 @@
 | 17:13 | Created .github/talk.rb.tpl | — | ~270 |
 | 17:19 | Edited .github/workflows/ci.yml | 6→10 lines | ~166 |
 | 17:20 | Edited .github/workflows/ci.yml | 4→5 lines | ~35 |
+| 18:24 | Edited Cargo.toml | 15→17 lines | ~170 |
+| 18:24 | Edited .github/workflows/release.yml | 3→3 lines | ~51 |
+| 18:24 | Edited .github/workflows/release.yml | 2→2 lines | ~16 |

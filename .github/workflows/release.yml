@@ -108,7 +108,7 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME#v}"
           crate="$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "talk") | .version')"
+            | jq -r '.packages[] | select(.name == "talk-cli") | .version')"
           if [ "$tag" != "$crate" ]; then
             echo "tag $GITHUB_REF_NAME != Cargo.toml version $crate" >&2
             exit 1
@@ -131,7 +131,7 @@ jobs:
             fi
           }
           publish talk-core
-          publish talk
+          publish talk-cli
 
   release:
     needs: build

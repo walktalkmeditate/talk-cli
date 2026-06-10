@@ -1,8 +1,10 @@
 [workspace]
 members = ["crates/talk-core"]
 
+# Package is `talk-cli` on crates.io (the bare `talk` name is taken by an
+# unrelated crate); the installed command stays `talk` via the [[bin]] below.
 [package]
-name = "talk"
+name = "talk-cli"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.82"

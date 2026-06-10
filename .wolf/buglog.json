@@ -419,6 +419,22 @@
       "related_bugs": [],
       "occurrences": 1,
       "last_seen": "2026-06-10T21:02:08.054Z"
+    },
+    {
+      "id": "bug-026",
+      "timestamp": "2026-06-10T23:24:53.034Z",
+      "error_message": "Incorrect value in code",
+      "file": ".github/workflows/release.yml",
+      "root_cause": "Had \"talk\"",
+      "fix": "Changed to \"talk-cli\"",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "yml"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-10T23:24:53.034Z"
     }
   ]
 }
