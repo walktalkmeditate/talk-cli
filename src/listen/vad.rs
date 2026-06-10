@@ -22,6 +22,12 @@ impl Segmenter {
         cfg.silero_vad.threshold = 0.5;
         cfg.silero_vad.min_silence_duration = 0.8; // reflection has long mid-thought pauses; tune on-machine
         cfg.silero_vad.min_speech_duration = 0.25;
+        // Force-split pause-free speech: the default (0.0) never splits, segments
+        // grow past what the quantized Moonshine export can decode (~20s+, where
+        // its decoder errors and sherpa returns EMPTY text — a long monologue
+        // vanished entirely). 15s stays comfortably inside the model's envelope
+        // and keeps per-commit transcription latency low.
+        cfg.silero_vad.max_speech_duration = 15.0;
         cfg.silero_vad.window_size = WINDOW as i32;
         cfg.sample_rate = 16_000;
         let vad = VoiceActivityDetector::create(&cfg, 30.0)
