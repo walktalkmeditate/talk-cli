@@ -1,7 +1,13 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-06-10T20:04:49.901Z
-> Files: 67 tracked | Anatomy hits: 0 | Misses: 0
+> Auto-maintained by OpenWolf. Last scanned: 2026-06-10T20:53:36.662Z
+> Files: 70 tracked | Anatomy hits: 0 | Misses: 0
+
+## ../../../../../tmp/compound-engineering/ce-code-review/20260610-154006-9b113dea/
+
+- `adversarial.json` (~4937 tok)
+- `maintainability.json` — Declares explains (~2540 tok)
+- `reliability.json` — Declares initializes (~1463 tok)
 
 ## ./
 
@@ -36,7 +42,7 @@
 
 ## crates/talk-core/src/
 
-- `cleanup.rs` — Cleanup intensity. Plan 3 wires this into the LLM rewrite; deterministic-Light (~4272 tok)
+- `cleanup.rs` — Cleanup intensity. Plan 3 wires this into the LLM rewrite; deterministic-Light (~5001 tok)
 - `clock.rs` — Injectable clock for Plan 2's live session; Plan 1's pure `select` takes an hour directly. (~230 tok)
 - `entry.rs` — One recorded turn, already cleaned by `cleanup`. (~1053 tok)
 - `eval.rs` — The checked-in restraint eval set (pure). Makes "the formatter never changes (~1168 tok)
@@ -68,7 +74,7 @@
 
 ## examples/
 
-- `ffi_probe.rs` — No-egress FFI probe: drives the REAL sherpa-onnx inference stack (streaming (~852 tok)
+- `ffi_probe.rs` — No-egress FFI probe: drives the REAL sherpa-onnx inference stack (streaming (~792 tok)
 
 ## questions/
 
@@ -83,12 +89,12 @@
 - `cli.rs` — A bring-your-own question (bare `talk "..."`). (~402 tok)
 - `config.rs` — [derive(Clone, Debug, Serialize, Deserialize)] (~1013 tok)
 - `keymap.rs` — [derive(Clone, Copy, Debug, PartialEq, Eq)] (~465 tok)
-- `live.rs` — Curated close phrases (spec §7) — rotated by entry count so a returning user (~4981 tok)
-- `main.rs` — Declares Shape (~10107 tok)
+- `live.rs` — Curated close phrases (spec §7) — rotated by entry count so a returning user (~4646 tok)
+- `main.rs` — Declares Shape (~9426 tok)
 - `packs.rs` — Every pack compiled into the binary, in display order. (~583 tok)
 - `paths.rs` — Resolve the base dir: explicit override, else `TALK_BASE_DIR`, else `~/talk`. (~1778 tok)
-- `session.rs` — Consume the whole source, cleaning each committed phrase through (~2136 tok)
-- `source.rs` — One emitted transcript event from a source. (~921 tok)
+- `session.rs` — Consume the whole source, cleaning each committed phrase through (~2601 tok)
+- `source.rs` — One emitted transcript event from a source. (~860 tok)
 - `state.rs` — First-run privacy disclosure shown? Set once, the first time a non-ephemeral (~1177 tok)
 - `streak.rs` — Local, account-free reflection record. A day is credited when an entry is (~1843 tok)
 - `writer.rs` — Reflect: one file per question, bound by id. (~2925 tok)
@@ -96,15 +102,15 @@
 ## src/download/
 
 - `mod.rs` — Redirect hops to tolerate (GitHub release assets 302 once to their CDN). (~1894 tok)
-- `models.rs` — One downloadable artifact with a pinned hash. Fill `sha256` from the actual (~1454 tok)
+- `models.rs` — One downloadable artifact with a pinned hash. Fill `sha256` from the actual (~1274 tok)
 
 ## src/listen/
 
 - `capture.rs` — Open the default input device and stream mono f32 chunks to the channel. (~1058 tok)
-- `mod.rs` — Live mic → streaming Zipformer (pass 1) → Moonshine base (pass 2), running both (~4052 tok)
+- `mod.rs` — Live mic → streaming Zipformer (pass 1) → Whisper base.en (pass 2), running both (~3876 tok)
 - `resample.rs` — Anti-aliasing resampler to 16 kHz (the rate both models want). (~2780 tok)
 - `streaming.rs` — Streaming first-pass recognizer (Zipformer-20M transducer) with built-in (~690 tok)
-- `stt.rs` — Paths from the unpacked quantized merged-decoder Moonshine base model dir: (~1278 tok)
+- `stt.rs` — Paths from the unpacked Whisper base.en (int8) model dir: (~2110 tok)
 
 ## src/render/
 
@@ -112,5 +118,5 @@
 
 ## tests/
 
-- `integration.rs` — `directories` resolves the base dir from $HOME on unix, so overriding HOME (~5478 tok)
-- `privacy.rs` — Spec §7: after a full ephemeral session, zero bytes of transcript touch the (~3923 tok)
+- `integration.rs` — `directories` resolves the base dir from $HOME on unix, so overriding HOME (~5107 tok)
+- `privacy.rs` — Spec §7: after a full ephemeral session, zero bytes of transcript touch the (~3647 tok)

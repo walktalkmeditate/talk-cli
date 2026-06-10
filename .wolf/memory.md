@@ -3,6 +3,10 @@
 > Chronological action log. Hooks and AI append to this file automatically.
 > Old sessions are consolidated by the daemon weekly.
 
+| 15:27 | T5: retarget ffi_probe + privacy.rs to Whisper base.en | examples/ffi_probe.rs, tests/privacy.rs | committed bc6a4aa; 5 privacy tests pass, 1 ignored (#[ignore] sandbox test preserved); pre-existing integration.rs failure unrelated | ~600 |
+
+| session | T3: wired format_revise into Revise path in session.rs + live.rs; updated 2 Revise tests to verbatim Whisper expectations; added whisper_revise_is_thin_formatted_and_continuation_decapitalized test; 8 session + 5 live tests pass, clippy clean | src/session.rs, src/live.rs | committed 68abbb4 | ~4k |
+
 ## Session: 2026-06-10 07:16
 
 | Time | Action | File(s) | Outcome | ~Tokens |
@@ -85,3 +89,57 @@
 | 15:00 | Edited docs/superpowers/plans/2026-06-10-talk-cli-whisper-base-pass2.md | modified plausibly_speech() | ~455 |
 | 15:01 | Session end: 59 writes across 20 files (statusline.sh, pass_probe.rs, cleanup.rs, session.rs, format.rs) | 30 reads | ~121230 tok |
 | 15:04 | Created .gitignore | — | ~112 |
+| 15:06 | Created src/listen/stt.rs | — | ~1476 |
+| 15:07 | Created src/listen/stt.rs | — | ~1292 |
+| 15:07 | Edited src/listen/stt.rs | modified suspect_hallucination() | ~191 |
+| 15:08 | Edited src/listen/mod.rs | modified plausibly_speech() | ~270 |
+| 15:08 | Edited src/listen/mod.rs | modified plausibly_speech() | ~155 |
+| 15:08 | T1: rewrote stt.rs Moonshine→Whisper, widened envelope 8s→30s, added suspect_hallucination, wired guard into both rescue branches | src/listen/stt.rs, src/listen/mod.rs | committed 8ca0cb3 | ~2k |
+| 15:09 | Edited src/listen/stt.rs | modified quietest_cut_lands_in_the_silent_gap() | ~267 |
+| 15:12 | Edited tests/privacy.rs | modified inference_stack_runs_under_deny_network_sandbox() | ~84 |
+| 15:14 | Edited crates/talk-core/src/cleanup.rs | modified rewrite_prompt_always_states_the_restraint() | ~345 |
+| 15:14 | Edited crates/talk-core/src/cleanup.rs | modified decapitalize_continuation() | ~602 |
+| 15:15 | Edited crates/talk-core/src/cleanup.rs | modified format_revise() | ~183 |
+| 20:15 | T2: added decapitalize_continuation + format_revise to cleanup.rs (strict TDD, 23/23 pass, clippy clean) | crates/talk-core/src/cleanup.rs | committed dd6cbb7 | ~400 |
+| 15:17 | Edited src/session.rs | 4→7 lines | ~118 |
+| 15:17 | Edited src/live.rs | 5→5 lines | ~73 |
+| 15:17 | Edited src/session.rs | modified revise_event_upgrades_the_committing_phrase_in_the_file() | ~207 |
+| 15:18 | Edited src/session.rs | modified revise_targets_the_block_it_was_paired_with_not_a_later_commit() | ~226 |
+| 15:18 | Edited src/session.rs | modified whisper_revise_is_thin_formatted_and_continuation_decapitalized() | ~231 |
+| 15:22 | Edited src/download/models.rs | modified corroboration() | ~378 |
+| 15:22 | Edited src/download/models.rs | 10→10 lines | ~180 |
+| 15:23 | Edited src/download/models.rs | 12→12 lines | ~122 |
+| 15:23 | Edited src/main.rs | 10→10 lines | ~195 |
+| 15:23 | Edited src/main.rs | modified offer_first_run_fetch() | ~163 |
+| 15:23 | Edited src/main.rs | 3→3 lines | ~68 |
+| 15:23 | Edited src/main.rs | 3→3 lines | ~65 |
+| 15:24 | T4: manifest swap — Moonshine→Whisper base.en int8, EXTRACTED pins, main.rs paths, fetch-offer copy | src/download/models.rs src/main.rs | committed c352300, clean build+clippy | ~800 |
+| 15:25 | Edited examples/ffi_probe.rs | 2→2 lines | ~44 |
+| 15:25 | Edited examples/ffi_probe.rs | "sherpa-onnx-moonshine-bas" → "sherpa-onnx-whisper-base." | ~17 |
+| 15:25 | Edited examples/ffi_probe.rs | 12→12 lines | ~121 |
+| 15:25 | Edited tests/privacy.rs | 4→4 lines | ~38 |
+| 15:26 | Edited tests/privacy.rs | 9→9 lines | ~102 |
+| 15:26 | Edited tests/privacy.rs | 4→4 lines | ~39 |
+| 15:26 | Edited tests/privacy.rs | 4→4 lines | ~33 |
+| 15:26 | Edited tests/privacy.rs | 7→7 lines | ~116 |
+| 15:26 | Edited tests/privacy.rs | 8→8 lines | ~147 |
+| 15:26 | Edited tests/privacy.rs | 4→5 lines | ~51 |
+| 15:28 | Edited tests/integration.rs | "sherpa-onnx-moonshine-bas" → "sherpa-onnx-whisper-base." | ~16 |
+| 15:34 | Edited tests/privacy.rs | modified inference_stack_runs_under_deny_network_sandbox() | ~31 |
+| 15:44 | Created ../../../../../tmp/compound-engineering/ce-code-review/20260610-154006-9b113dea/testing.json | — | ~2810 |
+| 15:44 | Created ../../../../../tmp/compound-engineering/ce-code-review/20260610-154006-9b113dea/security.json | — | ~2013 |
+| 15:44 | Created ../../../../../tmp/compound-engineering/ce-code-review/20260610-154006-9b113dea/correctness.json | — | ~1404 |
+| 15:44 | Created ../../../../../tmp/compound-engineering/ce-code-review/20260610-154006-9b113dea/project-standards.json | — | ~2260 |
+| 15:44 | Created ../../../../../tmp/compound-engineering/ce-code-review/20260610-154006-9b113dea/reliability.json | — | ~1463 |
+| 15:45 | Created ../../../../../tmp/compound-engineering/ce-code-review/20260610-154006-9b113dea/maintainability.json | — | ~2540 |
+| 15:46 | Created ../../../../../tmp/compound-engineering/ce-code-review/20260610-154006-9b113dea/adversarial.json | — | ~4937 |
+| 15:50 | Edited crates/talk-core/src/cleanup.rs | modified decapitalize_continuation() | ~121 |
+| 15:50 | Edited crates/talk-core/src/cleanup.rs | modified format_revise() | ~176 |
+| 15:50 | Edited src/listen/stt.rs | modified suspect_hallucination() | ~594 |
+| 15:51 | Edited src/listen/stt.rs | modified suspect_hallucination_flags_repetition_and_density() | ~288 |
+| 15:51 | Edited src/source.rs | inline fix | ~21 |
+| 15:51 | Edited tests/privacy.rs | inline fix | ~22 |
+| 15:51 | Edited src/listen/mod.rs | 2→2 lines | ~46 |
+| 15:51 | Edited src/listen/mod.rs | inline fix | ~22 |
+| 15:52 | Edited src/download/models.rs | 4→4 lines | ~75 |
+| 15:53 | Edited src/session.rs | modified continuation_decapitalizes_across_an_unterminated_prior_revise() | ~306 |

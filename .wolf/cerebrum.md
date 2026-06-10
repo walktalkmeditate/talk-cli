@@ -27,3 +27,5 @@
 ## Decision Log
 
 <!-- Significant technical decisions with rationale. Why X was chosen over Y. -->
+
+- [2026-06-10] Pass-2 model swapped from Moonshine base to Whisper base.en (int8). Whisper config uses `cfg.model_config.whisper.{encoder,decoder,language,task}` + `cfg.model_config.tokens`. Envelope widened from 8s to 30s. `suspect_hallucination` guard added to BOTH rescue branches (endpoint + flush-finish) only — not the normal pass-2 path.

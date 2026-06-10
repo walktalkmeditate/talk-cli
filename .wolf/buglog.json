@@ -243,6 +243,150 @@
       "related_bugs": [],
       "occurrences": 1,
       "last_seen": "2026-06-10T20:00:39.660Z"
+    },
+    {
+      "id": "bug-015",
+      "timestamp": "2026-06-10T20:12:14.489Z",
+      "error_message": "Missing error handling in unknown",
+      "file": "tests/privacy.rs",
+      "root_cause": "Code path had no error handling — exceptions would propagate uncaught",
+      "fix": "Added try/catch block",
+      "tags": [
+        "auto-detected",
+        "error-handling",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-10T20:12:14.489Z"
+    },
+    {
+      "id": "bug-016",
+      "timestamp": "2026-06-10T20:23:41.821Z",
+      "error_message": "Wrong reference: 239 should be 330",
+      "file": "src/main.rs",
+      "root_cause": "Used \"239\" instead of \"330\"",
+      "fix": "Changed 239 → 330",
+      "tags": [
+        "auto-detected",
+        "wrong-reference",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 2,
+      "last_seen": "2026-06-10T20:23:47.155Z"
+    },
+    {
+      "id": "bug-017",
+      "timestamp": "2026-06-10T20:25:45.446Z",
+      "error_message": "Incorrect value in code",
+      "file": "examples/ffi_probe.rs",
+      "root_cause": "Had \"sherpa-onnx-moonshine-base-en-quantized-2026-02-2",
+      "fix": "Changed to \"sherpa-onnx-whisper-base.en\"",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-10T20:25:45.446Z"
+    },
+    {
+      "id": "bug-018",
+      "timestamp": "2026-06-10T20:28:21.046Z",
+      "error_message": "Incorrect value in code",
+      "file": "tests/integration.rs",
+      "root_cause": "Had \"sherpa-onnx-moonshine-base-en-quantized-2026-02-2",
+      "fix": "Changed to \"sherpa-onnx-whisper-base.en.tar.bz2\"",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-10T20:28:21.046Z"
+    },
+    {
+      "id": "bug-019",
+      "timestamp": "2026-06-10T20:34:15.471Z",
+      "error_message": "Significant refactor of ",
+      "file": "tests/privacy.rs",
+      "root_cause": "3 lines replaced/restructured",
+      "fix": "Rewrote 6→3 lines (3 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-10T20:34:15.471Z"
+    },
+    {
+      "id": "bug-020",
+      "timestamp": "2026-06-10T20:50:18.274Z",
+      "error_message": "Significant refactor of ",
+      "file": "crates/talk-core/src/cleanup.rs",
+      "root_cause": "2 lines replaced/restructured",
+      "fix": "Rewrote 6→10 lines (2 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-10T20:50:18.274Z"
+    },
+    {
+      "id": "bug-021",
+      "timestamp": "2026-06-10T20:50:42.794Z",
+      "error_message": "Missing error handling in unknown",
+      "file": "src/listen/stt.rs",
+      "root_cause": "Code path had no error handling — exceptions would propagate uncaught",
+      "fix": "Added try/catch block",
+      "tags": [
+        "auto-detected",
+        "error-handling",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-10T20:50:42.794Z"
+    },
+    {
+      "id": "bug-022",
+      "timestamp": "2026-06-10T20:51:25.730Z",
+      "error_message": "Wrong reference: 239 should be 330",
+      "file": "tests/privacy.rs",
+      "root_cause": "Used \"239\" instead of \"330\"",
+      "fix": "Changed 239 → 330",
+      "tags": [
+        "auto-detected",
+        "wrong-reference",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-10T20:51:25.730Z"
+    },
+    {
+      "id": "bug-023",
+      "timestamp": "2026-06-10T20:51:48.481Z",
+      "error_message": "Wrong reference: Moonshine should be Whisper",
+      "file": "src/listen/mod.rs",
+      "root_cause": "Used \"Moonshine\" instead of \"Whisper\"",
+      "fix": "Changed Moonshine → Whisper",
+      "tags": [
+        "auto-detected",
+        "wrong-reference",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-10T20:51:48.481Z"
     }
   ]
 }
