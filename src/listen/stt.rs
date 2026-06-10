@@ -82,21 +82,46 @@ fn quietest_cut(samples: &[f32], sample_rate: i32) -> usize {
     best.1
 }
 
-/// A Whisper transcript is a suspected hallucination over near-silence when it is
-/// a single token repeated or implausibly dense for the audio length. Used only on
-/// the quiet-speech rescue path (pass-1 found nothing), where Whisper is most prone
-/// to inventing text from silence.
+/// Natural speech tops out near 3 words/sec; above this density a transcript is
+/// implausible for the audio length.
+const HALLUCINATION_WPS_CEILING: f32 = 4.0;
+/// Grace added to the density ceiling so a short genuine clip isn't flagged.
+const HALLUCINATION_WORD_GRACE: f32 = 4.0;
+/// Whisper's signature non-speech / silence hallucinations (normalized: lowercase,
+/// punctuation-stripped). On the RESCUE path (pass-1 heard nothing) these are far
+/// likelier invented from silence than actually spoken — a reflection journal must
+/// never sprout "please subscribe" — so we drop them. The density/repeat heuristics
+/// below cannot catch these because they are short and plausibly-worded.
+const SILENCE_HALLUCINATIONS: &[&str] = &[
+    "thank you", "thank you very much", "thanks for watching",
+    "thank you for watching", "thanks for watching everyone", "please subscribe",
+    "please like and subscribe", "subscribe to my channel", "see you next time",
+    "see you in the next video", "the end", "you", "bye", "goodbye",
+    "subtitles by the amara.org community",
+];
+
+/// A Whisper transcript is a suspected hallucination over near-silence when it is a
+/// canned silence phrase, a single token repeated, or implausibly dense for the
+/// audio length. Used ONLY on the quiet-speech rescue path (pass-1 found nothing),
+/// where Whisper is most prone to inventing text from silence. Tokens are
+/// punctuation-stripped so `"you, you, you."` is still seen as a repeat.
 pub fn suspect_hallucination(text: &str, audio_secs: f32) -> bool {
-    let words: Vec<&str> = text.split_whitespace().collect();
-    if words.len() < 4 {
-        return false;
-    }
-    if words.len() as f32 > audio_secs * 4.0 + 4.0 {
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if SILENCE_HALLUCINATIONS.contains(&words.join(" ").as_str()) {
         return true;
     }
-    let distinct: std::collections::HashSet<String> =
-        words.iter().map(|w| w.to_lowercase()).collect();
-    distinct.len() == 1
+    if words.len() < 4 {
+        // Too short for the density check; a repeated short token still reads as noise.
+        return words.len() >= 2 && words.iter().all(|w| *w == words[0]);
+    }
+    if words.len() as f32 > audio_secs * HALLUCINATION_WPS_CEILING + HALLUCINATION_WORD_GRACE {
+        return true;
+    }
+    words.iter().collect::<std::collections::HashSet<_>>().len() == 1
 }
 
 #[cfg(test)]
@@ -133,5 +158,22 @@ mod tests {
         assert!(suspect_hallucination("a b c d e f g h i j k l", 1.0));
         assert!(!suspect_hallucination("oh well that worked", 1.3));
         assert!(!suspect_hallucination("", 2.0));
+    }
+
+    #[test]
+    fn suspect_hallucination_flags_canonical_silence_phrases() {
+        // Whisper's signature silence outputs — short, plausible, density-passing.
+        assert!(suspect_hallucination("Thank you for watching.", 2.0));
+        assert!(suspect_hallucination("you", 1.0));
+        assert!(suspect_hallucination("Please subscribe!", 1.5));
+        assert!(suspect_hallucination("Bye.", 1.0));
+        // punctuation must not defeat the repeat check
+        assert!(suspect_hallucination("you, you, you, you.", 2.0));
+    }
+
+    #[test]
+    fn suspect_hallucination_keeps_genuine_short_speech() {
+        assert!(!suspect_hallucination("i feel grateful", 1.5));
+        assert!(!suspect_hallucination("that surprised me", 1.2));
     }
 }

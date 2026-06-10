@@ -116,7 +116,10 @@ const CONTINUATIONS: &[&str] = &[
 /// pause. Conservative by construction (only the allow-list; never a proper noun).
 pub fn decapitalize_continuation(text: &str, prev_clean: Option<&str>) -> String {
     let continues = prev_clean.is_some_and(|p| {
-        !matches!(p.trim_end().chars().last(), Some('.') | Some('!') | Some('?') | None)
+        // Look past trailing closing quotes/brackets so `."` reads as terminated;
+        // a Unicode ellipsis is a deliberate trail-off, also terminal.
+        let tail = p.trim_end().trim_end_matches(['"', '\'', ')', ']', '”', '’']);
+        !matches!(tail.chars().last(), Some('.' | '!' | '?' | '…') | None)
     });
     if !continues {
         return text.to_string();
@@ -138,8 +141,12 @@ pub fn decapitalize_continuation(text: &str, prev_clean: Option<&str>) -> String
 /// the per-segment mid-sentence capital). It applies only the spoken-command and
 /// `scratch that` backtrack features and the continuation de-capitalizer.
 ///
-/// Order: backtrack first (operates on raw words), then spoken commands (inserts
-/// `\n` / `\n\n`), so the final join in `apply_backtrack` never collapses newlines.
+/// Order is DELIBERATELY the reverse of the commit path's
+/// `apply_backtrack(apply_spoken_commands(raw))` (live.rs/session.rs/format.rs):
+/// `apply_backtrack` ends with `split_whitespace().join(" ")`, which collapses the
+/// `\n` that spoken commands insert. Running backtrack FIRST (on whitespace-only
+/// text) and spoken commands LAST lets a spoken `new line` survive into the output.
+/// Do not "tidy" this back to the commit order — it silently drops newlines.
 pub fn format_revise(whisper: &str, prev_clean: Option<&str>) -> String {
     let pre = apply_spoken_commands(&apply_backtrack(whisper));
     decapitalize_continuation(&pre, prev_clean)

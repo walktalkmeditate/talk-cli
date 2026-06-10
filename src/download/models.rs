@@ -24,10 +24,10 @@ pub struct Artifact {
 ///
 /// The Whisper base.en archive also predates GitHub's stored-digest field
 /// (`digest: null`), so its archive pin (`475bc705…`) rests on
-/// download-and-rehash (2026-06-10); its int8 encoder and decoder were
-/// corroborated against the Hugging Face mirror
-/// `csukuangfj/sherpa-onnx-whisper-base.en` (LFS sha256 `ef6b936f…` /
-/// `f7162ad6…` match).
+/// download-and-rehash (2026-06-10); all three extracted files it loads — the
+/// int8 encoder, int8 decoder, and tokens — were corroborated against the
+/// Hugging Face mirror `csukuangfj/sherpa-onnx-whisper-base.en` (sha256
+/// `ef6b936f…` / `f7162ad6…` / `306cd27f…` match).
 pub const MODELS: &[Artifact] = &[
     // Whisper base.en (int8 encoder/decoder + tokens) for pass-2 transcription.
     // Extracts to `sherpa-onnx-whisper-base.en/`; the loader reads

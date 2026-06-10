@@ -141,7 +141,7 @@ fn tampered_extracted_file_is_healed_from_verified_archives() {
 }
 
 /// The startup-perf claim, as a behavioral guarantee: when the extracted files all
-/// verify, the gate passes WITHOUT the 239 MB archives — so a regression that
+/// verify, the gate passes WITHOUT the ~330 MB archives — so a regression that
 /// re-required archive hashing on every launch (or skipped a weight) would fail
 /// here. Copies the real extracted dirs but leaves NO archives present; the gate
 /// must still pass. Models-present-gated; skips when the cache is absent.

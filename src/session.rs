@@ -185,6 +185,25 @@ mod tests {
     }
 
     #[test]
+    fn continuation_decapitalizes_across_an_unterminated_prior_revise() {
+        // The de-cap FIRING case: prior Revise ends without terminal punctuation, so
+        // a following allow-listed word ("All") is lowercased — the "just All these"
+        // mid-sentence-capital artifact, undone.
+        let dir = tempfile::tempdir().unwrap();
+        let mut src = FakeTranscript::new(vec![
+            Event::Commit("rough one".into()),
+            Event::Revise("with their product".into()), // no terminal punctuation
+            Event::Commit("rough two".into()),
+            Event::Revise("All these edge cases.".into()),
+            Event::Done,
+        ]);
+        let p = run(&mut src, Target::Journal, &cfg(dir.path(), false)).unwrap().unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("with their product all these edge cases."),
+            "de-cap should lowercase 'All' after an unterminated prior: {text}");
+    }
+
+    #[test]
     fn an_over_editing_formatter_cannot_corrupt_the_file() {
         struct Flip;
         impl talk_core::format::Formatter for Flip {

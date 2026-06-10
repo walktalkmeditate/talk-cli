@@ -17,7 +17,7 @@ pub enum Event {
 }
 
 /// A source of transcript events. The live session implements this over the
-/// streaming Zipformer (partials/commits) + Moonshine base (pass-2 revises).
+/// streaming Zipformer (partials/commits) + Whisper base.en (pass-2 revises).
 pub trait TranscriptSource {
     fn next(&mut self) -> Option<Event>;
 }
