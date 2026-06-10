@@ -139,19 +139,16 @@ fn text_pipeline_makes_no_network_calls_under_sandbox() {
         .contains("No packets were harmed."));
 }
 
-/// The REAL inference stack (sherpa-onnx FFI: streaming + Moonshine) under
-/// deny-network. Models-present-gated: skips on runners without the cached models;
-/// runs in full on dev machines. This is the spec §14 check that the FFI path makes
-/// zero outbound connections.
+/// The REAL inference stack (sherpa-onnx FFI: streaming Zipformer pass-1 +
+/// Moonshine base pass-2) under deny-network. Models-present-gated: skips on
+/// runners without the cached models; runs in full on dev machines. This is the
+/// spec §14 check that the FFI path makes zero outbound connections.
 ///
-/// Plan 5 T3 swapped the manifest to base + zipformer, but `ffi_probe` (which this
-/// test shells) still loads the OLD silero + tiny stack until T4 rewrites it. With
-/// the skip-gate now pointing at the new dirs, the probe would be handed paths whose
-/// models it doesn't load — so the test is ignored until T6 re-enables it against the
-/// migrated probe.
+/// `ffi_probe` loads the Plan 5 stack (Streaming + base Stt, migrated in T4) and
+/// drives both passes; the skip-gate paths below point at the base + zipformer
+/// dirs, so on a migrated machine this test RUNS — it does not skip.
 #[cfg(all(target_os = "macos", feature = "listen"))]
 #[test]
-#[ignore = "re-enabled in Plan 5 T6 (probe migrates to the new stack)"]
 fn inference_stack_runs_under_deny_network_sandbox() {
     const PROFILE: &str = "(version 1)(allow default)(deny network*)";
 
