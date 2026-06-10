@@ -6,7 +6,7 @@ pub enum Mode { Reflect, Journal, Ephemeral }
 
 /// The tone a line paints in: Settled = bright core text, Edge = dim live edge,
 /// Chrome = the dimmest border/hint/status tone.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LineKind { Chrome, Settled, Edge }
 
 /// Everything the screen needs, with no I/O. The live session rebuilds this each
@@ -52,7 +52,10 @@ pub fn compose(v: &View) -> Vec<(String, LineKind)> {
         body += 1;
     }
     if let Some(c) = v.settle.committing() {
-        out.push((if v.show_raw { c.raw.clone() } else { c.clean.clone() }, LineKind::Settled));
+        // Bright = pass-2-final: the committing block stays DIM (Edge) until it is
+        // revised/upgraded, then brightens to Settled. Settled blocks never move.
+        let kind = if v.settle.committing_revised() { LineKind::Settled } else { LineKind::Edge };
+        out.push((if v.show_raw { c.raw.clone() } else { c.clean.clone() }, kind));
         body += 1;
     }
     // Empty body, not listening: a single dim placeholder keeps the region deterministic.
@@ -85,8 +88,21 @@ fn privacy_gap(label: &str, privacy: &str) -> usize {
 }
 
 fn edge_line(v: &View) -> String {
-    // Settle-on-pause: the live edge is a listening indicator, not partials.
-    if v.listening { "  …".to_string() } else { String::new() }
+    // The live edge: the streaming partial (dim, jittering) — held to ONE line so
+    // the layout never bounces; long partials show their tail. Else a calm dot.
+    let live = v.settle.live();
+    if !live.is_empty() {
+        let tail: String = live.chars().rev().take(72).collect::<Vec<_>>().into_iter().rev().collect();
+        if live.chars().count() > 72 {
+            format!("  …{tail}")
+        } else {
+            format!("  {tail}")
+        }
+    } else if v.listening {
+        "  …".to_string()
+    } else {
+        String::new()
+    }
 }
 
 fn status_line(v: &View) -> String {
@@ -219,6 +235,62 @@ mod tests {
         let mut v = base(Mode::Reflect, &s);
         v.confirm_cancel = true;
         assert!(text(&v).contains("discard this reflection?"));
+    }
+
+    #[test]
+    fn live_partial_renders_at_the_edge() {
+        let mut s = Settle::new();
+        s.on_partial("the thing i keep");
+        let v = base(Mode::Reflect, &s);
+        let joined = text(&v);
+        assert!(joined.contains("the thing i keep"));
+    }
+
+    #[test]
+    fn empty_partial_falls_back_to_the_listening_dot() {
+        let s = Settle::new();
+        let mut v = base(Mode::Reflect, &s);
+        v.listening = true;
+        assert!(compose(&v).iter().any(|(l, k)| l.contains('…') && *k == LineKind::Edge));
+    }
+
+    #[test]
+    fn long_partial_renders_one_truncated_tail_line() {
+        let mut s = Settle::new();
+        let long = "x".repeat(200);
+        s.on_partial(&long);
+        let v = base(Mode::Reflect, &s);
+        let edge = compose(&v)
+            .into_iter()
+            .find(|(l, k)| *k == LineKind::Edge && l.contains('x'))
+            .map(|(l, _)| l)
+            .expect("edge line with partial");
+        assert!(edge.contains('…'));
+        assert!(edge.ends_with(&"x".repeat(72)));
+        assert_eq!(edge.chars().filter(|c| *c == 'x').count(), 72);
+        assert!(!edge.contains('\n'));
+    }
+
+    #[test]
+    fn committing_block_dims_until_revised() {
+        let mut s = Settle::new();
+        s.commit("raw words", "Clean words.");
+        let v = base(Mode::Journal, &s);
+        let committing_kind = compose(&v)
+            .into_iter()
+            .find(|(l, _)| l.contains("Clean words."))
+            .map(|(_, k)| k)
+            .expect("committing line present");
+        assert_eq!(committing_kind, LineKind::Edge);
+
+        s.revise_committing("better raw", "Better clean.");
+        let v = base(Mode::Journal, &s);
+        let revised_kind = compose(&v)
+            .into_iter()
+            .find(|(l, _)| l.contains("Better clean."))
+            .map(|(_, k)| k)
+            .expect("revised committing line present");
+        assert_eq!(revised_kind, LineKind::Settled);
     }
 
     #[test]

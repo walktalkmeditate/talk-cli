@@ -17,6 +17,7 @@ pub struct Settle {
     settled: Vec<Block>,
     committing: Option<Block>,
     live: String,
+    committing_revised: bool,
 }
 
 impl Settle {
@@ -33,6 +34,7 @@ impl Settle {
     pub fn commit(&mut self, raw: &str, clean: &str) {
         self.finalize();
         self.committing = Some(Block { clean: clean.to_string(), raw: raw.to_string() });
+        self.committing_revised = false;
         self.live.clear();
     }
 
@@ -48,7 +50,26 @@ impl Settle {
     /// settled rule wins.
     pub fn upgrade_committing(&mut self, clean: &str) -> bool {
         match self.committing.as_mut() {
-            Some(b) => { b.clean = clean.to_string(); true }
+            Some(b) => {
+                b.clean = clean.to_string();
+                self.committing_revised = true;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Plan 5 second-pass swap: replace BOTH raw and clean of the committing
+    /// block (a better transcription of the same audio, not a reformat). No-op
+    /// once finalized — the settled rule wins, exactly like `upgrade_committing`.
+    pub fn revise_committing(&mut self, raw: &str, clean: &str) -> bool {
+        match self.committing.as_mut() {
+            Some(b) => {
+                b.raw = raw.to_string();
+                b.clean = clean.to_string();
+                self.committing_revised = true;
+                true
+            }
             None => false,
         }
     }
@@ -62,6 +83,10 @@ impl Settle {
     pub fn settled(&self) -> &[Block] { &self.settled }
     pub fn committing(&self) -> Option<&Block> { self.committing.as_ref() }
     pub fn live(&self) -> &str { &self.live }
+
+    /// True once the committing block has been revised/upgraded (its text is
+    /// final-quality). Drives the bright-is-final rendering: dim until revised.
+    pub fn committing_revised(&self) -> bool { self.committing_revised }
 }
 
 #[cfg(test)]
@@ -114,6 +139,47 @@ mod tests {
         s.finalize();
         assert!(!s.upgrade_committing("A!"));
         assert_eq!(s.settled()[0].clean, "A.");
+    }
+
+    #[test]
+    fn revise_replaces_both_raw_and_clean_of_the_committing_block() {
+        let mut s = Settle::new();
+        s.commit("a", "A.");
+        s.commit("live hypothesis", "Live hypothesis.");
+        assert!(s.revise_committing("better raw", "Better raw."));
+        assert_eq!(s.settled()[0].clean, "A."); // settled untouched
+        let c = s.committing().unwrap();
+        assert_eq!(c.raw, "better raw");
+        assert_eq!(c.clean, "Better raw.");
+    }
+
+    #[test]
+    fn revise_is_noop_after_finalize() {
+        let mut s = Settle::new();
+        s.commit("a", "A.");
+        s.finalize();
+        assert!(!s.revise_committing("x", "X."));
+        assert_eq!(s.settled()[0].raw, "a");
+    }
+
+    #[test]
+    fn committing_revised_flag_tracks_commit_then_revise_then_recommit() {
+        let mut s = Settle::new();
+        s.commit("a", "A.");
+        assert!(!s.committing_revised());
+        assert!(s.revise_committing("a2", "A2."));
+        assert!(s.committing_revised());
+        s.commit("b", "B.");
+        assert!(!s.committing_revised());
+    }
+
+    #[test]
+    fn upgrade_committing_sets_the_revised_flag() {
+        let mut s = Settle::new();
+        s.commit("a", "A.");
+        assert!(!s.committing_revised());
+        assert!(s.upgrade_committing("A, refined."));
+        assert!(s.committing_revised());
     }
 
     #[test]
