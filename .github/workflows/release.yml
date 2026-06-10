@@ -1,0 +1,189 @@
+# talk-cli release. Mirrors meditate-cli's release pipeline (binaries + checksums →
+# GitHub release → crates.io via Trusted Publishing → Homebrew tap), adapted for
+# talk's `listen` feature (sherpa-onnx FFI + cpal). Actions are pinned by full
+# commit SHA (supply-chain hygiene, matching ci.yml); trailing comments record the
+# human-readable version.
+#
+# NOTE: talk's `listen` feature links the sherpa-onnx native lib, which talk's CI
+# only exercises on macOS today. The Linux/Windows matrix legs are expected to need
+# iteration on their first run (extra system deps for the sherpa-onnx build);
+# `fail-fast: false` lets every target report so we see all gaps at once.
+#
+# One-time prerequisites (configured outside this file):
+#   - crates.io Trusted Publisher for BOTH `talk` and `talk-core`
+#     (repo walktalkmeditate/talk-cli, workflow release.yml, environment release).
+#   - repo secret HOMEBREW_TAP_TOKEN with push access to walktalkmeditate/homebrew-tap.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re)publish the Homebrew formula for"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          # Cross-compiled on the arm64 runner — GitHub's Intel macOS runners
+          # are scarce and being retired.
+          - os: macos-14
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Linux audio deps (cpal/ALSA)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - run: cargo build --release --locked --features listen --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          staging="talk-${{ matrix.target }}"
+          mkdir "$staging"
+          cp "target/${{ matrix.target }}/release/talk" "$staging/"
+          cp LICENSE README.md "$staging/"
+          tar -czf "$staging.tar.gz" "$staging"
+          shasum -a 256 "$staging.tar.gz" > "$staging.sha256"
+
+      - name: Package (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $staging = "talk-${{ matrix.target }}"
+          New-Item -ItemType Directory $staging | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/talk.exe" $staging
+          Copy-Item LICENSE, README.md $staging
+          Compress-Archive -Path $staging -DestinationPath "$staging.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 "$staging.zip").Hash.ToLower()
+          "$hash  $staging.zip" | Out-File "$staging.sha256" -Encoding ascii
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ matrix.target }}
+          path: talk-${{ matrix.target }}.*
+
+  # Publish to crates.io on a version tag via Trusted Publishing (OIDC) — no stored
+  # token. Requires a Trusted Publisher configured once on crates.io for BOTH
+  # `talk` and `talk-core` (repo walktalkmeditate/talk-cli, workflow release.yml,
+  # environment release).
+  crates:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+      - name: Install Linux audio deps (cpal/ALSA)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Fail if the tag and crate version disagree
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          crate="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "talk") | .version')"
+          if [ "$tag" != "$crate" ]; then
+            echo "tag $GITHUB_REF_NAME != Cargo.toml version $crate" >&2
+            exit 1
+          fi
+      - uses: rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec # v1
+        id: auth
+      - name: Publish talk-core, then talk (skip versions already live)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          publish() {
+            pkg="$1"
+            ver="$(cargo metadata --no-deps --format-version 1 \
+              | jq -r --arg p "$pkg" '.packages[] | select(.name == $p) | .version')"
+            if curl -sfI "https://static.crates.io/crates/$pkg/$pkg-$ver.crate" >/dev/null; then
+              echo "$pkg $ver already on crates.io — skipping"
+            else
+              cargo publish -p "$pkg"
+            fi
+          }
+          publish talk-core
+          publish talk
+
+  release:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Assemble checksums.txt
+        run: find dist -name '*.sha256' -exec cat {} + > dist/checksums.txt
+      - uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
+        with:
+          files: |
+            dist/**/*.tar.gz
+            dist/**/*.zip
+            dist/checksums.txt
+
+  # Update the shared Homebrew tap formula from the published release. Runs after a
+  # successful release, or standalone via workflow_dispatch with a tag input.
+  homebrew:
+    needs: release
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.release.result == 'success')
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: walktalkmeditate/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+      - name: Render and push the formula
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y gettext-base
+          export VERSION="${TAG#v}"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern checksums.txt --output checksums.txt --clobber
+          sha() { grep " $1\$" checksums.txt | awk '{print $1}'; }
+          export SHA256_MAC_ARM="$(sha talk-aarch64-apple-darwin.tar.gz)"
+          export SHA256_MAC_X86="$(sha talk-x86_64-apple-darwin.tar.gz)"
+          export SHA256_LINUX_X86="$(sha talk-x86_64-unknown-linux-gnu.tar.gz)"
+          test -n "$SHA256_MAC_ARM" && test -n "$SHA256_MAC_X86" && test -n "$SHA256_LINUX_X86"
+          envsubst '${VERSION} ${TAG} ${SHA256_MAC_ARM} ${SHA256_MAC_X86} ${SHA256_LINUX_X86}' \
+            < .github/talk.rb.tpl > tap/Formula/talk.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/talk.rb
+          git commit -m "talk $VERSION" || { echo "formula already current"; exit 0; }
+          git push

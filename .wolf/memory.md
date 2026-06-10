@@ -143,3 +143,12 @@
 | 15:51 | Edited src/listen/mod.rs | inline fix | ~22 |
 | 15:52 | Edited src/download/models.rs | 4→4 lines | ~75 |
 | 15:53 | Edited src/session.rs | modified continuation_decapitalizes_across_an_unterminated_prior_revise() | ~306 |
+| 16:01 | Edited ../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/talk-cli-build-state.md | "talk-cli build progress (" → "talk-cli build progress (" | ~54 |
+| 16:02 | Edited ../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/talk-cli-build-state.md | modified WORK() | ~825 |
+| 16:02 | Session end: 112 writes across 27 files (statusline.sh, pass_probe.rs, cleanup.rs, session.rs, format.rs) | 33 reads | ~146748 tok |
+| 17:01 | Edited ../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/talk-cli-build-state.md | inline fix | ~83 |
+| 17:01 | Session end: 113 writes across 27 files (statusline.sh, pass_probe.rs, cleanup.rs, session.rs, format.rs) | 33 reads | ~146837 tok |
+| 17:12 | Created .github/workflows/release.yml | — | ~2253 |
+| 17:12 | Created install.sh | — | ~630 |
+| 17:13 | Created install.ps1 | — | ~595 |
+| 17:13 | Created .github/talk.rb.tpl | — | ~270 |

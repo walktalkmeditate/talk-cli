@@ -1,7 +1,7 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-06-10T20:53:36.662Z
-> Files: 70 tracked | Anatomy hits: 0 | Misses: 0
+> Auto-maintained by OpenWolf. Last scanned: 2026-06-10T22:13:22.367Z
+> Files: 75 tracked | Anatomy hits: 0 | Misses: 0
 
 ## ../../../../../tmp/compound-engineering/ce-code-review/20260610-154006-9b113dea/
 
@@ -9,12 +9,18 @@
 - `maintainability.json` — Declares explains (~2540 tok)
 - `reliability.json` — Declares initializes (~1463 tok)
 
+## ../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/
+
+- `talk-cli-build-state.md` (~2973 tok)
+
 ## ./
 
 - `.gitignore` — Git ignore rules (~112 tok)
 - `Cargo.toml` — Rust package manifest (~540 tok)
 - `CLAUDE.md` — OpenWolf (~57 tok)
 - `DREAMING.md` — talk-cli — Dreaming Notes (~4818 tok)
+- `install.ps1` — talk installer (Windows). Downloads the latest release, verifies its checksum, (~595 tok)
+- `install.sh` — talk installer (macOS / Linux). Downloads the latest release binary, verifies its (~630 tok)
 - `README.md` — Project documentation (~564 tok)
 
 ## .claude/
@@ -32,9 +38,14 @@
 
 - `openwolf.md` (~313 tok)
 
+## .github/
+
+- `talk.rb.tpl` — Declares Talk (~270 tok)
+
 ## .github/workflows/
 
 - `ci.yml` — talk-cli CI. (~654 tok)
+- `release.yml` — /*.tar.gz (~2253 tok)
 
 ## crates/talk-core/
 

@@ -387,6 +387,38 @@
       "related_bugs": [],
       "occurrences": 1,
       "last_seen": "2026-06-10T20:51:48.481Z"
+    },
+    {
+      "id": "bug-024",
+      "timestamp": "2026-06-10T21:01:47.706Z",
+      "error_message": "Incorrect value in code",
+      "file": "../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/talk-cli-build-state.md",
+      "root_cause": "Had \"talk-cli build progress (Plans 1-5 done & merged;",
+      "fix": "Changed to \"talk-cli build progress (Plans 1-5 + post-v1 qual",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "md"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-10T21:01:47.706Z"
+    },
+    {
+      "id": "bug-025",
+      "timestamp": "2026-06-10T21:02:08.054Z",
+      "error_message": "Function not marked async",
+      "file": "../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/talk-cli-build-state.md",
+      "root_cause": "Function uses await but wasn't declared async",
+      "fix": "Added async modifier",
+      "tags": [
+        "auto-detected",
+        "async-fix",
+        "md"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-10T21:02:08.054Z"
     }
   ]
 }
