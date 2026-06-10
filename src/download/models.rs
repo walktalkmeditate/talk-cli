@@ -12,7 +12,7 @@ pub struct Artifact {
 ///
 /// Replaces the Plan-2 manifest (moonshine-tiny + silero_vad): the streaming
 /// model's built-in endpoint rules do the VAD's old job, so silero is gone, and
-/// base supersedes tiny for accuracy (~219 MB combined, stated honestly in the
+/// base supersedes tiny for accuracy (~239 MB combined, stated honestly in the
 /// fetch offer). Old tiny/silero caches are left in place on disk (~30 MB,
 /// harmless — never loaded again); a `talk download clean` is deliberately NOT
 /// added (YAGNI: there is no downgrade path once the code stops referencing them).
@@ -21,9 +21,13 @@ pub struct Artifact {
 /// private audio): both archive SHAs were independently re-derived by downloading
 /// from the URLs below and hashing. The moonshine-base SHA additionally matches
 /// GitHub's stored release-asset digest (`sha256:43232c1d…`); the zipformer asset
-/// predates GitHub's digest field (uploaded 2024-01-03, `digest: null`), so it is
-/// corroborated only by the download-and-rehash above plus the extracted-file
-/// chain in `EXTRACTED`. NOTE: a similarly-named `…-20M-2023-02-17-mobile.tar.bz2`
+/// predates GitHub's digest field (uploaded 2024-01-03, `digest: null`), so its
+/// archive pin rests on the download-and-rehash above — but all three of its
+/// pinned WEIGHT files in `EXTRACTED` (encoder/decoder/joiner) were corroborated
+/// 2026-06-09 against an independent channel: the Hugging Face mirror
+/// `csukuangfj/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17` serves
+/// byte-identical files (LFS sha256 `3810755c…`/`45a7f940…`/`e085d73b…` match).
+/// NOTE: a similarly-named `…-20M-2023-02-17-mobile.tar.bz2`
 /// (107.6 MB) is a DIFFERENT asset — this manifest pins the non-mobile 127.9 MB
 /// archive, which is what `9c559283…` hashes to.
 pub const MODELS: &[Artifact] = &[

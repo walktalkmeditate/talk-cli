@@ -16,7 +16,7 @@ pub struct View<'a> {
     pub question: Option<&'a str>, // reflect only
     pub held_label: Option<&'a str>, // e.g. "held 3 days"; None hides the box line
     pub settle: &'a Settle,
-    pub listening: bool,           // VAD currently hears speech
+    pub listening: bool,           // streaming-partial activity latch (decays in silence)
     pub elapsed: &'a str,          // "2:14"
     pub cleanup: &'a str,          // "Light"
     pub show_raw: bool,            // `u` toggle: show raw verbatim instead of clean
@@ -87,16 +87,24 @@ fn privacy_gap(label: &str, privacy: &str) -> usize {
     66usize.saturating_sub(label.chars().count() + privacy.chars().count()).max(2)
 }
 
+/// The edge line never exceeds the 66-column frame the rest of the chrome draws
+/// ("  " prefix + content), so it cannot wrap-and-bounce on terminals narrower
+/// than the partial — the one-line contract holds in rendered rows, not just
+/// character count.
+const EDGE_MAX_CHARS: usize = 64;
+const EDGE_TAIL_CHARS: usize = 63; // EDGE_MAX_CHARS minus the '…' marker
+
 fn edge_line(v: &View) -> String {
     // The live edge: the streaming partial (dim, jittering) — held to ONE line so
     // the layout never bounces; long partials show their tail. Else a calm dot.
     let live = v.settle.live();
     if !live.is_empty() {
-        let tail: String = live.chars().rev().take(72).collect::<Vec<_>>().into_iter().rev().collect();
-        if live.chars().count() > 72 {
+        let chars: Vec<char> = live.chars().collect();
+        if chars.len() > EDGE_MAX_CHARS {
+            let tail: String = chars[chars.len() - EDGE_TAIL_CHARS..].iter().collect();
             format!("  …{tail}")
         } else {
-            format!("  {tail}")
+            format!("  {live}")
         }
     } else if v.listening {
         "  …".to_string()
@@ -266,9 +274,40 @@ mod tests {
             .map(|(l, _)| l)
             .expect("edge line with partial");
         assert!(edge.contains('…'));
-        assert!(edge.ends_with(&"x".repeat(72)));
-        assert_eq!(edge.chars().filter(|c| *c == 'x').count(), 72);
+        assert!(edge.ends_with(&"x".repeat(63)));
+        assert_eq!(edge.chars().filter(|c| *c == 'x').count(), 63);
         assert!(!edge.contains('\n'));
+        // The whole line fits the 66-column frame — it can't wrap-and-bounce.
+        assert!(edge.chars().count() <= 66, "edge line wider than the frame");
+    }
+
+    #[test]
+    fn multibyte_partial_truncates_on_char_boundaries() {
+        let mut s = Settle::new();
+        let long = "é".repeat(100) + "末尾";
+        s.on_partial(&long);
+        let v = base(Mode::Reflect, &s);
+        let edge = compose(&v)
+            .into_iter()
+            .find(|(l, k)| *k == LineKind::Edge && l.contains("末尾"))
+            .map(|(l, _)| l)
+            .expect("edge line with truncated partial");
+        assert!(edge.starts_with("  …"), "long multibyte partial must show a truncated tail");
+        assert!(edge.ends_with("末尾"), "tail must keep the newest characters");
+        assert!(edge.chars().count() <= 66);
+    }
+
+    #[test]
+    fn raw_toggle_works_on_the_unrevised_committing_block() {
+        // Before pass-2 lands, raw holds the lowercased streaming text — the `u`
+        // toggle must surface it on the committing (still dim) block too.
+        let mut s = Settle::new();
+        s.commit("loud streaming text", "Clean text.");
+        let mut v = base(Mode::Journal, &s);
+        v.show_raw = true;
+        let joined = text(&v);
+        assert!(joined.contains("loud streaming text"));
+        assert!(!joined.contains("Clean text."));
     }
 
     #[test]

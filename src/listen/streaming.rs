@@ -27,10 +27,10 @@ impl Streaming {
         let recognizer = OnlineRecognizer::create(&cfg)
             .ok_or_else(|| "failed to create streaming recognizer (check zipformer paths)".to_string())?;
         let stream = recognizer.create_stream();
-        Ok(Streaming { recognizer, stream })
+        Ok(Streaming { stream, recognizer })
     }
 
-    /// Feed a 16 kHz mono chunk and decode whatever is ready.
+    /// `samples` must be 16 kHz mono.
     pub fn push(&mut self, samples: &[f32]) {
         self.stream.accept_waveform(16_000, samples);
         while self.recognizer.is_ready(&self.stream) {

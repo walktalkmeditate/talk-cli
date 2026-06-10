@@ -28,8 +28,8 @@ impl Settle {
         self.live = partial.to_string();
     }
 
-    /// VAD boundary: the live edge becomes the committing block (`clean` is the
-    /// deterministic-Light result). Any prior committing block's window has
+    /// Endpoint boundary: the live edge becomes the committing block (`clean` is
+    /// the deterministic-Light result). Any prior committing block's window has
     /// closed, so it is finalized into `settled` first.
     pub fn commit(&mut self, raw: &str, clean: &str) {
         self.finalize();

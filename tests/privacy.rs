@@ -94,6 +94,48 @@ fn tampered_model_refuses_to_run() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("download"));
 }
 
+/// The extracted-file layer of the gate, proven INDEPENDENTLY of the archive
+/// layer (the scenarios above use fake archives, so the archive check fails
+/// first and says nothing about the extracted pins). With VERIFIED archives and
+/// a tampered extracted weight, the gate must heal: the wrong bytes are
+/// overwritten from the verified archive before anything is loaded — the
+/// tampered file never reaches the FFI. Models-present-gated; skips elsewhere.
+#[cfg(feature = "listen")]
+#[test]
+fn tampered_extracted_file_is_healed_from_verified_archives() {
+    let cached = cached_models_dir();
+    let archives = [
+        "sherpa-onnx-moonshine-base-en-quantized-2026-02-27.tar.bz2",
+        "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2",
+    ];
+    if !archives.iter().all(|a| cached.join(a).exists()) {
+        eprintln!("skipping heal test: cached model archives not present");
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let models = tempfile::tempdir().unwrap();
+    for a in archives {
+        std::fs::copy(cached.join(a), models.path().join(a)).unwrap(); // APFS clone — cheap
+    }
+    let victim = models
+        .path()
+        .join("sherpa-onnx-streaming-zipformer-en-20M-2023-02-17")
+        .join("encoder-epoch-99-avg-1.int8.onnx");
+    std::fs::create_dir_all(victim.parent().unwrap()).unwrap();
+    std::fs::write(&victim, b"tampered extraction").unwrap();
+
+    let out = run_reflect(home.path(), models.path());
+    // The session still dies later (tests have no TTY for raw mode), but the
+    // GATE must have passed — a refusal would print the models-not-ready hint.
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("models not ready"),
+        "gate refused instead of healing"
+    );
+    let healed = std::fs::read(&victim).unwrap();
+    assert_ne!(healed.as_slice(), b"tampered extraction");
+    assert!(healed.len() > 1_000_000, "healed weight should be the real model file");
+}
+
 #[cfg(feature = "listen")]
 fn run_reflect(home: &Path, models: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_talk"))

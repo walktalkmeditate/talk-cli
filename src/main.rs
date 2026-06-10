@@ -245,6 +245,12 @@ fn run_live_session(
     if !models_ready() {
         if interactive && offer_first_run_fetch()? {
             fetch_all_models()?;
+            // Re-run the full gate: a fetch that early-returned on already-valid
+            // archives proves nothing about the extracted files the session loads.
+            if !models_ready() {
+                eprintln!("models still fail verification after fetch — run `talk download verify`");
+                std::process::exit(1);
+            }
         } else {
             eprintln!("models not ready — run `talk download models`");
             std::process::exit(1);
@@ -298,6 +304,7 @@ fn run_live_session(
     let mut source = listen::LiveSource::new(capture, streaming, stt);
     let finish_flag = source.finish_handle();
     let speaking = source.speaking_handle();
+    let pause = source.pause_handle();
 
     let choice = match shape {
         Shape::Reflect => Some(reflect_choice(base, &byo_question, time, &cfg.default_pack)?),
@@ -326,7 +333,7 @@ fn run_live_session(
     let live_cfg = live::LiveConfig {
         mode: rmode, question, held_label: held_label.as_deref(), cleanup, ephemeral,
     };
-    let mut result = live::run_loop(&mut source, finish_flag, speaking, &live_cfg)?;
+    let mut result = live::run_loop(&mut source, finish_flag, pause, speaking, &live_cfg)?;
 
     if result.cancelled {
         return Ok(Some(Ok(())));
@@ -485,16 +492,15 @@ fn models_ready() -> bool {
     if extracted_ok() {
         return true;
     }
-    let any_missing = download::models::EXTRACTED.iter().any(|(rel, _)| !dir.join(rel).exists());
-    if any_missing {
-        for art in download::models::MODELS.iter().filter(|a| a.name.ends_with(".tar.bz2")) {
-            if download::extract(&dir.join(art.name), &dir).is_err() {
-                return false;
-            }
+    // Heal from the already-verified archives. This covers missing AND
+    // present-but-mismatched extracted files alike: a tampered weight is
+    // overwritten with verified bytes before anything is loaded.
+    for art in download::models::MODELS.iter().filter(|a| a.name.ends_with(".tar.bz2")) {
+        if download::extract(&dir.join(art.name), &dir).is_err() {
+            return false;
         }
-        return extracted_ok();
     }
-    false
+    extracted_ok()
 }
 
 /// Best-effort entry count from a freshly-written file's frontmatter (reflect) or

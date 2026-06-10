@@ -7,7 +7,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use crate::source::{Event, TranscriptSource};
+use crate::source::{Event, PauseSignal, TranscriptSource};
 use capture::Capture;
 use streaming::Streaming;
 use stt::Stt;
@@ -22,6 +22,7 @@ pub struct LiveSource {
     results: Receiver<Event>,
     speaking: Arc<AtomicBool>,
     finish_flag: Arc<AtomicBool>,
+    pause: Arc<PauseSignal>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
@@ -33,7 +34,8 @@ impl LiveSource {
         let (tx, rx): (Sender<Event>, Receiver<Event>) = std::sync::mpsc::channel();
         let speaking = Arc::new(AtomicBool::new(false));
         let finish_flag = Arc::new(AtomicBool::new(false));
-        let (sp, ff) = (speaking.clone(), finish_flag.clone());
+        let pause = Arc::new(PauseSignal::default());
+        let (sp, ff, pa) = (speaking.clone(), finish_flag.clone(), pause.clone());
         let worker = thread::spawn(move || {
             // Worker-local state: the last partial we emitted (so we only push on
             // change), when it last changed (drives the partial-activity latch +
@@ -42,8 +44,27 @@ impl LiveSource {
             let mut last_partial = String::new();
             let mut last_change = Instant::now();
             let mut seg_buf: Vec<f32> = Vec::new();
+            let mut seen_epoch = pa.epoch();
             loop {
+                // Pause is OFF-RECORD at the audio level, not just an event filter.
+                // The EPOCH (counts pause entries) is the trigger, not the flag: a
+                // pause+resume window contained entirely inside a pass-2 block would
+                // be invisible to a flag poll, but the epoch still advances. On any
+                // pause having happened: destroy the in-flight hypothesis, the
+                // segment audio, AND the parked chunks (speech in flight at pause is
+                // off-record by contract). While paused, chunks are discarded below.
+                let paused = pa.is_paused();
+                let epoch = pa.epoch();
+                if epoch != seen_epoch {
+                    seen_epoch = epoch;
+                    streaming.reset();
+                    seg_buf.clear();
+                    last_partial.clear();
+                    sp.store(false, Ordering::Relaxed);
+                    while samples.try_recv().is_ok() {}
+                }
                 match samples.recv_timeout(Duration::from_millis(50)) {
+                    Ok(_) if paused => {} // off-record: drop the audio itself
                     Ok(chunk) => {
                         let resampled = resample_to_16k(&chunk, cap_rate);
                         streaming.push(&resampled);
@@ -69,12 +90,15 @@ impl LiveSource {
                                 if !text2.trim().is_empty() {
                                     let _ = tx.send(Event::Revise(text2));
                                 }
-                            } else if plausibly_speech(&segment) {
+                            } else if plausibly_speech(&segment, RESCUE_MIN_ENDPOINT_SAMPLES) {
                                 // The 20M streaming model is the weakest link — speech it
                                 // mishears as nothing must still reach the strong model.
                                 let text2 = stt::transcribe_chunked(&stt, &segment, 16_000);
                                 if !text2.trim().is_empty() {
-                                    let _ = tx.send(Event::Commit(text2)); // no prior block: a fresh commit
+                                    // Self-paired so the rescue renders bright (= pass-2-final)
+                                    // like every other finished phrase.
+                                    let _ = tx.send(Event::Commit(text2.clone()));
+                                    let _ = tx.send(Event::Revise(text2));
                                 }
                             }
                             let _ = tx.send(Event::Partial(String::new()));
@@ -91,10 +115,13 @@ impl LiveSource {
                 if ff.load(Ordering::Relaxed) {
                     // Up to one pass-2's worth of chunks may be parked in the channel —
                     // feed them all before flushing, or the last words are lost.
+                    // (While paused they are off-record: drain and discard.)
                     while let Ok(chunk) = samples.try_recv() {
-                        let resampled = resample_to_16k(&chunk, cap_rate);
-                        streaming.push(&resampled);
-                        seg_buf.extend_from_slice(&resampled);
+                        if !paused {
+                            let resampled = resample_to_16k(&chunk, cap_rate);
+                            streaming.push(&resampled);
+                            seg_buf.extend_from_slice(&resampled);
+                        }
                     }
                     let text1 = streaming.partial();
                     let segment = std::mem::take(&mut seg_buf);
@@ -102,29 +129,46 @@ impl LiveSource {
                         let _ = tx.send(Event::Commit(text1));
                         let text2 = stt::transcribe_chunked(&stt, &segment, 16_000);
                         if !text2.trim().is_empty() { let _ = tx.send(Event::Revise(text2)); }
-                    } else if plausibly_speech(&segment) {
+                    } else if plausibly_speech(&segment, RESCUE_MIN_FLUSH_SAMPLES) {
                         let text2 = stt::transcribe_chunked(&stt, &segment, 16_000);
-                        if !text2.trim().is_empty() { let _ = tx.send(Event::Commit(text2)); }
+                        if !text2.trim().is_empty() {
+                            let _ = tx.send(Event::Commit(text2.clone()));
+                            let _ = tx.send(Event::Revise(text2));
+                        }
                     }
                     let _ = tx.send(Event::Done);
                     break;
                 }
             }
         });
-        LiveSource { _stream: stream, results: rx, speaking, finish_flag, worker: Some(worker) }
+        LiveSource { _stream: stream, results: rx, speaking, finish_flag, pause, worker: Some(worker) }
     }
 
-    /// Cloneable control handles, so the live loop can drive finish / read
+    /// Cloneable control handles, so the live loop can drive finish / pause / read
     /// "speaking" WITHOUT borrowing the LiveSource (which run_loop holds as
     /// `&mut dyn TranscriptSource`). Passing these Arcs avoids the double-borrow.
     pub fn finish_handle(&self) -> Arc<AtomicBool> { self.finish_flag.clone() }
     pub fn speaking_handle(&self) -> Arc<AtomicBool> { self.speaking.clone() }
+    pub fn pause_handle(&self) -> Arc<PauseSignal> { self.pause.clone() }
 }
 
 impl Drop for LiveSource {
     fn drop(&mut self) {
         self.finish_flag.store(true, Ordering::Relaxed);
-        if let Some(h) = self.worker.take() { let _ = h.join(); }
+        if let Some(h) = self.worker.take() {
+            // A wedged FFI call would make a bare join() freeze the terminal forever
+            // (the UI loop's 8s drain deadline has already given up by then). Grace
+            // period, then detach — the OS reclaims the thread at process exit.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !h.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(50));
+            }
+            if h.is_finished() {
+                let _ = h.join();
+            } else {
+                thread::spawn(move || { let _ = h.join(); });
+            }
+        }
         // `_stream` drops last, stopping capture after the worker has joined.
     }
 }
@@ -139,20 +183,48 @@ impl TranscriptSource for LiveSource {
     }
 }
 
-/// A segment is plausibly speech (not a silence-only endpoint) when it runs longer
-/// than a second AND its RMS clears a quiet-room floor. The rule1 2.4s trailing-
-/// silence cycle endpoints on pure silence, which fails this — so those cost zero
-/// Moonshine runs; only segments that might carry words the 20M misheard as nothing
-/// are rescued by pass-2.
-fn plausibly_speech(samples: &[f32]) -> bool {
-    if (samples.len() as f32) <= 16_000.0 { return false; } // ≤ 1s
-    let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
-    let rms = (sum_sq / samples.len() as f32).sqrt();
-    rms > 0.01
+/// Quiet-room RMS floor for the rescue gate, applied to the loudest window (below).
+const RESCUE_RMS_FLOOR: f32 = 0.01;
+/// RMS window: 0.5s at 16 kHz. Measured over the LOUDEST window, not the whole
+/// segment — every rule1 endpoint necessarily appends ≥2.4s of trailing silence,
+/// and a whole-segment RMS diluted by that silence would reject exactly the quiet
+/// speech the rescue exists to save.
+const RESCUE_RMS_WINDOW: usize = 8_000;
+/// Duration floor at an endpoint rescue: 1s. An endpointed segment that short is
+/// noise (a blip can't both carry words and evade the streaming model entirely).
+const RESCUE_MIN_ENDPOINT_SAMPLES: usize = 16_000;
+/// Duration floor at the finish flush: 0.35s. The user deliberately ended here —
+/// a short final word ("okay.") must not vanish into the endpoint-sized gate.
+const RESCUE_MIN_FLUSH_SAMPLES: usize = 5_600;
+
+/// A segment is plausibly speech (not a silence-only endpoint) when it outlasts the
+/// caller's duration floor AND its loudest 0.5s window clears the quiet-room RMS
+/// floor. Pure-silence endpoints fail this, so they cost zero Moonshine runs; only
+/// segments that might carry words the 20M misheard as nothing are rescued by pass-2.
+fn plausibly_speech(samples: &[f32], min_samples: usize) -> bool {
+    samples.len() > min_samples && peak_window_rms(samples) > RESCUE_RMS_FLOOR
 }
 
-/// Linear resample to 16 kHz (anti-aliasing is a known follow-up; the on-machine
-/// WER check in T11 decides whether to swap in a filtered resampler like `rubato`).
+/// The highest RMS over any 0.5s window (0.1s hop); whole-buffer RMS when shorter.
+fn peak_window_rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() { return 0.0; }
+    if samples.len() <= RESCUE_RMS_WINDOW {
+        let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+        return (sum_sq / samples.len() as f32).sqrt();
+    }
+    let hop = RESCUE_RMS_WINDOW / 5;
+    let mut best = 0.0f32;
+    let mut i = 0;
+    while i + RESCUE_RMS_WINDOW <= samples.len() {
+        let sum_sq: f32 = samples[i..i + RESCUE_RMS_WINDOW].iter().map(|s| s * s).sum();
+        best = best.max((sum_sq / RESCUE_RMS_WINDOW as f32).sqrt());
+        i += hop;
+    }
+    best
+}
+
+/// Linear resample to 16 kHz (anti-aliasing is a known follow-up; a future
+/// on-machine WER check decides whether to swap in a filtered resampler like `rubato`).
 fn resample_to_16k(input: &[f32], from_hz: u32) -> Vec<f32> {
     if from_hz == 16_000 || input.is_empty() { return input.to_vec(); }
     let ratio = 16_000.0 / from_hz as f32;
@@ -168,7 +240,9 @@ fn resample_to_16k(input: &[f32], from_hz: u32) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{plausibly_speech, resample_to_16k};
+    use super::{
+        plausibly_speech, resample_to_16k, RESCUE_MIN_ENDPOINT_SAMPLES, RESCUE_MIN_FLUSH_SAMPLES,
+    };
 
     #[test]
     fn resample_is_identity_at_16k() {
@@ -182,23 +256,56 @@ mod tests {
         assert!((out.len() as i32 - 16_000).abs() < 10);
     }
 
+    fn tone(secs: f32, amplitude: f32) -> Vec<f32> {
+        (0..(secs * 16_000.0) as usize)
+            .map(|n| {
+                let t = n as f32 / 16_000.0;
+                (2.0 * std::f32::consts::PI * 440.0 * t).sin() * amplitude
+            })
+            .collect()
+    }
+
     #[test]
     fn plausibly_speech_accepts_a_loud_tone() {
-        let mut tone = vec![0.0f32; 0];
-        for n in 0..32_000 { // 2s of 440 Hz at 0.3 amplitude → RMS ≈ 0.21
-            let t = n as f32 / 16_000.0;
-            tone.push((2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.3);
-        }
-        assert!(plausibly_speech(&tone));
+        // 2s of 440 Hz at 0.3 amplitude → RMS ≈ 0.21
+        assert!(plausibly_speech(&tone(2.0, 0.3), RESCUE_MIN_ENDPOINT_SAMPLES));
     }
 
     #[test]
     fn plausibly_speech_rejects_near_silence() {
-        // 2s of near-zeros (well below the 0.01 RMS floor) — a silence-only endpoint.
-        let quiet = vec![0.0001f32; 32_000];
-        assert!(!plausibly_speech(&quiet));
+        // 4s of near-zeros (well below the 0.01 RMS floor) — a silence-only endpoint.
+        let quiet = vec![0.0001f32; 64_000];
+        assert!(!plausibly_speech(&quiet, RESCUE_MIN_ENDPOINT_SAMPLES));
         // And a short-but-loud blip fails the duration gate.
         let blip = vec![0.5f32; 8_000]; // 0.5s
-        assert!(!plausibly_speech(&blip));
+        assert!(!plausibly_speech(&blip, RESCUE_MIN_ENDPOINT_SAMPLES));
+    }
+
+    #[test]
+    fn quiet_speech_survives_the_endpoint_silence_dilution() {
+        // 1.5s of quiet speech (RMS ≈ 0.015, above the 0.01 floor) followed by the
+        // 2.4s of trailing silence every rule1 endpoint mandates. A whole-segment
+        // RMS dilutes to ≈0.009 and would wrongly reject it; the loudest-window
+        // RMS must still see the speech.
+        let mut seg = tone(1.5, 0.015 * std::f32::consts::SQRT_2);
+        seg.extend(vec![0.0f32; (2.4 * 16_000.0) as usize]);
+        assert!(plausibly_speech(&seg, RESCUE_MIN_ENDPOINT_SAMPLES));
+    }
+
+    #[test]
+    fn duration_floor_is_exclusive_at_the_boundary() {
+        let exactly_floor = vec![0.5f32; RESCUE_MIN_ENDPOINT_SAMPLES];
+        assert!(!plausibly_speech(&exactly_floor, RESCUE_MIN_ENDPOINT_SAMPLES));
+        let one_past = vec![0.5f32; RESCUE_MIN_ENDPOINT_SAMPLES + 1];
+        assert!(plausibly_speech(&one_past, RESCUE_MIN_ENDPOINT_SAMPLES));
+    }
+
+    #[test]
+    fn flush_floor_rescues_a_short_final_word() {
+        // ~0.5s of speech-level audio: fails the endpoint floor (1s) but must pass
+        // the flush floor — the user deliberately ended on a short word.
+        let word = tone(0.5, 0.3);
+        assert!(!plausibly_speech(&word, RESCUE_MIN_ENDPOINT_SAMPLES));
+        assert!(plausibly_speech(&word, RESCUE_MIN_FLUSH_SAMPLES));
     }
 }

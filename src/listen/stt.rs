@@ -5,7 +5,7 @@ pub struct Stt {
 }
 
 impl Stt {
-    /// Paths from the unpacked quantized merged-decoder Moonshine tiny model dir:
+    /// Paths from the unpacked quantized merged-decoder Moonshine base model dir:
     /// `encoder_model.ort`, `decoder_model_merged.ort`, `tokens.txt`.
     pub fn new(encoder: &str, decoder: &str, tokens: &str) -> Result<Stt, String> {
         let mut cfg = OfflineRecognizerConfig::default();
@@ -19,7 +19,8 @@ impl Stt {
         Ok(Stt { recognizer })
     }
 
-    /// Transcribe one VAD segment (16 kHz mono).
+    /// Transcribe one 16 kHz mono segment (must fit the model envelope — use
+    /// `transcribe_chunked` for arbitrary lengths).
     pub fn transcribe(&self, samples: &[f32], sample_rate: i32) -> String {
         let stream = self.recognizer.create_stream();
         stream.accept_waveform(sample_rate, samples);

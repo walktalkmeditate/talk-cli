@@ -67,13 +67,11 @@ fn main() {
         audio.push((2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.3);
     }
 
-    // Pass 1: stream it through the Zipformer in 100ms chunks, reading partials.
     for chunk in audio.chunks(1_600) {
         live.push(chunk);
         let _ = live.partial();
         let _ = live.endpoint();
     }
-    // Pass 2: re-transcribe the same audio with Moonshine base.
     let _ = stt::transcribe_chunked(&recognizer, &audio, 16_000);
 
     println!("ok");

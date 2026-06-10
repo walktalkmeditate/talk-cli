@@ -22,6 +22,36 @@ pub trait TranscriptSource {
     fn next(&mut self) -> Option<Event>;
 }
 
+/// Pause signal shared between the UI loop and an audio source. `paused` is the
+/// live state; `epoch` increments on every pause ENTRY so a source that was
+/// blocked through an entire pause window (e.g. inside a pass-2 transcription)
+/// still learns a pause happened and can destroy everything then in flight.
+// Constructed by the live mic source (`feature = "listen"`); in the default
+// build run_loop only carries it, so dead-code analysis needs this allow.
+#[cfg_attr(not(feature = "listen"), allow(dead_code))]
+#[derive(Default)]
+pub struct PauseSignal {
+    paused: std::sync::atomic::AtomicBool,
+    epoch: std::sync::atomic::AtomicU64,
+}
+
+#[cfg_attr(not(feature = "listen"), allow(dead_code))]
+impl PauseSignal {
+    pub fn pause(&self) {
+        self.paused.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn resume(&self) {
+        self.paused.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 /// A scripted source for tests and `--from-text`.
 pub struct FakeTranscript {
     events: std::collections::VecDeque<Event>,
