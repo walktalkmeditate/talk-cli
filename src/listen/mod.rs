@@ -1,4 +1,5 @@
 pub mod capture;
+pub mod resample;
 pub mod streaming;
 pub mod stt;
 
@@ -9,6 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use crate::source::{Event, PauseSignal, TranscriptSource};
 use capture::Capture;
+use resample::Resampler;
 use streaming::Streaming;
 use stt::Stt;
 
@@ -44,6 +46,7 @@ impl LiveSource {
             let mut last_partial = String::new();
             let mut last_change = Instant::now();
             let mut seg_buf: Vec<f32> = Vec::new();
+            let mut resampler = Resampler::new(cap_rate);
             let mut seen_epoch = pa.epoch();
             loop {
                 // Pause is OFF-RECORD at the audio level, not just an event filter.
@@ -58,6 +61,7 @@ impl LiveSource {
                 if epoch != seen_epoch {
                     seen_epoch = epoch;
                     streaming.reset();
+                    resampler.reset();
                     seg_buf.clear();
                     last_partial.clear();
                     sp.store(false, Ordering::Relaxed);
@@ -66,7 +70,7 @@ impl LiveSource {
                 match samples.recv_timeout(Duration::from_millis(50)) {
                     Ok(_) if paused => {} // off-record: drop the audio itself
                     Ok(chunk) => {
-                        let resampled = resample_to_16k(&chunk, cap_rate);
+                        let resampled = resampler.process(&chunk);
                         streaming.push(&resampled);
                         seg_buf.extend_from_slice(&resampled);
 
@@ -118,7 +122,7 @@ impl LiveSource {
                     // (While paused they are off-record: drain and discard.)
                     while let Ok(chunk) = samples.try_recv() {
                         if !paused {
-                            let resampled = resample_to_16k(&chunk, cap_rate);
+                            let resampled = resampler.process(&chunk);
                             streaming.push(&resampled);
                             seg_buf.extend_from_slice(&resampled);
                         }
@@ -223,38 +227,9 @@ fn peak_window_rms(samples: &[f32]) -> f32 {
     best
 }
 
-/// Linear resample to 16 kHz (anti-aliasing is a known follow-up; a future
-/// on-machine WER check decides whether to swap in a filtered resampler like `rubato`).
-fn resample_to_16k(input: &[f32], from_hz: u32) -> Vec<f32> {
-    if from_hz == 16_000 || input.is_empty() { return input.to_vec(); }
-    let ratio = 16_000.0 / from_hz as f32;
-    let out_len = (input.len() as f32 * ratio) as usize;
-    (0..out_len).map(|i| {
-        let src = i as f32 / ratio;
-        let lo = src.floor() as usize;
-        let hi = (lo + 1).min(input.len() - 1);
-        let frac = src - lo as f32;
-        input[lo] * (1.0 - frac) + input[hi] * frac
-    }).collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        plausibly_speech, resample_to_16k, RESCUE_MIN_ENDPOINT_SAMPLES, RESCUE_MIN_FLUSH_SAMPLES,
-    };
-
-    #[test]
-    fn resample_is_identity_at_16k() {
-        let s = vec![0.1, 0.2, 0.3];
-        assert_eq!(resample_to_16k(&s, 16_000), s);
-    }
-    #[test]
-    fn resample_downsamples_length_proportionally() {
-        let s = vec![0.0; 48_000];
-        let out = resample_to_16k(&s, 48_000);
-        assert!((out.len() as i32 - 16_000).abs() < 10);
-    }
+    use super::{plausibly_speech, RESCUE_MIN_ENDPOINT_SAMPLES, RESCUE_MIN_FLUSH_SAMPLES};
 
     fn tone(secs: f32, amplitude: f32) -> Vec<f32> {
         (0..(secs * 16_000.0) as usize)
