@@ -47,11 +47,11 @@ fn main() -> std::io::Result<()> {
     match args.command {
         Some(Command::Journal) => {
             let text = require_text(&args.from_text);
-            run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, ephemeral: false, level: cfg.cleanup_for("journal") })?;
+            run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, ephemeral: false, level: cfg.cleanup_for("journal"), held_day: None })?;
         }
         Some(Command::Unburden) | Some(Command::Vent) => {
             let text = require_text(&args.from_text);
-            run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, ephemeral: true, level: talk_core::cleanup::Level::None })?;
+            run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, ephemeral: true, level: talk_core::cleanup::Level::None, held_day: None })?;
             println!("Released. Nothing was written.");
         }
         Some(Command::Config { action }) => return handle_config(action.as_deref()),
@@ -74,7 +74,7 @@ fn main() -> std::io::Result<()> {
         _ => {
             if args.question.is_none() && cfg.default_mode == "journal" {
                 let text = require_text(&args.from_text);
-                run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, ephemeral: false, level: cfg.cleanup_for("journal") })?;
+                run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, ephemeral: false, level: cfg.cleanup_for("journal"), held_day: None })?;
             } else {
                 reflect(&base, &args.question, &date, &time, &require_text(&args.from_text), &cfg)?;
             }
@@ -92,6 +92,9 @@ struct ReflectChoice {
     slug: String,
     pack: String,
     addressee: String,
+    /// 1-based day of an active `held:N` run for this serving; `None` for daily
+    /// questions and BYO. Computed BEFORE the serving advances state.
+    held_day: Option<u32>,
     state: state::State,
 }
 
@@ -100,13 +103,13 @@ struct ReflectChoice {
 fn reflect_choice(base: &Path, byo: &Option<String>, time: &str, default_pack: &str) -> std::io::Result<ReflectChoice> {
     let mut st = state::State::load(&std::fs::read_to_string(state_path(base)).unwrap_or_default());
 
-    let (id, question, slug, pack, addressee) = match byo {
+    let (id, question, slug, pack, addressee, held_day) = match byo {
         Some(q) => {
             // BYO: id == slug, collision-suffixed against a DIFFERENT existing question.
             let slug = talk_core::slug::derive_slug_unique(q, |s| {
                 slug_taken_by_other(&base.join(format!("{}.md", s)), q)
             });
-            (slug.clone(), q.clone(), slug, "byo".to_string(), "self".to_string())
+            (slug.clone(), q.clone(), slug, "byo".to_string(), "self".to_string(), None)
         }
         None => {
             let pack = crate::packs::by_name(default_pack);
@@ -125,13 +128,16 @@ fn reflect_choice(base: &Path, byo: &Option<String>, time: &str, default_pack: &
                 }
             }
             let slug = chosen.slug.clone().unwrap_or_else(|| chosen.id.clone());
+            // The held day reflects the PRE-advance state — this serving is day
+            // `done + 1` of the run (or day 1 of a fresh one).
+            let held_day = state::held_day_for(&st.held_run, &chosen.id, &chosen.cadence);
             st.record_served(&chosen.id);
             st.advance_held(&chosen);
-            (chosen.id, chosen.text, slug, pack.name, chosen.addressee)
+            (chosen.id, chosen.text, slug, pack.name, chosen.addressee, held_day)
         }
     };
 
-    Ok(ReflectChoice { id, question, slug, pack, addressee, state: st })
+    Ok(ReflectChoice { id, question, slug, pack, addressee, held_day, state: st })
 }
 
 /// Reflect: a BYO question if one was given, else select from the spine pack.
@@ -139,7 +145,7 @@ fn reflect(base: &Path, byo: &Option<String>, date: &str, time: &str, text: &str
     let c = reflect_choice(base, byo, time, &cfg.default_pack)?;
 
     let target = Target::Reflect { id: &c.id, question: &c.question, slug: &c.slug, pack: &c.pack, addressee: &c.addressee };
-    run_and_report(Report { base, target, date, time, text, keep_raw: cfg.keep_raw, ephemeral: false, level: cfg.cleanup_for("reflect") })?;
+    run_and_report(Report { base, target, date, time, text, keep_raw: cfg.keep_raw, ephemeral: false, level: cfg.cleanup_for("reflect"), held_day: c.held_day })?;
     paths::write_private(&state_path(base), &c.state.save())?;
     Ok(())
 }
@@ -153,6 +159,8 @@ struct Report<'a> {
     keep_raw: bool,
     ephemeral: bool,
     level: talk_core::cleanup::Level,
+    /// 1-based held-run day for the printed provenance; `None` for non-held entries.
+    held_day: Option<u32>,
 }
 
 fn run_and_report(r: Report) -> std::io::Result<()> {
@@ -162,7 +170,10 @@ fn run_and_report(r: Report) -> std::io::Result<()> {
             formatter: &talk_core::format::DeterministicFormatter, level: r.level,
         })?;
     if let Some(p) = path {
-        println!("→ {}", p.display());
+        match r.held_day {
+            Some(d) => println!("→ {} · held day {}", p.display(), d),
+            None => println!("→ {}", p.display()),
+        }
         // A saved entry credits the streak (ephemeral writes nothing, so it never
         // reaches here with a path — gated anyway). Streak failure never blocks a save.
         if !r.ephemeral {
@@ -272,8 +283,13 @@ fn run_live_session(
             (Shape::Reflect, None) => unreachable!("reflect always resolves a choice"),
         };
 
+    // Held-run header label (e.g. "held 3 days"); bound here so it outlives
+    // `live_cfg`, whose `held_label` borrows it.
+    let held_label = choice.as_ref().and_then(|c| c.held_day).map(|d| {
+        format!("held {} day{}", d, if d == 1 { "" } else { "s" })
+    });
     let live_cfg = live::LiveConfig {
-        mode: rmode, question, held_label: None, cleanup, ephemeral,
+        mode: rmode, question, held_label: held_label.as_deref(), cleanup, ephemeral,
     };
     let result = live::run_loop(&mut source, finish_flag, speaking, &live_cfg)?;
 
@@ -301,8 +317,13 @@ fn run_live_session(
     }
 
     if let Some(path) = written {
-        let provenance = format!("entry {}", written_entry_count(&path));
-        live::show_close(&path.display().to_string(), &provenance, "Stillness carries forward.")?;
+        let entry_count = written_entry_count(&path);
+        let held = choice.as_ref().and_then(|c| c.held_day)
+            .map(|d| format!(" · held {d} days"))
+            .unwrap_or_default();
+        let provenance = format!("entry {entry_count}{held}");
+        let phrase = live::CLOSE_PHRASES[entry_count % live::CLOSE_PHRASES.len()];
+        live::show_close(&path.display().to_string(), &provenance, phrase)?;
         // A saved live entry credits the streak. Ephemeral already returned above,
         // so this path is never ephemeral. Streak failure never blocks the save.
         if let Some(day) = streak::civil_day(date) {

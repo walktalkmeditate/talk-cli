@@ -132,6 +132,21 @@ fn thread_lists_questions_by_recency() {
 }
 
 #[test]
+fn held_pack_prints_ascending_day_provenance() {
+    let dir = tempfile::tempdir().unwrap();
+    let talk_dir = dir.path().join("talk");
+    std::fs::create_dir_all(&talk_dir).unwrap();
+    std::fs::write(talk_dir.join("config.toml"), "default_pack = \"held\"\n").unwrap();
+    // A held:7 question stays selected across runs until the run completes — so
+    // two consecutive runs are day 1 and day 2 of the same run.
+    let day1 = talk(dir.path(), &["--from-text", "first day words", "--date", "2026-06-09", "--time", "10:00"]);
+    assert!(day1.status.success(), "stderr: {}", String::from_utf8_lossy(&day1.stderr));
+    assert!(String::from_utf8_lossy(&day1.stdout).contains("held day 1"), "{}", String::from_utf8_lossy(&day1.stdout));
+    let day2 = talk(dir.path(), &["--from-text", "second day words", "--date", "2026-06-10", "--time", "10:00"]);
+    assert!(String::from_utf8_lossy(&day2.stdout).contains("held day 2"), "{}", String::from_utf8_lossy(&day2.stdout));
+}
+
+#[test]
 fn streak_credits_consecutive_days() {
     let dir = tempfile::tempdir().unwrap();
     talk(dir.path(), &["journal", "--from-text", "day one", "--date", "2026-06-08", "--time", "08:00"]);

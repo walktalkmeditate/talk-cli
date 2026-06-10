@@ -53,6 +53,16 @@ impl State {
     }
 }
 
+/// The 1-based day of a held run for `id`, given the PRE-advance state. Returns
+/// `None` for non-held cadences (so only `held:N` questions carry a day label).
+pub fn held_day_for(held_run: &Option<(String, u32)>, id: &str, cadence: &str) -> Option<u32> {
+    talk_core::questions::Pack::held_len(cadence)?;
+    match held_run {
+        Some((run_id, done)) if run_id == id => Some(done + 1),
+        _ => Some(1),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +100,13 @@ mod tests {
         assert_eq!(s.held_run, Some(("h".to_string(), 2)));
         s.advance_held(&q("h", "held:3"));
         assert!(s.held_run.is_none()); // 3rd serving completes the run
+    }
+
+    #[test]
+    fn held_day_is_one_based_and_only_for_held_cadence() {
+        assert_eq!(held_day_for(&None, "h", "held:7"), Some(1));
+        assert_eq!(held_day_for(&Some(("h".into(), 2)), "h", "held:7"), Some(3));
+        assert_eq!(held_day_for(&Some(("other".into(), 2)), "h", "held:7"), Some(1));
+        assert_eq!(held_day_for(&None, "d", "daily"), None);
     }
 }

@@ -9,6 +9,19 @@ use crate::source::{Event, TranscriptSource};
 
 const SPEECH_HANGOVER: Duration = Duration::from_millis(350);
 
+/// Curated close phrases (spec §7) — rotated by entry count so a returning user
+/// doesn't see the same line twice in a row.
+pub const CLOSE_PHRASES: &[&str] = &[
+    "Stillness carries forward.",
+    "Said out loud, it weighs less.",
+    "You showed up. That was the practice.",
+    "Let it settle.",
+    "The thread holds.",
+    "Nothing to fix. Just to hear.",
+    "The words keep working after you stop.",
+    "Come back when it tugs.",
+];
+
 pub struct LiveConfig<'a> {
     pub mode: RMode,
     pub question: Option<&'a str>,
