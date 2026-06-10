@@ -3,18 +3,24 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level { None, Light, Medium, High }
 
-/// Words the guard treats as droppable (disfluencies + conversational filler), so
-/// `deterministic_light`'s leading-filler strip stays guard-safe.
+/// Words the GUARD treats as droppable (disfluencies + conversational filler), so a
+/// rewrite that removes them still passes `guard_accepts`.
 ///
 /// KNOWN LIMIT (Plan 3 code review): the guard drops these from BOTH sides of its
 /// comparison, so it permits removing a *content* use of you/know/like/so/well/i/
 /// mean anywhere (e.g. `guard_accepts("do you know the way", "do the way")` is
-/// true). `deterministic_light` only strips LEADING fillers, so it never triggers
-/// this — but an LLM (T7) told to remove mid-sentence filler could drop content
-/// and pass the guard. `rewrite_prompt`'s Light rule therefore asks only for
-/// LEADING filler removal; the real fix (position-aware / leading-only handling)
-/// is deferred to the subsequence-guard work.
+/// true). This is a moat for an LLM rewriter, not an instruction to remove them.
+/// `deterministic_light` deliberately does NOT strip from this set — see
+/// `LEADING_DISFLUENCIES`.
 const FILLERS: &[&str] = &["um", "uh", "er", "ah", "like", "you", "know", "so", "well", "i", "mean"];
+
+/// The ONLY words `deterministic_light` strips from the phrase start: non-lexical
+/// vocalizations that are never content. The broader `FILLERS` set is NOT used
+/// here — a leading `i`/`you`/`so`/`well`/`like` is almost always a real sentence
+/// opener ("I think…", "You know what…", "So I realized…"), and dropping it
+/// silently rewrites the user's meaning. Restraint wins: when a leading word is a
+/// real dictionary word, keep it.
+const LEADING_DISFLUENCIES: &[&str] = &["um", "uh", "er", "ah", "mm", "hmm", "uhm", "erm", "hm"];
 
 fn content_words(text: &str) -> Vec<String> {
     text.to_lowercase()
@@ -123,8 +129,9 @@ fn capitalize_standalone_i(text: &str) -> String {
 fn strip_leading_fillers(text: &str) -> String {
     let mut words: Vec<&str> = text.split_whitespace().collect();
     while let Some(first) = words.first() {
-        let lw = first.to_lowercase();
-        if FILLERS.contains(&lw.as_str()) { words.remove(0); } else { break; }
+        // Strip trailing punctuation so "um," / "uh." still match the bare token.
+        let lw = first.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+        if LEADING_DISFLUENCIES.contains(&lw.as_str()) { words.remove(0); } else { break; }
     }
     words.join(" ")
 }
@@ -231,6 +238,23 @@ mod tests {
     #[test]
     fn deterministic_light_caps_and_terminates() {
         assert_eq!(deterministic_light("um the thing is"), "The thing is.");
+    }
+
+    #[test]
+    fn does_not_strip_a_leading_content_word() {
+        // The reported "cleaning up too much" bug: a leading subject pronoun or
+        // discourse opener is CONTENT, not a disfluency — it must survive.
+        assert_eq!(deterministic_light("i sometimes forget the small things"),
+            "I sometimes forget the small things.");
+        assert_eq!(deterministic_light("you should go now"), "You should go now.");
+        assert_eq!(deterministic_light("so i realized the answer"), "So I realized the answer.");
+        assert_eq!(deterministic_light("well that is the thing"), "Well that is the thing.");
+    }
+
+    #[test]
+    fn still_strips_leading_nonlexical_disfluencies() {
+        assert_eq!(deterministic_light("um uh the thing is"), "The thing is.");
+        assert_eq!(deterministic_light("ah i see it now"), "I see it now.");
     }
 
     #[test]
