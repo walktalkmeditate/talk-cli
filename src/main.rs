@@ -238,6 +238,14 @@ fn run_live_session(
         disclose_once(base)?;
     }
 
+    // Verifying the model hashes and loading the nets takes ~1–2s warm (more on a
+    // cold disk cache) before the alternate-screen UI appears — without a word here
+    // it looks hung, and a user who starts speaking immediately loses their first
+    // words. One quiet line of feedback (TTY only; non-TTY must stay byte-clean).
+    if interactive {
+        eprintln!("  preparing…");
+    }
+
     // Verify every model before loading anything; an unpinned / missing / mismatched
     // artifact means the session can't run yet. On a TTY we offer to fetch them now
     // (a one-time ~239 MB download) and continue; otherwise we print the hint and
@@ -480,21 +488,26 @@ fn fetch_all_models() -> std::io::Result<()> {
 #[cfg(feature = "listen")]
 fn models_ready() -> bool {
     let dir = paths::models_dir();
+    let extracted_ok = || download::models::EXTRACTED.iter().all(|(rel, sha)| {
+        download::verify(&dir.join(rel), sha).unwrap_or(false)
+    });
+    // Happy path: the extracted files are exactly what the session loads, so
+    // hashing THEM is the load-time guarantee. The ~239 MB archives are NOT touched
+    // here — only when healing below — so a normal launch hashes the ~178 MB it
+    // actually loads instead of re-hashing the archives too (a real startup cost,
+    // worst on a cold disk cache).
+    if extracted_ok() {
+        return true;
+    }
+    // Extracted files missing or tampered: heal by re-extracting — but verify the
+    // archives first, so we never extract bad bytes. Covers missing AND
+    // present-but-mismatched extracted files alike.
     let archives_ok = download::models::MODELS.iter().all(|art| {
         download::verify(&dir.join(art.name), art.sha256).unwrap_or(false)
     });
     if !archives_ok {
         return false;
     }
-    let extracted_ok = || download::models::EXTRACTED.iter().all(|(rel, sha)| {
-        download::verify(&dir.join(rel), sha).unwrap_or(false)
-    });
-    if extracted_ok() {
-        return true;
-    }
-    // Heal from the already-verified archives. This covers missing AND
-    // present-but-mismatched extracted files alike: a tampered weight is
-    // overwritten with verified bytes before anything is loaded.
     for art in download::models::MODELS.iter().filter(|a| a.name.ends_with(".tar.bz2")) {
         if download::extract(&dir.join(art.name), &dir).is_err() {
             return false;
