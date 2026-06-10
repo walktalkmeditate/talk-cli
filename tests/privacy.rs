@@ -57,7 +57,7 @@ fn tampered_model_refuses_to_run() {
     let models = tempfile::tempdir().unwrap();
     // Place WRONG bytes at every manifest archive name: present, but hash-mismatched.
     for name in [
-        "sherpa-onnx-moonshine-base-en-quantized-2026-02-27.tar.bz2",
+        "sherpa-onnx-whisper-base.en.tar.bz2",
         "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2",
     ] {
         std::fs::write(models.path().join(name), b"tampered").unwrap();
@@ -78,13 +78,13 @@ fn tampered_model_refuses_to_run() {
     // Cover BOTH new model dirs: one base file and one zipformer file.
     let base = models
         .path()
-        .join("sherpa-onnx-moonshine-base-en-quantized-2026-02-27");
+        .join("sherpa-onnx-whisper-base.en");
     let zipformer = models
         .path()
         .join("sherpa-onnx-streaming-zipformer-en-20M-2023-02-17");
     std::fs::create_dir_all(&base).unwrap();
     std::fs::create_dir_all(&zipformer).unwrap();
-    std::fs::write(base.join("encoder_model.ort"), b"tampered extraction").unwrap();
+    std::fs::write(base.join("base.en-encoder.int8.onnx"), b"tampered extraction").unwrap();
     std::fs::write(
         zipformer.join("encoder-epoch-99-avg-1.int8.onnx"),
         b"tampered extraction",
@@ -109,7 +109,7 @@ fn tampered_model_refuses_to_run() {
 fn tampered_extracted_file_is_healed_from_verified_archives() {
     let cached = cached_models_dir();
     let archives = [
-        "sherpa-onnx-moonshine-base-en-quantized-2026-02-27.tar.bz2",
+        "sherpa-onnx-whisper-base.en.tar.bz2",
         "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2",
     ];
     if !archives.iter().all(|a| cached.join(a).exists()) {
@@ -150,7 +150,7 @@ fn tampered_extracted_file_is_healed_from_verified_archives() {
 fn happy_path_passes_without_archives_present() {
     let cached = cached_models_dir();
     let dirs = [
-        "sherpa-onnx-moonshine-base-en-quantized-2026-02-27",
+        "sherpa-onnx-whisper-base.en",
         "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17",
     ];
     if !dirs.iter().all(|d| cached.join(d).is_dir()) {
@@ -230,12 +230,12 @@ fn text_pipeline_makes_no_network_calls_under_sandbox() {
 }
 
 /// The REAL inference stack (sherpa-onnx FFI: streaming Zipformer pass-1 +
-/// Moonshine base pass-2) under deny-network. Models-present-gated: skips on
+/// Whisper base.en pass-2) under deny-network. Models-present-gated: skips on
 /// runners without the cached models; runs in full on dev machines. This is the
 /// spec §14 check that the FFI path makes zero outbound connections.
 ///
-/// `ffi_probe` loads the Plan 5 stack (Streaming + base Stt, migrated in T4) and
-/// drives both passes; the skip-gate paths below point at the base + zipformer
+/// `ffi_probe` loads the Plan 5 stack (Streaming + Whisper Stt, migrated in T4/T5)
+/// and drives both passes; the skip-gate paths below point at the Whisper + zipformer
 /// dirs, so on a migrated machine this test RUNS — it does not skip.
 #[cfg(all(target_os = "macos", feature = "listen"))]
 #[test]
@@ -265,18 +265,19 @@ fn inference_stack_runs_under_deny_network_sandbox() {
 
     // Skip when the cached models are absent (CI runners without the download).
     let models = cached_models_dir();
-    let moonshine = models.join("sherpa-onnx-moonshine-base-en-quantized-2026-02-27");
+    let whisper = models.join("sherpa-onnx-whisper-base.en");
     let zipformer = models.join("sherpa-onnx-streaming-zipformer-en-20M-2023-02-17");
-    if !moonshine.join("encoder_model.ort").exists()
-        || !moonshine.join("decoder_model_merged.ort").exists()
-        || !moonshine.join("tokens.txt").exists()
+    if !whisper.join("base.en-encoder.int8.onnx").exists()
+        || !whisper.join("base.en-decoder.int8.onnx").exists()
+        || !whisper.join("base.en-tokens.txt").exists()
         || !zipformer.join("encoder-epoch-99-avg-1.int8.onnx").exists()
         || !zipformer.join("decoder-epoch-99-avg-1.onnx").exists()
         || !zipformer.join("joiner-epoch-99-avg-1.int8.onnx").exists()
         || !zipformer.join("tokens.txt").exists()
     {
         eprintln!(
-            "skipping inference_stack_runs_under_deny_network_sandbox: cached models absent at {}",
+            "skipping inference_stack_runs_under_deny_network_sandbox: \
+            cached Whisper/zipformer models absent at {}",
             models.display()
         );
         return;
