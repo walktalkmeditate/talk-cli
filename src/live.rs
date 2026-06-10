@@ -58,6 +58,10 @@ pub fn run_loop(
     let mut paused_at: Option<Instant> = None;
     let mut last_speech = started - SPEECH_HANGOVER; // start un-latched
     let mut finished = false;
+    // Pass-2 pairing guard: the worker emits Commit then Revise serially. A Revise
+    // whose paired Commit was dropped during pause must be dropped too, or pass-2
+    // text of OFF-RECORD (paused) speech would overwrite the last accepted phrase.
+    let mut commit_dropped = false;
 
     loop {
         // 1. drain transcript events (ALWAYS drain to keep the channel from growing;
@@ -65,11 +69,19 @@ pub fn run_loop(
         while let Some(ev) = source.next() {
             match ev {
                 Event::Done => { finished = true; break; }
+                Event::Revise(raw2) if !commit_dropped => {
+                    let pre = talk_core::cleanup::apply_backtrack(
+                        &talk_core::cleanup::apply_spoken_commands(&raw2));
+                    settle.revise_committing(&raw2, &talk_core::cleanup::deterministic_light(&pre));
+                }
+                Event::Revise(_) => {} // paired Commit was dropped (off-record) → drop its pass-2 too
+                Event::Commit(_) if paused => { commit_dropped = true; } // off-record: drop, and disarm its Revise
                 _ if paused => {} // drain-and-discard while paused: don't record, don't grow the channel
                 Event::Commit(raw) => {
                     let pre = talk_core::cleanup::apply_backtrack(
                         &talk_core::cleanup::apply_spoken_commands(&raw));
                     settle.commit(&raw, &talk_core::cleanup::deterministic_light(&pre));
+                    commit_dropped = false;
                 }
                 Event::Partial(_) => {}
             }
@@ -155,6 +167,12 @@ fn drain_until_done(source: &mut dyn TranscriptSource, settle: &mut Settle) -> s
                 let pre = talk_core::cleanup::apply_backtrack(
                     &talk_core::cleanup::apply_spoken_commands(&raw));
                 settle.commit(&raw, &talk_core::cleanup::deterministic_light(&pre));
+                last_event = Instant::now();
+            }
+            Some(Event::Revise(raw2)) => {
+                let pre = talk_core::cleanup::apply_backtrack(
+                    &talk_core::cleanup::apply_spoken_commands(&raw2));
+                settle.revise_committing(&raw2, &talk_core::cleanup::deterministic_light(&pre));
                 last_event = Instant::now();
             }
             Some(Event::Done) => break,

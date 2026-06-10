@@ -3,8 +3,14 @@
 pub enum Event {
     /// A revised partial hypothesis for the live edge.
     Partial(String),
-    /// A phrase boundary: the final raw text of the committed phrase.
+    /// A phrase boundary: the final raw text of the committed phrase (pass 1).
     Commit(String),
+    /// A better transcription of the LAST committed phrase (pass 2) — replaces
+    /// the committing block's raw+clean. Dropped if already finalized.
+    // Producer is the two-pass worker (Plan 5 T4); the seam (session/live arms +
+    // FakeTranscript scripts) consumes it now. Remove this allow when T4 emits it.
+    #[allow(dead_code)]
+    Revise(String),
     /// The user finished the whole turn.
     Done,
 }

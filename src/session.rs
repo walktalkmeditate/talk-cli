@@ -40,6 +40,10 @@ pub fn run(
                 let clean = guarded_format(cfg.formatter, cfg.level, &raw);
                 settle.commit(&raw, &clean);
             }
+            Event::Revise(raw2) => {
+                let clean2 = guarded_format(cfg.formatter, cfg.level, &raw2);
+                settle.revise_committing(&raw2, &clean2);
+            }
             Event::Done => break,
         }
     }
@@ -113,6 +117,37 @@ mod tests {
         }).unwrap().unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(!text.contains("new line"));
+    }
+
+    #[test]
+    fn revise_event_upgrades_the_committing_phrase_in_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut src = FakeTranscript::new(vec![
+            Event::Commit("the streaming hypothesis".into()),
+            Event::Revise("the corrected transcription".into()),
+            Event::Done,
+        ]);
+        let p = run(&mut src, Target::Journal, &cfg(dir.path(), false)).unwrap().unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("The corrected transcription."));
+        assert!(!text.contains("streaming hypothesis"));
+        assert!(text.contains("<!-- raw: the corrected transcription -->"));
+    }
+
+    #[test]
+    fn revise_targets_the_block_it_was_paired_with_not_a_later_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut src = FakeTranscript::new(vec![
+            Event::Commit("alpha streaming".into()),
+            Event::Revise("alpha corrected".into()),
+            Event::Commit("bravo streaming".into()),
+            Event::Done,
+        ]);
+        let p = run(&mut src, Target::Journal, &cfg(dir.path(), false)).unwrap().unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("Alpha corrected."));
+        assert!(text.contains("Bravo streaming."));
+        assert!(!text.contains("Alpha streaming."));
     }
 
     #[test]
