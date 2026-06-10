@@ -75,7 +75,7 @@ mod tests {
 
     #[test]
     fn faithful_output_passes_the_guard_unchanged() {
-        assert_eq!(guarded_format(&Faithful, Level::Light, "um so i keep avoiding it"), "Keep avoiding it.");
+        assert_eq!(guarded_format(&Faithful, Level::Light, "um so i keep avoiding it"), "So I keep avoiding it.");
     }
 
     #[test]

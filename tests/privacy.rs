@@ -67,6 +67,10 @@ fn tampered_model_refuses_to_run() {
     // Intent pin: the refusal must steer the user to the download command —
     // the exact wording around it is free to change.
     assert!(String::from_utf8_lossy(&out.stderr).contains("download"));
+    // (Under extracted-first verification this first scenario refuses via the
+    // extracted-MISSING branch — no extracted dirs exist yet — then the
+    // archive re-verify fails too. The independent extracted-layer proof is the
+    // heal test below; the happy-path-skips-archives proof is the test after it.)
 
     // Second scenario: the EXTRACTED files the session loads hold wrong bytes.
     // With fake archives both layers fail, which is exactly the point — an
@@ -134,6 +138,50 @@ fn tampered_extracted_file_is_healed_from_verified_archives() {
     let healed = std::fs::read(&victim).unwrap();
     assert_ne!(healed.as_slice(), b"tampered extraction");
     assert!(healed.len() > 1_000_000, "healed weight should be the real model file");
+}
+
+/// The startup-perf claim, as a behavioral guarantee: when the extracted files all
+/// verify, the gate passes WITHOUT the 239 MB archives — so a regression that
+/// re-required archive hashing on every launch (or skipped a weight) would fail
+/// here. Copies the real extracted dirs but leaves NO archives present; the gate
+/// must still pass. Models-present-gated; skips when the cache is absent.
+#[cfg(feature = "listen")]
+#[test]
+fn happy_path_passes_without_archives_present() {
+    let cached = cached_models_dir();
+    let dirs = [
+        "sherpa-onnx-moonshine-base-en-quantized-2026-02-27",
+        "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17",
+    ];
+    if !dirs.iter().all(|d| cached.join(d).is_dir()) {
+        eprintln!("skipping happy-path test: cached extracted models not present");
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let models = tempfile::tempdir().unwrap();
+    for d in dirs {
+        copy_dir(&cached.join(d), &models.path().join(d));
+    }
+    // Deliberately NO .tar.bz2 archives in the temp dir.
+    let out = run_reflect(home.path(), models.path());
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("models not ready"),
+        "gate refused despite valid extracted files (archives should not be required)"
+    );
+}
+
+#[cfg(feature = "listen")]
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let dst = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &dst);
+        } else {
+            std::fs::copy(entry.path(), &dst).unwrap();
+        }
+    }
 }
 
 #[cfg(feature = "listen")]
