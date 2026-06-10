@@ -7,15 +7,17 @@ pub enum Event {
     Commit(String),
     /// A better transcription of the LAST committed phrase (pass 2) — replaces
     /// the committing block's raw+clean. Dropped if already finalized.
-    // Producer is the two-pass worker (Plan 5 T4); the seam (session/live arms +
-    // FakeTranscript scripts) consumes it now. Remove this allow when T4 emits it.
-    #[allow(dead_code)]
+    // Constructed only by the two-pass worker (`feature = "listen"`); in the
+    // default build it is matched (session/live arms) but never built outside
+    // tests, so dead-code analysis needs this allow.
+    #[cfg_attr(not(feature = "listen"), allow(dead_code))]
     Revise(String),
     /// The user finished the whole turn.
     Done,
 }
 
-/// A source of transcript events. Plan 2 implements this over Moonshine+VAD.
+/// A source of transcript events. The live session implements this over the
+/// streaming Zipformer (partials/commits) + Moonshine base (pass-2 revises).
 pub trait TranscriptSource {
     fn next(&mut self) -> Option<Event>;
 }

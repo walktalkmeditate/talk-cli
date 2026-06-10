@@ -38,8 +38,8 @@ pub struct LiveResult {
 }
 
 /// Run the interactive loop. `source` is a LiveSource (mic) in production; tests
-/// pass a scripted source. `speaking` reports live VAD state via a cloned Arc
-/// handle (tests pass `Arc::new(AtomicBool::new(false))`). `finish_flag` is the
+/// pass a scripted source. `speaking` reports streaming-partial activity via a
+/// cloned Arc handle (tests pass `Arc::new(AtomicBool::new(false))`). `finish_flag` is the
 /// cloned finish handle the [space] action sets. Returns the joined raw+clean
 /// transcript (or cancelled).
 pub fn run_loop(
@@ -83,7 +83,7 @@ pub fn run_loop(
                     settle.commit(&raw, &talk_core::cleanup::deterministic_light(&pre));
                     commit_dropped = false;
                 }
-                Event::Partial(_) => {}
+                Event::Partial(p) => settle.on_partial(&p),
             }
         }
         if !paused && speaking.load(Ordering::Relaxed) { last_speech = Instant::now(); }
@@ -131,6 +131,11 @@ pub fn run_loop(
                             paused = !paused;
                             if paused {
                                 paused_at = Some(Instant::now());
+                                // Clear the live edge: speech in flight is now off-record
+                                // (paused partials are dropped above), and the worker's
+                                // change-only emission never sends a clearing event — so the
+                                // edge must not keep advertising the stale partial.
+                                settle.on_partial("");
                             } else if let Some(t) = paused_at.take() {
                                 paused_total += t.elapsed();
                             }

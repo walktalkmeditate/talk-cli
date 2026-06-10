@@ -272,6 +272,24 @@ mod tests {
     }
 
     #[test]
+    fn clearing_the_partial_drops_the_stale_edge_text() {
+        // Pause clears the live edge (live.rs calls `settle.on_partial("")` on
+        // entering pause): the stale partial must vanish so a paused frame doesn't
+        // keep advertising in-flight, now off-record, speech.
+        let mut s = Settle::new();
+        s.on_partial("the thing i was mid saying");
+        let mut v = base(Mode::Reflect, &s);
+        assert!(text(&v).contains("the thing i was mid saying"));
+
+        s.on_partial("");
+        v = base(Mode::Reflect, &s);
+        v.paused = true;
+        let joined = text(&v);
+        assert!(!joined.contains("the thing i was mid saying"));
+        assert!(joined.contains("⏸ paused"));
+    }
+
+    #[test]
     fn committing_block_dims_until_revised() {
         let mut s = Settle::new();
         s.commit("raw words", "Clean words.");
