@@ -286,3 +286,44 @@ fn write_failure_errors_non_zero_on_from_text_path() {
         "stderr should name the write failure: {stderr}"
     );
 }
+
+/// Spec §17: a `held:7` question is served across seven days into ONE thread file
+/// as seven dated sections, the day-7 run carries `held day 7` provenance, and the
+/// run releases afterward so the eighth day starts a different held question (a
+/// second file). The `held` pack contains only held:7 questions, so day 1 pins one
+/// and the run owns selection until it completes.
+#[test]
+fn held_seven_serves_one_question_across_days() {
+    let dir = tempfile::tempdir().unwrap();
+    let talk_dir = dir.path().join("talk");
+    std::fs::create_dir_all(&talk_dir).unwrap();
+    std::fs::write(talk_dir.join("config.toml"), "default_pack = \"held\"\n").unwrap();
+
+    let mut out7 = String::new();
+    for day in 1..=7 {
+        let date = format!("2026-06-{day:02}");
+        let out = talk(dir.path(), &["--from-text", "held words", "--date", &date, "--time", "12:00"]);
+        assert!(out.status.success(), "day {day} stderr: {}", String::from_utf8_lossy(&out.stderr));
+        if day == 7 {
+            out7 = String::from_utf8_lossy(&out.stdout).into_owned();
+        }
+    }
+    // The day-7 run's path line carries the held-run provenance (T5).
+    assert!(out7.contains("held day 7"), "day-7 provenance line:\n{out7}");
+
+    // All seven landed in ONE held question's file, as seven dated sections.
+    let files: Vec<_> = std::fs::read_dir(&talk_dir).unwrap().flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "md"))
+        .collect();
+    assert_eq!(files.len(), 1, "one thread file, got {files:?}");
+    let text = std::fs::read_to_string(&files[0]).unwrap();
+    assert_eq!(text.matches("## 2026-06-").count(), 7, "seven dated sections:\n{text}");
+
+    // The eighth run releases the completed run to a different held question.
+    let out8 = talk(dir.path(), &["--from-text", "released", "--date", "2026-06-08", "--time", "12:00"]);
+    assert!(out8.status.success(), "stderr: {}", String::from_utf8_lossy(&out8.stderr));
+    let count = std::fs::read_dir(&talk_dir).unwrap().flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "md")).count();
+    assert_eq!(count, 2, "the eighth day opens a second thread");
+}
