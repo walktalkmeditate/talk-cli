@@ -240,7 +240,7 @@ fn run_live_session(
 
     // Verify every model before loading anything; an unpinned / missing / mismatched
     // artifact means the session can't run yet. On a TTY we offer to fetch them now
-    // (a one-time ~30 MB download) and continue; otherwise we print the hint and
+    // (a one-time ~219 MB download) and continue; otherwise we print the hint and
     // exit non-zero (a clean failure — no terminal state or file has been touched).
     if !models_ready() {
         if interactive && offer_first_run_fetch()? {
@@ -251,17 +251,26 @@ fn run_live_session(
         }
     }
 
+    // Pass-2 transcription loads Moonshine base (drop-in for the old tiny `Stt`).
+    // The streaming Zipformer-20M paths are computed here too; the `Streaming`
+    // facade that consumes them lands in Plan 5 T4/T5 — for now this build still
+    // segments via the VAD path while the manifest gate already requires the new
+    // models. Field order tracks the eventual `LiveSource::new` signature.
     let models = paths::models_dir();
-    let moonshine = models.join("sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27");
+    let moonshine = models.join("sherpa-onnx-moonshine-base-en-quantized-2026-02-27");
+    let zipformer = models.join("sherpa-onnx-streaming-zipformer-en-20M-2023-02-17");
     let (Some(enc), Some(dec), Some(tok), Some(silero)) = (
         moonshine.join("encoder_model.ort").to_str().map(str::to_owned),
         moonshine.join("decoder_model_merged.ort").to_str().map(str::to_owned),
         moonshine.join("tokens.txt").to_str().map(str::to_owned),
+        // Plan 5 T4 deletes the VAD path; until then the live session still
+        // segments with silero, so this path is still constructed here.
         models.join("silero_vad.onnx").to_str().map(str::to_owned),
     ) else {
         eprintln!("model path is not valid UTF-8 — run `talk download models`");
         std::process::exit(1);
     };
+    let _ = &zipformer; // wired into the `Streaming` facade in Plan 5 T5.
 
     // Build the per-mode View config and the write target. For reflect we resolve
     // the question (BYO or spine) up front; its owned strings back the Target.
@@ -428,12 +437,18 @@ fn byo_continue_or(base: &Path, q: &str) -> std::io::Result<Option<String>> {
     Ok(Some(if continue_it { existing_q.clone() } else { q.to_string() }))
 }
 
-/// First-run prompt: offer to fetch the models now (~30 MB is the MEASURED total —
-/// moonshine 29.8 MB + silero 0.6 MB). Reads one stdin line; only `y`/`Y` accepts.
+/// First-run prompt: offer to fetch the Plan-5 models now (~219 MB is the stated
+/// total — moonshine base + streaming zipformer). The returning-user copy explains
+/// why the download grew and that the old caches are now dead weight. Reads one
+/// stdin line; only `y`/`Y` accepts.
 #[cfg(feature = "listen")]
 fn offer_first_run_fetch() -> std::io::Result<bool> {
     use std::io::Write;
-    print!("models not downloaded (~30 MB, one time). download now? [y/N] ");
+    print!(
+        "talk's transcription engine changed (live streaming + a better model). \
+new models: ~219 MB, one time. your old models are no longer used (left in place, \
+~30 MB — harmless). download now? [y/N] "
+    );
     std::io::stdout().flush()?;
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
@@ -453,10 +468,10 @@ fn fetch_all_models() -> std::io::Result<()> {
 }
 
 /// True when every model the session will LOAD verifies against its pin: the
-/// archives (download integrity) AND the extracted Moonshine files (what the
-/// session actually reads — an attacker swapping an extracted .ort would slip
-/// past an archive-only check). A verified archive with missing extracted files
-/// is healed by re-extracting before giving up.
+/// archives (download integrity) AND the extracted files (what the session
+/// actually reads — an attacker swapping an extracted weight would slip past an
+/// archive-only check). A verified archive with missing extracted files is
+/// healed by re-extracting before giving up.
 #[cfg(feature = "listen")]
 fn models_ready() -> bool {
     let dir = paths::models_dir();
@@ -466,13 +481,13 @@ fn models_ready() -> bool {
     if !archives_ok {
         return false;
     }
-    let extracted_ok = || download::models::MOONSHINE_EXTRACTED.iter().all(|(rel, sha)| {
+    let extracted_ok = || download::models::EXTRACTED.iter().all(|(rel, sha)| {
         download::verify(&dir.join(rel), sha).unwrap_or(false)
     });
     if extracted_ok() {
         return true;
     }
-    let any_missing = download::models::MOONSHINE_EXTRACTED.iter().any(|(rel, _)| !dir.join(rel).exists());
+    let any_missing = download::models::EXTRACTED.iter().any(|(rel, _)| !dir.join(rel).exists());
     if any_missing {
         for art in download::models::MODELS.iter().filter(|a| a.name.ends_with(".tar.bz2")) {
             if download::extract(&dir.join(art.name), &dir).is_err() {
@@ -543,7 +558,7 @@ fn handle_download(target: Option<&str>) -> std::io::Result<()> {
         Some("verify") => {
             let mut bad = 0;
             let names = download::models::MODELS.iter().map(|art| (art.name, art.sha256));
-            let extracted = download::models::MOONSHINE_EXTRACTED.iter().copied();
+            let extracted = download::models::EXTRACTED.iter().copied();
             for (name, sha) in names.chain(extracted) {
                 let p = paths::models_dir().join(name);
                 match download::verify(&p, sha) {
