@@ -230,6 +230,27 @@ fn download_verify_flags_a_tampered_artifact() {
     assert!(stdout.contains(bad_name), "verify must name the bad artifact: {stdout}");
 }
 
+/// A BYO question whose derived slug looks like a journal date (YYYY-MM-DD) must
+/// NOT claim the journal date-file namespace — it gets the hash-suffixed slug, so
+/// a later journal entry for that date can't corrupt the reflect frontmatter.
+#[test]
+fn byo_date_shaped_question_does_not_claim_the_journal_filename() {
+    let dir = tempfile::tempdir().unwrap();
+    let talk_dir = dir.path().join("talk");
+    let out = talk(dir.path(), &["2026 06 09", "--from-text", "some words", "--date", "2026-06-09", "--time", "08:00"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    // The reflect file must NOT be the bare date file (that's the journal namespace).
+    let bare = std::fs::read_to_string(talk_dir.join("2026-06-09.md")).ok();
+    let is_reflect = bare.as_deref().is_some_and(|t| t.contains("pack: byo"));
+    assert!(!is_reflect, "BYO claimed the journal date filename 2026-06-09.md");
+    // It landed under a hash-suffixed slug instead (one byo reflect file exists).
+    let byo_files = std::fs::read_dir(&talk_dir).unwrap().flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
+        .filter(|e| std::fs::read_to_string(e.path()).is_ok_and(|t| t.contains("pack: byo")))
+        .count();
+    assert_eq!(byo_files, 1, "exactly one byo reflect file expected");
+}
+
 #[test]
 fn date_traversal_is_rejected() {
     let dir = tempfile::tempdir().unwrap();

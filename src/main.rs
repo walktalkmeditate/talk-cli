@@ -107,9 +107,12 @@ fn reflect_choice(base: &Path, byo: &Option<String>, time: &str, default_pack: &
 
     let (id, question, slug, pack, addressee, held_day) = match byo {
         Some(q) => {
-            // BYO: id == slug, collision-suffixed against a DIFFERENT existing question.
+            // BYO: id == slug, collision-suffixed against a DIFFERENT existing
+            // question. A slug shaped like a journal filename (YYYY-MM-DD) is also
+            // treated as taken, so a BYO can never collide with the journal date-file
+            // namespace (a journal append onto reflect frontmatter would corrupt it).
             let slug = talk_core::slug::derive_slug_unique(q, |s| {
-                slug_taken_by_other(&base.join(format!("{}.md", s)), q)
+                is_journal_date_slug(s) || slug_taken_by_other(&base.join(format!("{}.md", s)), q)
             });
             (slug.clone(), q.clone(), slug, "byo".to_string(), "self".to_string(), None)
         }
@@ -282,8 +285,15 @@ fn run_live_session(
 
     // Build the per-mode View config and the write target. For reflect we resolve
     // the question (BYO or spine) up front; its owned strings back the Target.
+    // For a BYO question, a near-match against an EXISTING BYO thread offers to
+    // continue that thread instead of silently forking it (spec §8) — live + TTY
+    // only; pack/spine threads are never merged (they're served by id).
+    let byo_question = match (&shape, &args.question) {
+        (Shape::Reflect, Some(q)) if interactive => byo_continue_or(base, q)?,
+        _ => args.question.clone(),
+    };
     let choice = match shape {
-        Shape::Reflect => Some(reflect_choice(base, &args.question, time, &cfg.default_pack)?),
+        Shape::Reflect => Some(reflect_choice(base, &byo_question, time, &cfg.default_pack)?),
         _ => None,
     };
     let (rmode, target, cleanup, ephemeral, question): (RMode, Target, &str, bool, Option<&str>) =
@@ -387,6 +397,29 @@ fn run_live_session(
         }
     }
     Ok(Some(Ok(())))
+}
+
+/// For a BYO question `q`, if a near-match exists among prior BYO threads, prompt
+/// to continue that thread; on `Y`/default substitute the existing question string
+/// (so the normal exact-match path reuses its file). Returns `Some(question)` for
+/// `reflect_choice`. Caller gates this on a TTY — non-TTY keeps current behavior.
+#[cfg(feature = "listen")]
+fn byo_continue_or(base: &Path, q: &str) -> std::io::Result<Option<String>> {
+    let existing: Vec<String> = existing_threads(base)
+        .into_iter()
+        .filter(|t| t.pack == "byo")
+        .map(|t| t.question)
+        .collect();
+    let Some(existing_q) = talk_core::matchq::near_match(q, &existing) else {
+        return Ok(Some(q.to_string()));
+    };
+    use std::io::Write;
+    print!("you've sat with \"{existing_q}\" before — continue that thread? [Y/n] ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let continue_it = !matches!(line.trim(), "n" | "N");
+    Ok(Some(if continue_it { existing_q.clone() } else { q.to_string() }))
 }
 
 /// First-run prompt: offer to fetch the models now (~30 MB is the MEASURED total —
@@ -550,6 +583,9 @@ struct ThreadRow {
     entries: u32,
     last: String,
     question: String,
+    /// Read only by the live BYO near-match path (listen builds).
+    #[cfg_attr(not(feature = "listen"), allow(dead_code))]
+    pack: String,
 }
 
 /// Scan the base dir for every thread file (frontmatter-bearing `.md`), parsing
@@ -566,7 +602,7 @@ fn existing_threads(base: &Path) -> Vec<ThreadRow> {
         .filter_map(|p| {
             let text = std::fs::read_to_string(&p).ok()?;
             let (fm, _) = talk_core::frontmatter::Frontmatter::parse(&text)?;
-            Some(ThreadRow { path: p, slug: fm.slug, entries: fm.entries, last: fm.last, question: fm.question })
+            Some(ThreadRow { path: p, slug: fm.slug, entries: fm.entries, last: fm.last, question: fm.question, pack: fm.pack })
         })
         .collect()
 }
@@ -620,6 +656,19 @@ fn slug_taken_by_other(path: &Path, q: &str) -> bool {
         },
         Err(_) => false,
     }
+}
+
+/// True if `slug` is shaped like a journal filename (`YYYY-MM-DD`), so a BYO
+/// question never claims a slug in the journal date-file namespace. Hand-rolled
+/// (len 10: four digits, '-', two digits, '-', two digits) to avoid a regex dep.
+fn is_journal_date_slug(slug: &str) -> bool {
+    let b = slug.as_bytes();
+    b.len() == 10
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[7] == b'-'
+        && b[8..10].iter().all(u8::is_ascii_digit)
 }
 
 fn require_text(from: &Option<String>) -> String {
