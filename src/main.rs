@@ -199,6 +199,7 @@ fn run_live_session(
     cfg: &config::Config,
 ) -> std::io::Result<Option<std::io::Result<()>>> {
     use talk_core::render_model::Mode as RMode;
+    use zeroize::Zeroize;
 
     // Which session shape are we in? Non-session commands → fall through.
     enum Shape { Reflect, Journal, Ephemeral }
@@ -292,13 +293,18 @@ fn run_live_session(
     let live_cfg = live::LiveConfig {
         mode: rmode, question, held_label: held_label.as_deref(), cleanup, ephemeral,
     };
-    let result = live::run_loop(&mut source, finish_flag, speaking, &live_cfg)?;
+    let mut result = live::run_loop(&mut source, finish_flag, speaking, &live_cfg)?;
 
     if result.cancelled {
         return Ok(Some(Ok(())));
     }
     if ephemeral {
         live::show_released()?;
+        // The ephemeral transcript was never written; wipe its final buffers here
+        // (intermediate STT buffers are out of safe-Rust reach — the threat
+        // boundary is stated in the first-run disclosure).
+        result.raw.zeroize();
+        result.clean.zeroize();
         return Ok(Some(Ok(())));
     }
     if result.clean.trim().is_empty() {

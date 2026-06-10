@@ -18,7 +18,7 @@ name = "talk"
 path = "src/main.rs"
 
 [features]
-listen = ["download", "dep:cpal", "dep:sherpa-onnx", "dep:coreaudio-sys"]
+listen = ["download", "dep:cpal", "dep:sherpa-onnx", "dep:coreaudio-sys", "dep:zeroize"]
 download = ["dep:ureq"]
 
 [dependencies]
@@ -36,6 +36,7 @@ ureq = { version = "2", optional = true }             # v2: resp.into_reader() e
 sha2 = "0.10"
 tar = "0.4"
 bzip2 = "0.4"
+zeroize = { version = "1", optional = true }          # listen-only: wipes the ephemeral transcript buffers
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
