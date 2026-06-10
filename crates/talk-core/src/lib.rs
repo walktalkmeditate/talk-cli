@@ -6,6 +6,7 @@ pub mod entry;
 pub mod eval;
 pub mod format;
 pub mod frontmatter;
+pub mod matchq;
 pub mod palette;
 pub mod questions;
 pub mod render_model;

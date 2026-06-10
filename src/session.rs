@@ -10,6 +10,7 @@ pub struct RunConfig<'a> {
     pub date: &'a str,
     pub time: &'a str,
     pub keep_raw: bool,
+    pub raw_sidecar: bool,
     pub ephemeral: bool,
     pub formatter: &'a dyn Formatter,
     pub level: Level,
@@ -55,6 +56,7 @@ pub fn run(
         raw: Some(&raw_joined),
         clean: &clean_joined,
         keep_raw: cfg.keep_raw,
+        raw_sidecar: cfg.raw_sidecar,
         ephemeral: cfg.ephemeral,
     })
 }
@@ -66,7 +68,7 @@ mod tests {
 
     fn cfg(base: &Path, ephemeral: bool) -> RunConfig<'_> {
         RunConfig {
-            base, date: "2026-06-08", time: "08:14", keep_raw: true, ephemeral,
+            base, date: "2026-06-08", time: "08:14", keep_raw: true, raw_sidecar: false, ephemeral,
             formatter: &talk_core::format::DeterministicFormatter, level: Level::Light,
         }
     }
@@ -106,7 +108,7 @@ mod tests {
             Event::Done,
         ]);
         let p = run(&mut src, Target::Journal, &RunConfig {
-            base: dir.path(), date: "2026-06-08", time: "08:14", keep_raw: false, ephemeral: false,
+            base: dir.path(), date: "2026-06-08", time: "08:14", keep_raw: false, raw_sidecar: false, ephemeral: false,
             formatter: &talk_core::format::DeterministicFormatter, level: Level::Light,
         }).unwrap().unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
@@ -136,7 +138,7 @@ mod tests {
             Event::Done,
         ]);
         let cfg = RunConfig {
-            base: dir.path(), date: "2026-06-08", time: "08:14", keep_raw: true, ephemeral: false,
+            base: dir.path(), date: "2026-06-08", time: "08:14", keep_raw: true, raw_sidecar: false, ephemeral: false,
             formatter: &Flip, level: Level::Light,
         };
         let p = run(&mut src, Target::Journal, &cfg).unwrap().unwrap();

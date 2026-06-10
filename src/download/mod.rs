@@ -41,7 +41,8 @@ fn read_capped(r: impl Read, cap: u64, name: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Fetch `art` to `dir` over HTTPS, verifying its pinned SHA-256 before keeping it.
-/// A mismatch deletes the bad file and errors — never load an unverified model.
+/// A mismatch errors with the fetched bytes still in memory — nothing unverified
+/// ever touches disk, so there is no bad file to clean up.
 pub fn fetch(art: &Artifact, dir: &Path) -> Result<(), String> {
     if art.sha256.starts_with("FILL") {
         return Err(format!("{} hash not pinned — run the pin step", art.name));
@@ -98,6 +99,14 @@ pub fn verify(path: &Path, want: &str) -> Result<bool, String> {
     }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     Ok(hex(Sha256::digest(&bytes)) == want)
+}
+
+/// Re-extract a VERIFIED `.tar.bz2` archive into `dir` — the heal path when the
+/// archive hashes clean but an extracted file went missing. Called only by the
+/// live session's models gate (listen builds).
+#[cfg_attr(not(feature = "listen"), allow(dead_code))]
+pub fn extract(archive: &Path, dir: &Path) -> Result<(), String> {
+    extract_tar_bz2(archive, dir)
 }
 
 /// Extract a verified `.tar.bz2` model archive into `dir`.

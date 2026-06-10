@@ -7,11 +7,13 @@ mod keymap;
 mod live;
 #[cfg(feature = "listen")]
 mod listen;
+mod packs;
 mod paths;
 mod render;
 mod session;
 mod source;
 mod state;
+mod streak;
 mod writer;
 
 use clap::Parser;
@@ -20,9 +22,6 @@ use session::{run, RunConfig};
 use source::FakeTranscript;
 use std::path::{Path, PathBuf};
 use writer::Target;
-
-/// The spine pack is compiled in, so Plan 1 has no runtime file dependency.
-const SPINE_TOML: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/questions/spine.toml"));
 
 fn main() -> std::io::Result<()> {
     let args = Cli::parse();
@@ -48,23 +47,36 @@ fn main() -> std::io::Result<()> {
     match args.command {
         Some(Command::Journal) => {
             let text = require_text(&args.from_text);
-            run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, ephemeral: false, level: cfg.cleanup_for("journal") })?;
+            disclose_once(&base)?;
+            run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: false, level: cfg.cleanup_for("journal"), held_day: None })?;
         }
         Some(Command::Unburden) | Some(Command::Vent) => {
             let text = require_text(&args.from_text);
-            run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, ephemeral: true, level: talk_core::cleanup::Level::None })?;
+            run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: true, level: talk_core::cleanup::Level::None, held_day: None })?;
             println!("Released. Nothing was written.");
         }
         Some(Command::Config { action }) => return handle_config(action.as_deref()),
         Some(Command::Thread { question }) => print_thread(&base, question.as_deref()),
-        Some(Command::Streak) => println!("streak: (Plan 4)"),
+        Some(Command::Streak) => {
+            let s = streak::Streak::load_from(&base);
+            if s.entries == 0 {
+                println!("No reflections yet — run `talk` to start.");
+            } else {
+                println!("{} reflection{} · current run {} day{} · longest {}",
+                    s.entries, if s.entries == 1 { "" } else { "s" },
+                    s.current_streak, if s.current_streak == 1 { "" } else { "s" },
+                    s.longest_streak);
+            }
+            return Ok(());
+        }
         Some(Command::Download { target }) => return handle_download(target.as_deref()),
         Some(Command::Reflect) => reflect(&base, &args.question, &date, &time, &require_text(&args.from_text), &cfg)?,
         // Bare `talk`: honor config.default_mode (journal) unless a BYO question was given.
         _ => {
             if args.question.is_none() && cfg.default_mode == "journal" {
                 let text = require_text(&args.from_text);
-                run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, ephemeral: false, level: cfg.cleanup_for("journal") })?;
+                disclose_once(&base)?;
+                run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: false, level: cfg.cleanup_for("journal"), held_day: None })?;
             } else {
                 reflect(&base, &args.question, &date, &time, &require_text(&args.from_text), &cfg)?;
             }
@@ -82,47 +94,64 @@ struct ReflectChoice {
     slug: String,
     pack: String,
     addressee: String,
+    /// 1-based day of an active `held:N` run for this serving; `None` for daily
+    /// questions and BYO. Computed BEFORE the serving advances state.
+    held_day: Option<u32>,
     state: state::State,
 }
 
 /// Select a reflect question: a BYO question if one was given, else from the
-/// spine pack (recording the serving in the returned `State`).
-fn reflect_choice(base: &Path, byo: &Option<String>, time: &str) -> std::io::Result<ReflectChoice> {
+/// configured pack (recording the serving in the returned `State`).
+fn reflect_choice(base: &Path, byo: &Option<String>, time: &str, default_pack: &str) -> std::io::Result<ReflectChoice> {
     let mut st = state::State::load(&std::fs::read_to_string(state_path(base)).unwrap_or_default());
 
-    let (id, question, slug, pack, addressee) = match byo {
+    let (id, question, slug, pack, addressee, held_day) = match byo {
         Some(q) => {
-            // BYO: id == slug, collision-suffixed against a DIFFERENT existing question.
+            // BYO: id == slug, collision-suffixed against a DIFFERENT existing
+            // question. A slug shaped like a journal filename (YYYY-MM-DD) is also
+            // treated as taken, so a BYO can never collide with the journal date-file
+            // namespace (a journal append onto reflect frontmatter would corrupt it).
             let slug = talk_core::slug::derive_slug_unique(q, |s| {
-                slug_taken_by_other(&base.join(format!("{}.md", s)), q)
+                is_journal_date_slug(s) || slug_taken_by_other(&base.join(format!("{}.md", s)), q)
             });
-            (slug.clone(), q.clone(), slug, "byo".to_string(), "self".to_string())
+            (slug.clone(), q.clone(), slug, "byo".to_string(), "self".to_string(), None)
         }
         None => {
-            let spine = talk_core::questions::Pack::from_toml(SPINE_TOML).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bundled spine.toml invalid: {e}"))
-            })?;
-            let chosen = match talk_core::selection::select(&spine, &st.selection_state(), hour_of(time)) {
+            let pack = crate::packs::by_name(default_pack);
+            let chosen = match talk_core::selection::select(&pack, &st.selection_state(), hour_of(time)) {
                 Some(q) => q.clone(),
                 None => return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData, "spine pack has no questions")),
+                    std::io::ErrorKind::InvalidData, "pack has no questions")),
             };
+            // A held run lives in the pack that started it; if the active pack
+            // changed mid-run, the run's question won't be served here — abandon
+            // it cleanly rather than stranding a half-finished run.
+            if let Some((run_id, _)) = &st.held_run {
+                if run_id != &chosen.id {
+                    st.held_run = None;
+                    eprintln!("your held run paused — it lives in the `held` pack");
+                }
+            }
             let slug = chosen.slug.clone().unwrap_or_else(|| chosen.id.clone());
+            // The held day reflects the PRE-advance state — this serving is day
+            // `done + 1` of the run (or day 1 of a fresh one).
+            let held_day = state::held_day_for(&st.held_run, &chosen.id, &chosen.cadence);
             st.record_served(&chosen.id);
             st.advance_held(&chosen);
-            (chosen.id, chosen.text, slug, spine.name, chosen.addressee)
+            (chosen.id, chosen.text, slug, pack.name, chosen.addressee, held_day)
         }
     };
 
-    Ok(ReflectChoice { id, question, slug, pack, addressee, state: st })
+    Ok(ReflectChoice { id, question, slug, pack, addressee, held_day, state: st })
 }
 
 /// Reflect: a BYO question if one was given, else select from the spine pack.
 fn reflect(base: &Path, byo: &Option<String>, date: &str, time: &str, text: &str, cfg: &config::Config) -> std::io::Result<()> {
-    let c = reflect_choice(base, byo, time)?;
+    disclose_once(base)?;
+    let c = reflect_choice(base, byo, time, &cfg.default_pack)?;
 
     let target = Target::Reflect { id: &c.id, question: &c.question, slug: &c.slug, pack: &c.pack, addressee: &c.addressee };
-    run_and_report(Report { base, target, date, time, text, keep_raw: cfg.keep_raw, ephemeral: false, level: cfg.cleanup_for("reflect") })?;
+    run_and_report(Report { base, target, date, time, text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: false, level: cfg.cleanup_for("reflect"), held_day: c.held_day })?;
     paths::write_private(&state_path(base), &c.state.save())?;
     Ok(())
 }
@@ -134,18 +163,31 @@ struct Report<'a> {
     time: &'a str,
     text: &'a str,
     keep_raw: bool,
+    raw_sidecar: bool,
     ephemeral: bool,
     level: talk_core::cleanup::Level,
+    /// 1-based held-run day for the printed provenance; `None` for non-held entries.
+    held_day: Option<u32>,
 }
 
 fn run_and_report(r: Report) -> std::io::Result<()> {
     let path = run(&mut FakeTranscript::from_text(r.text), r.target,
         &RunConfig {
-            base: r.base, date: r.date, time: r.time, keep_raw: r.keep_raw, ephemeral: r.ephemeral,
+            base: r.base, date: r.date, time: r.time, keep_raw: r.keep_raw, raw_sidecar: r.raw_sidecar, ephemeral: r.ephemeral,
             formatter: &talk_core::format::DeterministicFormatter, level: r.level,
         })?;
     if let Some(p) = path {
-        println!("→ {}", p.display());
+        match r.held_day {
+            Some(d) => println!("→ {} · held day {}", p.display(), d),
+            None => println!("→ {}", p.display()),
+        }
+        // A saved entry credits the streak (ephemeral writes nothing, so it never
+        // reaches here with a path — gated anyway). Streak failure never blocks a save.
+        if !r.ephemeral {
+            if let Some(day) = streak::civil_day(r.date) {
+                let _ = streak::record_entry(r.base, day);
+            }
+        }
     }
     Ok(())
 }
@@ -163,6 +205,7 @@ fn run_live_session(
     cfg: &config::Config,
 ) -> std::io::Result<Option<std::io::Result<()>>> {
     use talk_core::render_model::Mode as RMode;
+    use zeroize::Zeroize;
 
     // Which session shape are we in? Non-session commands → fall through.
     enum Shape { Reflect, Journal, Ephemeral }
@@ -184,17 +227,27 @@ fn run_live_session(
         | Some(Command::Download { .. }) => return Ok(None),
     };
 
+    // First-run disclosure: once a real (non-ephemeral) session is about to begin,
+    // before the models gate, so a brand-new user sees the privacy note first, then
+    // any fetch offer. Ephemeral discloses nothing — it writes nothing to disclose.
+    // TTY-gated: a non-TTY listen invocation (e.g. `talk journal` with no
+    // `--from-text` under test) never reaches a real session, and must write zero
+    // bytes (it falls through to the models gate's clean non-zero exit).
+    let interactive = unsafe { libc::isatty(0) } == 1;
+    if interactive && !matches!(shape, Shape::Ephemeral) {
+        disclose_once(base)?;
+    }
+
     // Verify every model before loading anything; an unpinned / missing / mismatched
-    // artifact prints the download hint and exits non-zero (a failure to do the
-    // reflection — never a panic, and the exit is clean since no terminal state or
-    // file has been touched yet).
-    for art in download::models::MODELS {
-        match download::verify(&paths::models_dir().join(art.name), art.sha256) {
-            Ok(true) => {}
-            _ => {
-                eprintln!("models not ready — run `talk download models`");
-                std::process::exit(1);
-            }
+    // artifact means the session can't run yet. On a TTY we offer to fetch them now
+    // (a one-time ~30 MB download) and continue; otherwise we print the hint and
+    // exit non-zero (a clean failure — no terminal state or file has been touched).
+    if !models_ready() {
+        if interactive && offer_first_run_fetch()? {
+            fetch_all_models()?;
+        } else {
+            eprintln!("models not ready — run `talk download models`");
+            std::process::exit(1);
         }
     }
 
@@ -208,6 +261,18 @@ fn run_live_session(
     ) else {
         eprintln!("model path is not valid UTF-8 — run `talk download models`");
         std::process::exit(1);
+    };
+
+    // Build the per-mode View config and the write target. For reflect we resolve
+    // the question (BYO or spine) up front; its owned strings back the Target.
+    // For a BYO question, a near-match against an EXISTING BYO thread offers to
+    // continue that thread instead of silently forking it (spec §8) — live + TTY
+    // only; pack/spine threads are never merged (they're served by id). Resolved
+    // BEFORE the mic starts: a stdin prompt over a hot mic would transcribe the
+    // user's answer-thinking into the entry.
+    let byo_question = match (&shape, &args.question) {
+        (Shape::Reflect, Some(q)) if interactive => byo_continue_or(base, q)?,
+        _ => args.question.clone(),
     };
 
     let capture = match listen::capture::Capture::start() {
@@ -227,10 +292,8 @@ fn run_live_session(
     let finish_flag = source.finish_handle();
     let speaking = source.speaking_handle();
 
-    // Build the per-mode View config and the write target. For reflect we resolve
-    // the question (BYO or spine) up front; its owned strings back the Target.
     let choice = match shape {
-        Shape::Reflect => Some(reflect_choice(base, &args.question, time)?),
+        Shape::Reflect => Some(reflect_choice(base, &byo_question, time, &cfg.default_pack)?),
         _ => None,
     };
     let (rmode, target, cleanup, ephemeral, question): (RMode, Target, &str, bool, Option<&str>) =
@@ -248,16 +311,26 @@ fn run_live_session(
             (Shape::Reflect, None) => unreachable!("reflect always resolves a choice"),
         };
 
+    // Held-run header label (e.g. "held 3 days"); bound here so it outlives
+    // `live_cfg`, whose `held_label` borrows it.
+    let held_label = choice.as_ref().and_then(|c| c.held_day).map(|d| {
+        format!("held {} day{}", d, if d == 1 { "" } else { "s" })
+    });
     let live_cfg = live::LiveConfig {
-        mode: rmode, question, held_label: None, cleanup, ephemeral,
+        mode: rmode, question, held_label: held_label.as_deref(), cleanup, ephemeral,
     };
-    let result = live::run_loop(&mut source, finish_flag, speaking, &live_cfg)?;
+    let mut result = live::run_loop(&mut source, finish_flag, speaking, &live_cfg)?;
 
     if result.cancelled {
         return Ok(Some(Ok(())));
     }
     if ephemeral {
         live::show_released()?;
+        // The ephemeral transcript was never written; wipe its final buffers here
+        // (intermediate STT buffers are out of safe-Rust reach — the threat
+        // boundary is stated in the first-run disclosure).
+        result.raw.zeroize();
+        result.clean.zeroize();
         return Ok(Some(Ok(())));
     }
     if result.clean.trim().is_empty() {
@@ -265,22 +338,150 @@ fn run_live_session(
         return Ok(Some(Ok(())));
     }
 
-    let written = writer::write_entry(&writer::WriteRequest {
-        base, target, date, time,
-        raw: Some(&result.raw), clean: &result.clean,
-        keep_raw: cfg.keep_raw, ephemeral,
-    })?;
+    // Write with in-session recovery (spec §13): on failure offer retry /
+    // clipboard / discard so the spoken words are never silently lost. Clipboard
+    // and discard exits return before the rotation save and streak credit — a
+    // failed write never burns the question (intentional). Discard zeroizes the
+    // in-memory transcript.
+    let mut attempts = 0u32;
+    let written = loop {
+        match writer::write_entry(&writer::WriteRequest {
+            base, target, date, time,
+            raw: Some(&result.raw), clean: &result.clean,
+            keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral,
+        }) {
+            Ok(w) => break w,
+            Err(e) => {
+                attempts += 1;
+                match live::ask_recover(&e.to_string(), attempts)? {
+                    live::Recover::Retry => continue,
+                    live::Recover::Clipboard => {
+                        match live::copy_to_clipboard(&result.clean) {
+                            Ok(()) => {
+                                render::paint_plain(&["  copied — note: clipboard managers and Universal Clipboard may keep or sync a copy.".to_string()])?;
+                            }
+                            Err(ce) => {
+                                render::paint_plain(&[format!("  clipboard failed too: {ce} — try [r]etry")])?;
+                                continue;
+                            }
+                        }
+                        return Ok(Some(Ok(())));
+                    }
+                    live::Recover::Discard => {
+                        result.raw.zeroize();
+                        result.clean.zeroize();
+                        return Ok(Some(Ok(())));
+                    }
+                }
+            }
+        }
+    };
 
     // Persist the reflect rotation only after the write succeeded.
     if let Some(c) = &choice {
         paths::write_private(&state_path(base), &c.state.save())?;
     }
 
+    // A saved live entry credits the streak — BEFORE the close dwell, so Ctrl-C
+    // at the close screen can't skip the credit. Ephemeral already returned above,
+    // so this path is never ephemeral. Streak failure never blocks the save.
+    if written.is_some() {
+        if let Some(day) = streak::civil_day(date) {
+            let _ = streak::record_entry(base, day);
+        }
+    }
+
     if let Some(path) = written {
-        let provenance = format!("entry {}", written_entry_count(&path));
-        live::show_close(&path.display().to_string(), &provenance, "Stillness carries forward.")?;
+        let entry_count = written_entry_count(&path);
+        let held = choice.as_ref().and_then(|c| c.held_day)
+            .map(|d| format!(" · held {d} days"))
+            .unwrap_or_default();
+        let provenance = format!("entry {entry_count}{held}");
+        let phrase = live::CLOSE_PHRASES[entry_count % live::CLOSE_PHRASES.len()];
+        live::show_close(&path.display().to_string(), &provenance, phrase)?;
     }
     Ok(Some(Ok(())))
+}
+
+/// For a BYO question `q`, if a near-match exists among prior BYO threads, prompt
+/// to continue that thread; on `Y`/default substitute the existing question string
+/// (so the normal exact-match path reuses its file). Returns `Some(question)` for
+/// `reflect_choice`. Caller gates this on a TTY — non-TTY keeps current behavior.
+#[cfg(feature = "listen")]
+fn byo_continue_or(base: &Path, q: &str) -> std::io::Result<Option<String>> {
+    let existing: Vec<String> = existing_threads(base)
+        .into_iter()
+        .filter(|t| t.pack == "byo")
+        .map(|t| t.question)
+        .collect();
+    let Some(existing_q) = talk_core::matchq::near_match(q, &existing) else {
+        return Ok(Some(q.to_string()));
+    };
+    use std::io::Write;
+    print!("you've sat with \"{existing_q}\" before — continue that thread? [Y/n] ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    let n = std::io::stdin().read_line(&mut line)?;
+    // EOF (closed stdin) is no answer at all — start a new thread rather than
+    // silently merging into one the user never confirmed.
+    let continue_it = n > 0 && !matches!(line.trim(), "n" | "N");
+    Ok(Some(if continue_it { existing_q.clone() } else { q.to_string() }))
+}
+
+/// First-run prompt: offer to fetch the models now (~30 MB is the MEASURED total —
+/// moonshine 29.8 MB + silero 0.6 MB). Reads one stdin line; only `y`/`Y` accepts.
+#[cfg(feature = "listen")]
+fn offer_first_run_fetch() -> std::io::Result<bool> {
+    use std::io::Write;
+    print!("models not downloaded (~30 MB, one time). download now? [y/N] ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(matches!(line.trim(), "y" | "Y"))
+}
+
+/// Fetch every model artifact — shared by `talk download models` and the live
+/// session's first-run fetch offer (one implementation, one behavior).
+#[cfg(feature = "download")]
+fn fetch_all_models() -> std::io::Result<()> {
+    for art in download::models::MODELS {
+        println!("fetching {} …", art.name);
+        download::fetch(art, &paths::models_dir()).map_err(std::io::Error::other)?;
+        println!("  ✓ {}", art.name);
+    }
+    Ok(())
+}
+
+/// True when every model the session will LOAD verifies against its pin: the
+/// archives (download integrity) AND the extracted Moonshine files (what the
+/// session actually reads — an attacker swapping an extracted .ort would slip
+/// past an archive-only check). A verified archive with missing extracted files
+/// is healed by re-extracting before giving up.
+#[cfg(feature = "listen")]
+fn models_ready() -> bool {
+    let dir = paths::models_dir();
+    let archives_ok = download::models::MODELS.iter().all(|art| {
+        download::verify(&dir.join(art.name), art.sha256).unwrap_or(false)
+    });
+    if !archives_ok {
+        return false;
+    }
+    let extracted_ok = || download::models::MOONSHINE_EXTRACTED.iter().all(|(rel, sha)| {
+        download::verify(&dir.join(rel), sha).unwrap_or(false)
+    });
+    if extracted_ok() {
+        return true;
+    }
+    let any_missing = download::models::MOONSHINE_EXTRACTED.iter().any(|(rel, _)| !dir.join(rel).exists());
+    if any_missing {
+        for art in download::models::MODELS.iter().filter(|a| a.name.ends_with(".tar.bz2")) {
+            if download::extract(&dir.join(art.name), &dir).is_err() {
+                return false;
+            }
+        }
+        return extracted_ok();
+    }
+    false
 }
 
 /// Best-effort entry count from a freshly-written file's frontmatter (reflect) or
@@ -311,17 +512,50 @@ fn handle_config(action: Option<&str>) -> std::io::Result<()> {
     Ok(())
 }
 
-/// `talk download models` — fetch + SHA-256-verify the model artifacts (behind
-/// the `download` feature). Without the feature, this build can't fetch.
+/// `talk download` (no arg) — list what's installed. The pack list prints in
+/// every build; the models section is only meaningful with the `download` feature.
+fn list_installed() -> std::io::Result<()> {
+    println!("installed packs:");
+    for p in packs::vendored() {
+        println!("  {:<12} {:>2} questions — {}", p.name, p.questions.len(), p.description);
+    }
+    #[cfg(feature = "download")]
+    {
+        println!("\nmodels ({}):", paths::models_dir().display());
+        for art in download::models::MODELS {
+            let ok = download::verify(&paths::models_dir().join(art.name), art.sha256).unwrap_or(false);
+            println!("  {} {}", if ok { "✓" } else { "✗" }, art.name);
+        }
+        println!("\nfetch models with `talk download models` · re-check with `talk download verify`");
+    }
+    println!("\nmore packs arrive post-launch via `talk download <pack>`.");
+    Ok(())
+}
+
+/// `talk download` dispatch. No-arg lists installed packs + models status (in
+/// every build); `talk download models` fetches the model artifacts (behind the
+/// `download` feature — without it, this build can't fetch).
 #[cfg(feature = "download")]
 fn handle_download(target: Option<&str>) -> std::io::Result<()> {
     match target {
-        Some("models") | None => {
-            for art in download::models::MODELS {
-                println!("fetching {} …", art.name);
-                download::fetch(art, &paths::models_dir())
-                    .map_err(std::io::Error::other)?;
-                println!("  ✓ {}", art.name);
+        None => list_installed(),
+        Some("models") => fetch_all_models(),
+        Some("verify") => {
+            let mut bad = 0;
+            let names = download::models::MODELS.iter().map(|art| (art.name, art.sha256));
+            let extracted = download::models::MOONSHINE_EXTRACTED.iter().copied();
+            for (name, sha) in names.chain(extracted) {
+                let p = paths::models_dir().join(name);
+                match download::verify(&p, sha) {
+                    Ok(true) => println!("  ✓ {name}"),
+                    _ => {
+                        println!("  ✗ {name} (missing or hash mismatch)");
+                        bad += 1;
+                    }
+                }
+            }
+            if bad > 0 {
+                std::process::exit(1);
             }
             Ok(())
         }
@@ -333,9 +567,14 @@ fn handle_download(target: Option<&str>) -> std::io::Result<()> {
 }
 
 #[cfg(not(feature = "download"))]
-fn handle_download(_target: Option<&str>) -> std::io::Result<()> {
-    eprintln!("this build has no download support — rebuild with `--features download`");
-    std::process::exit(2);
+fn handle_download(target: Option<&str>) -> std::io::Result<()> {
+    match target {
+        None => list_installed(),
+        Some(_) => {
+            eprintln!("this build has no download support — rebuild with `--features download`");
+            std::process::exit(2);
+        }
+    }
 }
 
 fn print_thread(base: &Path, question: Option<&str>) {
@@ -354,19 +593,66 @@ fn print_thread(base: &Path, question: Option<&str>) {
                 None => println!("No thread yet for \"{}\".", q),
             }
         }
-        None => println!("(thread list — Plan 4)"),
+        None => {
+            let mut rows = existing_threads(base);
+            if rows.is_empty() {
+                println!("No threads yet — run `talk` to start one.");
+                return;
+            }
+            rows.sort_by(|a, b| b.last.cmp(&a.last)); // last-date desc (ISO dates sort lexically)
+            for t in rows {
+                println!("{} · {} {} · {}", t.slug, t.entries,
+                    if t.entries == 1 { "entry" } else { "entries" }, t.last);
+            }
+        }
     }
 }
 
-/// Scan the base dir for a reflect file whose frontmatter question matches `q`
-/// (covers spine id-named and collision-suffixed files).
-fn find_by_question(base: &Path, q: &str) -> Option<PathBuf> {
-    std::fs::read_dir(base).ok()?.flatten()
+/// One thread file's frontmatter plus its on-disk path, as scanned from the base
+/// dir.
+struct ThreadRow {
+    path: PathBuf,
+    slug: String,
+    entries: u32,
+    last: String,
+    question: String,
+    /// Read only by the live BYO near-match path (listen builds).
+    #[cfg_attr(not(feature = "listen"), allow(dead_code))]
+    pack: String,
+}
+
+/// Scan the base dir for every thread file (frontmatter-bearing `.md`), parsing
+/// each into a `ThreadRow`. The `.md` filter excludes the `.raw/` subdir (a dir
+/// has no extension); journal date files have no frontmatter and drop out. Shared
+/// by `print_thread`'s list view and `find_by_question`.
+fn existing_threads(base: &Path) -> Vec<ThreadRow> {
+    std::fs::read_dir(base)
+        .into_iter()
+        .flatten()
+        .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|x| x == "md"))
-        .find(|p| std::fs::read_to_string(p).ok()
-            .and_then(|t| talk_core::frontmatter::Frontmatter::parse(&t).map(|(fm, _)| fm.question == q))
-            .unwrap_or(false))
+        .filter_map(|p| {
+            let text = std::fs::read_to_string(&p).ok()?;
+            let Some((fm, _)) = talk_core::frontmatter::Frontmatter::parse(&text) else {
+                // Journal date files legitimately have no frontmatter; anything
+                // else is a corrupt thread that would otherwise silently vanish
+                // from the list (and fork on the next near-match).
+                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                if !is_journal_date_slug(stem) {
+                    eprintln!("warning: skipping {} — unparseable frontmatter", p.display());
+                }
+                return None;
+            };
+            Some(ThreadRow { path: p, slug: fm.slug, entries: fm.entries, last: fm.last, question: fm.question, pack: fm.pack })
+        })
+        .collect()
+}
+
+/// Find a reflect file whose frontmatter question matches `q` (covers spine
+/// id-named and collision-suffixed files). Returns its on-disk path.
+fn find_by_question(base: &Path, q: &str) -> Option<PathBuf> {
+    existing_threads(base).into_iter().find(|t| t.question == q).map(|t| t.path)
 }
 
 fn load_config() -> std::io::Result<config::Config> {
@@ -376,6 +662,29 @@ fn load_config() -> std::io::Result<config::Config> {
 
 fn state_path(base: &Path) -> PathBuf {
     base.join(".state.json") // dot-prefixed so vault sync / indexing skip it
+}
+
+/// The first-run privacy note (spec §8) — printed to STDOUT once, since it's a
+/// feature of talk (everything stays local), not an error.
+const DISCLOSURE: &str = "talk keeps everything local — your words land only in ~/talk on this machine.\n\
+one honest note: the raw transcript is plaintext. if ~/talk lives in a\n\
+cloud-synced folder (iCloud, Dropbox), that cloud sees your words.\n\
+`keep_raw = false` stores only the cleaned text; `talk unburden` keeps\n\
+nothing at all. clipboard recovery, if you ever use it, passes through the\n\
+system clipboard. scrollback and OS swap are beyond any app's reach.";
+
+/// Print the first-run disclosure once, then record it in state. Must be called
+/// only when a non-ephemeral session actually proceeds, and BEFORE any other
+/// `State` load (reflect_choice's included), so reflect's later save doesn't
+/// clobber the flag with a pre-disclosure copy. Ephemeral never discloses.
+fn disclose_once(base: &Path) -> std::io::Result<()> {
+    let mut st = state::State::load(&std::fs::read_to_string(state_path(base)).unwrap_or_default());
+    if !st.disclosed {
+        println!("{DISCLOSURE}");
+        st.disclosed = true;
+        paths::write_private(&state_path(base), &st.save())?;
+    }
+    Ok(())
 }
 
 /// True if a file at `path` exists AND is not this question's own reflect file —
@@ -391,11 +700,24 @@ fn slug_taken_by_other(path: &Path, q: &str) -> bool {
     }
 }
 
+/// True if `slug` is shaped like a journal filename (`YYYY-MM-DD`), so a BYO
+/// question never claims a slug in the journal date-file namespace. Hand-rolled
+/// (len 10: four digits, '-', two digits, '-', two digits) to avoid a regex dep.
+fn is_journal_date_slug(slug: &str) -> bool {
+    let b = slug.as_bytes();
+    b.len() == 10
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[7] == b'-'
+        && b[8..10].iter().all(u8::is_ascii_digit)
+}
+
 fn require_text(from: &Option<String>) -> String {
     match from {
         Some(t) if !t.trim().is_empty() => t.clone(),
         _ => {
-            eprintln!("Plan 1: pass --from-text <text> to drive the pipeline (the real audio source lands in Plan 2).");
+            eprintln!("no --from-text given and this build has no microphone support — rebuild with --features listen, or pass --from-text <text>");
             std::process::exit(2);
         }
     }
@@ -405,10 +727,10 @@ fn hour_of(hm: &str) -> u32 {
     hm.split(':').next().and_then(|h| h.parse().ok()).unwrap_or(12)
 }
 
-// Plan 1 wires a real (UTC) system clock so files aren't epoch-dated; tests pass
-// --date/--time for determinism. Plan 2 can add local-timezone handling.
+// A real (UTC) system clock so files aren't epoch-dated; tests pass --date/--time
+// for determinism.
 fn system_date() -> String {
-    let (y, m, d) = civil_from_days((unix_secs() / 86_400) as i64);
+    let (y, m, d) = streak::civil_from_days((unix_secs() / 86_400) as i64);
     format!("{:04}-{:02}-{:02}", y, m, d)
 }
 
@@ -424,17 +746,16 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Howard Hinnant's civil-from-days (UTC), dependency-free.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if m <= 2 { y + 1 } else { y };
-    (year, m as u32, d)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn journal_date_slug_accepts_only_yyyy_mm_dd_shapes() {
+        assert!(is_journal_date_slug("2026-06-09"));
+        assert!(!is_journal_date_slug("2026-6-9"));
+        assert!(!is_journal_date_slug("abcd-ef-gh"));
+        assert!(!is_journal_date_slug("2026-06-0"));
+        assert!(!is_journal_date_slug("abcdefghij"));
+    }
 }

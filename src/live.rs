@@ -9,6 +9,19 @@ use crate::source::{Event, TranscriptSource};
 
 const SPEECH_HANGOVER: Duration = Duration::from_millis(350);
 
+/// Curated close phrases (spec §7) — rotated by entry count so a returning user
+/// doesn't see the same line twice in a row.
+pub const CLOSE_PHRASES: &[&str] = &[
+    "Stillness carries forward.",
+    "Said out loud, it weighs less.",
+    "You showed up. That was the practice.",
+    "Let it settle.",
+    "The thread holds.",
+    "Nothing to fix. Just to hear.",
+    "The words keep working after you stop.",
+    "Come back when it tugs.",
+];
+
 pub struct LiveConfig<'a> {
     pub mode: RMode,
     pub question: Option<&'a str>,
@@ -160,9 +173,28 @@ fn fmt_elapsed(d: Duration) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
+/// RAII raw-mode guard for prompts that run AFTER the `Screen` guard dropped:
+/// cooked-mode line buffering would make a single-key prompt appear hung until
+/// Enter. No alternate screen — the prompt text must stay visible.
+struct RawPrompt;
+
+impl RawPrompt {
+    fn enter() -> std::io::Result<RawPrompt> {
+        crossterm::terminal::enable_raw_mode()?;
+        Ok(RawPrompt)
+    }
+}
+
+impl Drop for RawPrompt {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
 /// Wait for a single keypress (discarding non-key events) so a contemplative
 /// close screen isn't flashed away before the reader sees it.
 fn await_keypress() -> std::io::Result<()> {
+    let _raw = RawPrompt::enter()?;
     loop {
         if let CtEvent::Key(_) = event::read()? { return Ok(()); }
     }
@@ -177,4 +209,92 @@ pub fn show_close(path: &str, provenance: &str, phrase: &str) -> std::io::Result
 pub fn show_released() -> std::io::Result<()> {
     paint_plain(&compose_released())?;
     await_keypress()
+}
+
+/// What the user chose at the write-failure prompt (spec §13).
+pub enum Recover {
+    Retry,
+    Clipboard,
+    Discard,
+}
+
+/// Inline write-failure prompt. Returns the chosen action.
+pub fn ask_recover(err: &str, attempts: u32) -> std::io::Result<Recover> {
+    let hint = if attempts >= 3 {
+        " (3 failures — clipboard recommended)"
+    } else {
+        ""
+    };
+    paint_plain(&[
+        format!("  write failed: {err}{hint}"),
+        "  [r]etry · [c]opy to clipboard · [d]iscard".to_string(),
+    ])?;
+    let _raw = RawPrompt::enter()?;
+    loop {
+        if let CtEvent::Key(k) = event::read()? {
+            match k.code {
+                KeyCode::Char('r') | KeyCode::Esc => return Ok(Recover::Retry),
+                KeyCode::Char('c') => return Ok(Recover::Clipboard),
+                KeyCode::Char('d') => return Ok(Recover::Discard),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Best-effort system clipboard (pbcopy / xclip). Errors surface to the caller.
+pub fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    let mut cmd = if cfg!(target_os = "macos") {
+        Command::new("pbcopy")
+    } else {
+        let mut c = Command::new("xclip");
+        c.args(["-selection", "clipboard"]);
+        c
+    };
+    let mut child = cmd.stdin(Stdio::piped()).spawn()?;
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(text.as_bytes())?;
+    if cfg!(target_os = "macos") {
+        // pbcopy exits once stdin closes, so its status is meaningful.
+        let status = child.wait()?;
+        if !status.success() {
+            return Err(std::io::Error::other("clipboard helper exited non-zero"));
+        }
+    }
+    // Not on macOS: xclip stays alive to serve the X11 selection — waiting on it
+    // would hang until another client takes the clipboard over.
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// On macOS dev machines `pbcopy` exists — copied text must read back via
+    /// `pbpaste` verbatim. Headless runners without a pasteboard make `pbcopy`
+    /// fail to spawn; skip there so CI doesn't flake.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn clipboard_roundtrip() {
+        match std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            // Reap the probe BEFORE the real copy: dropping its piped stdin makes
+            // it write an EMPTY pasteboard, which must not race the sentinel.
+            Ok(mut probe) => {
+                let _ = probe.wait();
+            }
+            Err(_) => return,
+        }
+        let unique = "talk-cli clipboard roundtrip 2026-06-09T08:14 sentinel";
+        copy_to_clipboard(unique).unwrap();
+        let pasted = std::process::Command::new("pbpaste").output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&pasted.stdout), unique);
+    }
 }
