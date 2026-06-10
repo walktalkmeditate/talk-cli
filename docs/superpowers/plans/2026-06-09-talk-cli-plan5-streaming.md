@@ -19,25 +19,27 @@
 ## Design rules (read first)
 
 1. **Pass-2 is transcription correction, NOT formatting** — it must *not* be gated by `cleanup::guard_accepts` (a better transcription legitimately changes words; the guard is the formatter moat). Both passes' clean text still goes through the deterministic pre-layer + `deterministic_light` (via `guarded_format` with the deterministic formatter, which always passes its own guard).
-2. **Serial worker ordering is the correctness argument:** the worker emits `Commit(streaming_text)`, then runs pass-2 (~0.3–1.5s; mic chunks buffer in the bounded channel meanwhile), then emits `Revise(better_text)`, then resumes feeding. The next `Commit` cannot arrive before the prior `Revise`, so `revise_committing` always targets the right block. A `Revise` arriving after the loop finalized (user hit space) is a no-op — same contract as `upgrade_committing`.
+2. **Serial worker ordering is the correctness argument:** the worker emits `Commit(streaming_text)`, then runs pass-2 (~0.3–1.5s; mic chunks buffer in the bounded channel meanwhile — T4 raises its capacity to cover the worst-case pass-2 stall; the default 64 chunks ≈ 0.6s was less than one pass-2), then emits `Revise(better_text)`, then resumes feeding. The next `Commit` cannot arrive before the prior `Revise`, so `revise_committing` always targets the right block. A `Revise` arriving after the loop finalized (user hit space) is a no-op — same contract as `upgrade_committing`. During pass-2 the live edge intentionally freezes (no partials while the worker is blocked); it coincides with the user's pause and is imperceptible — do not add concurrency to "fix" it; the serial ordering is the correctness argument.
 3. **The live edge displays lowercased streaming text** (the 20M model emits ALL-CAPS BPE; shouting is wrong for a dim edge). Raw stored on commit = the lowercased streaming text until pass-2 revises both raw and clean with the base transcript.
-4. **Empty endpoints are skipped** (leading-silence endpoints produce empty text — observed in the probe; the existing skip-empty-Commit behavior covers it, keep it).
-5. **Models manifest is REPLACED:** out: moonshine-tiny + silero_vad (the VAD's job is now the endpoint rules). In: moonshine-base + zipformer-20M (~219MB total download, stated honestly in the fetch offer). `vad.rs`/`Segmenter` are deleted; `capture.rs`, `stt.rs` (+`transcribe_chunked`, unchanged envelope 8.0s) stay.
+4. **Empty endpoints are skipped** (leading-silence endpoints produce empty text — observed in the probe; the existing skip-empty-Commit behavior covers it, keep it). T4 adds one exception: an empty pass-1 over a segment `plausibly_speech` accepts is rescued by pass-2 as a fresh Commit (the quiet-speech rescue); pure-silence endpoints still cost zero Moonshine runs.
+5. **Models manifest is REPLACED:** out: moonshine-tiny + silero_vad (the VAD's job is now the endpoint rules). In: moonshine-base + zipformer-20M (~219MB total download, stated honestly in the fetch offer). `vad.rs`/`Segmenter` are deleted; `capture.rs` (channel capacity raised in T4), `stt.rs` (+`transcribe_chunked`, unchanged envelope 8.0s) stay.
 6. **Endpoint tuning (from the probe):** `rule1_min_trailing_silence = 2.4`, `rule2_min_trailing_silence = 0.8` (mirrors the old settle-on-pause feel), `rule3_min_utterance_length = 20.0` (bounds pass-2 segments; chunked transcription covers the rest). `decoder` uses the **fp32** file (standard sherpa recipe: int8 encoder/joiner + fp32 decoder); encoder/joiner int8.
 7. **"Listening" indicator** derives from partial activity (the speaking handle latches when the partial text changed recently) — no VAD needed.
+8. **Bright = pass-2-final.** The committing block renders DIM (Edge tone) until it is revised or settles — brightening is the signal that the text is final-quality. Implementation lives in T1: `Settle` gains a `committing_revised: bool` (false on `commit`, true on `revise_committing` and `upgrade_committing`; expose `committing_revised()`); `compose` renders the committing block with `LineKind::Edge` when unrevised, `LineKind::Settled` once revised (settled blocks unchanged — always bright). This keeps the spec's "bright never moves" intuition intact: bright text never changes; dim text may.
 
 ## File structure
 
 ```
 talk-cli/
   crates/talk-core/src/
-    settle.rs            # + revise_committing(raw, clean)        [CI]
-    render_model.rs      # live edge renders settle.live() text   [CI]
+    settle.rs            # + revise_committing(raw, clean) + committing_revised flag [CI]
+    render_model.rs      # live edge renders settle.live() tail; committing dims until revised [CI]
   src/
     source.rs            # + Event::Revise(String)                [CI]
     session.rs           # handle Revise in the --from-text path  [CI]
     listen/
       vad.rs             # DELETED
+      capture.rs         # sync_channel(64) → sync_channel(1024) (pass-2 stall headroom)
       streaming.rs       # NEW: OnlineRecognizer facade + endpoint rules
       stt.rs             # unchanged (base is a drop-in; transcribe_chunked stays)
       mod.rs             # worker rewrite: partials → endpoint commit → pass-2 revise
@@ -97,15 +99,22 @@ Implementation (next to `upgrade_committing`):
     }
 ```
 
+Design rule 8's flag rides along here: `Settle` gains `committing_revised: bool` — set false on `commit`, true on `revise_committing` and `upgrade_committing`; expose it as `committing_revised()`.
+
 - [ ] **Step 2: render — failing test first.** The live edge currently shows only a static `…` listening dot; it must render the partial text. In `render_model.rs`, change `edge_line`:
 
 ```rust
 fn edge_line(v: &View) -> String {
-    // The live edge: the streaming partial hypothesis while speaking (dim,
-    // jittering — spec §7's signature), else a calm dot while listening.
+    // The live edge: the streaming partial (dim, jittering) — held to ONE line so
+    // the layout never bounces; long partials show their tail. Else a calm dot.
     let live = v.settle.live();
     if !live.is_empty() {
-        format!("  {live}")
+        let tail: String = live.chars().rev().take(72).collect::<Vec<_>>().into_iter().rev().collect();
+        if live.chars().count() > 72 {
+            format!("  …{tail}")
+        } else {
+            format!("  {tail}")
+        }
     } else if v.listening {
         "  …".to_string()
     } else {
@@ -113,6 +122,8 @@ fn edge_line(v: &View) -> String {
     }
 }
 ```
+
+(Char-boundary-safe via `chars()`, not byte slicing.) Same file, design rule 8's treatment: `compose` renders the committing block with `LineKind::Edge` when `committing_revised()` is false, `LineKind::Settled` once revised — settled blocks unchanged, always bright.
 
 Tests:
 
@@ -134,6 +145,8 @@ Tests:
         assert!(compose(&v).iter().any(|(l, k)| l.contains('…') && *k == LineKind::Edge));
     }
 ```
+
+Two more tests: a 200-char partial renders as ONE line that starts with `…` and ends with the partial's tail (the truncation path); and the rule-8 tone test — commit → the committing line is Edge-kind; revise → Settled-kind.
 
 (Adapt to the existing test helpers `base`/`text`; the `show_raw` toggle does not affect the live edge.)
 
@@ -170,6 +183,8 @@ pub enum Event {
             }
 ```
 
+(`guarded_format` with the deterministic formatter equals `deterministic_light` — its guard always passes its own output — used here for symmetry with the Commit arm; rule 1's no-guard-on-pass-2 is preserved because no LLM formatter sits in this path.)
+
 Failing test first (this makes the whole two-pass settle behavior testable WITHOUT hardware):
 
 ```rust
@@ -189,7 +204,9 @@ Failing test first (this makes the whole two-pass settle behavior testable WITHO
     }
 ```
 
-- [ ] **Step 3: live.rs match arms** (`run_loop` drain + `drain_until_done`): add the same `Revise` arm (pre-layer + `deterministic_light`, then `settle.revise_committing`) — mirroring the existing inline `Commit` arm's style; while paused, `Revise` is still applied (it corrects already-accepted text, unlike a new Commit). In `drain_until_done`, `Revise` also resets the liveness deadline.
+(Step 3 adds a second required test to this list: the pause-pairing invariant.)
+
+- [ ] **Step 3: live.rs match arms — ordering and pairing are load-bearing.** Add the `Revise` arm ABOVE the `_ if paused => {}` catch-all (exactly like `Done` already is); the `Commit`/`Partial` arms stay below it. Track pairing with a loop-local `let mut commit_dropped = false;`: set it `true` when a `Commit` is discarded by the paused guard, set it `false` when a `Commit` is accepted. The `Revise` arm applies `settle.revise_committing(&raw2, &clean2)` (pre-layer + `deterministic_light`, mirroring the Commit arm's inline style) **only when `!commit_dropped`** — a Revise whose paired Commit was dropped during pause must be dropped too, or the pass-2 text of OFF-RECORD speech (spoken while paused — the exact thing pause exists to exclude) would overwrite the last accepted phrase. The worker's serial Commit→Revise pairing makes the single boolean sufficient. A Revise straddling a pause (Commit accepted before [p], Revise arriving during) still applies correctly because the flag is false. In `drain_until_done`, the `Revise` arm must BOTH reset the liveness deadline AND apply the same settle mutation. Required FakeTranscript test (add to Step 2's test list): `Commit(A) → Revise(A2) → [simulating pause drops] Commit(B)+Revise(B2) must not alter A2` — script it in the session test where pause isn't available by asserting the live.rs invariant in a unit test of the arm logic, OR note it as the live-loop's on-machine check with the session-level test covering apply-order.
 
 - [ ] **Step 4:** full `cargo test` green → commit `feat: Event::Revise — second-pass correction through the source seam`.
 
@@ -231,15 +248,21 @@ pub const EXTRACTED: &[(&str, &str)] = &[
 
 `PIN_AT_IMPL`: the archives are already verified-extracted at `/tmp/sherpa-onnx-moonshine-base-en-quantized-2026-02-27` and `/tmp/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17` on this machine — `shasum -a 256` each listed file and pin (same TOFU-plus-archive-provenance model as Plan 4's `MOONSHINE_EXTRACTED`, which this constant replaces/renames).
 
-- [ ] **Step 2: gates + paths.** `models_ready`/re-extract heal path/`talk download verify` iterate the new `EXTRACTED`; `main.rs` model-path construction switches to the base + zipformer dirs; the fetch-offer prompt says **~220 MB** (measured archive total). The old tiny/silero names disappear everywhere (grep).
-- [ ] **Step 3: privacy tests.** `tampered_model_refuses_to_run` writes fake files at the NEW manifest names (archives + one extracted `.ort`); assertions unchanged.
+**Pin corroboration (required):** after hashing locally, cross-check both archive SHAs against GitHub's release-asset records (`gh api repos/k2-fsa/sherpa-onnx/releases/tags/asr-models --jq '.assets[] | select(.name|test("moonshine-base-en-quantized|zipformer-en-20M")) | {name, digest}'` or the equivalent REST call) and record "corroborated against the release-asset digest, <date>" in the pin comments — a single-session TOFU pin is not enough for weights that run on private audio (spec §11).
+
+- [ ] **Step 2: gates + paths — the explicit checklist (every site, not a grep hope):**
+  - `MOONSHINE_EXTRACTED` → `EXTRACTED` at its definition (`models.rs`) and ALL usages: `models_ready` (main.rs ~469, ~475), the re-extract heal arm (~477), the `talk download verify` arm in `handle_download` (~546).
+  - `main.rs` model-path construction switches to the base + zipformer dirs.
+  - The fetch-offer string in `offer_first_run_fetch` (main.rs ~435) changes from "~30 MB" to **~219 MB** (measured archive total), with the returning-user copy: `talk's transcription engine changed (live streaming + a better model). new models: ~219 MB, one time. your old models are no longer used (left in place, ~30 MB — harmless). download now? [y/N]`
+  - The old tiny/silero names disappear from the code everywhere (grep to confirm). Orphan decision, recorded: old tiny/silero files are left in place (harmless, ~30MB, never loaded — no downgrade path exists since the code stops referencing them); a `talk download clean` is deliberately not added (YAGNI).
+- [ ] **Step 3: privacy tests — enumerate the `tests/privacy.rs` sites.** `tampered_model_refuses_to_run` fake-file names: BOTH new archives + at least one zipformer extracted path AND one base extracted path; assertions unchanged. **`inference_stack_runs_under_deny_network_sandbox`'s skip-gate paths** must check the NEW dirs so the test RUNS, not skips, on a migrated machine — verify on this machine that it runs. The canary sub-assertion stays untouched.
 - [ ] **Step 4:** `cargo test` + `--features listen` + `--features download` green (gates run against fake files; no network in tests) → commit `feat(models): moonshine base + streaming zipformer manifest`.
 
 ---
 
 ## Task 4: The streaming facade + two-pass worker [machine-verified here]
 
-**Files:** create `src/listen/streaming.rs`; rewrite the worker in `src/listen/mod.rs`; delete `src/listen/vad.rs`
+**Files:** create `src/listen/streaming.rs`; rewrite the worker in `src/listen/mod.rs`; delete `src/listen/vad.rs`; raise the channel capacity in `src/listen/capture.rs`; update `examples/ffi_probe.rs` (the vad deletion breaks its `#[path]` include)
 
 - [ ] **Step 1: facade.** `src/listen/streaming.rs`:
 
@@ -251,8 +274,10 @@ use sherpa_onnx::{OnlineRecognizer, OnlineRecognizerConfig, OnlineStream};
 /// fires on a pause (rule2: 0.8s trailing silence — the settle-on-pause feel)
 /// or a 20s utterance cap (rule3 — bounds the pass-2 segment length).
 pub struct Streaming {
-    recognizer: OnlineRecognizer,
+    // Field order is load-bearing: fields drop in declaration order, and the C API
+    // requires streams destroyed BEFORE their recognizer (the recognizer owns the ORT env).
     stream: OnlineStream,
+    recognizer: OnlineRecognizer,
 }
 
 impl Streaming {
@@ -301,7 +326,9 @@ impl Streaming {
 }
 ```
 
-- [ ] **Step 2: worker rewrite** in `src/listen/mod.rs`. The worker owns `Streaming` + `Stt` (base) + a **segment sample buffer**: every resampled chunk is appended to `seg_buf` after feeding `Streaming`. Loop body (replacing the Segmenter logic; capture/resample/channel scaffolding unchanged):
+(Construction order in `new` is unchanged — recognizer first, then stream; only the struct declaration/drop order changes, and Rust allows initializing fields in any order in the struct literal.)
+
+- [ ] **Step 2: worker rewrite** in `src/listen/mod.rs`. The worker owns `Streaming` + `Stt` (base) + a **segment sample buffer**: every resampled chunk is appended to `seg_buf` after feeding `Streaming`. Worker-local state declared before the loop: `let mut last_partial = String::new(); let mut last_change = std::time::Instant::now(); let mut seg_buf: Vec<f32> = Vec::new();` The Timeout arm's old `sp.store(seg.is_speaking(), …)` is REPLACED by the partial-activity latch (the 900ms decay check also runs in the Timeout arm so the dot decays during silence). Loop body (replacing the Segmenter logic; capture/resample scaffolding otherwise unchanged):
 
 ```rust
                     Ok(chunk) => {
@@ -329,17 +356,54 @@ impl Streaming {
                                 if !text2.trim().is_empty() {
                                     let _ = tx.send(Event::Revise(text2));
                                 }
+                            } else if plausibly_speech(&segment) {
+                                // The 20M streaming model is the weakest link — speech it
+                                // mishears as nothing must still reach the strong model.
+                                let text2 = stt::transcribe_chunked(&stt, &segment, 16_000);
+                                if !text2.trim().is_empty() {
+                                    let _ = tx.send(Event::Commit(text2)); // no prior block: a fresh commit
+                                }
                             }
                             let _ = tx.send(Event::Partial(String::new()));
                         }
                     }
 ```
 
-The finish-flag flush mirrors it: take the current partial as a final `Commit` (if non-empty), pass-2 the remaining `seg_buf`, `Revise`, then `Done`. The `speaking` handle is now partial-activity-based (rule 7); `LiveSource::new` constructs `Streaming` + `Stt` instead of `Segmenter` + `Stt`. Delete `src/listen/vad.rs` and its `pub mod vad;`. Keep `resample_to_16k` + its tests.
+Helper: `fn plausibly_speech(samples: &[f32]) -> bool` — true when duration > 1s AND RMS exceeds a quiet-room floor (e.g. 0.01); silence segments fail it, so the rule1 2.4s silence cycle costs zero Moonshine runs. Unit-test it (tone passes, near-zeros fail).
 
-Note: `seg_buf` includes leading silence (harmless to Moonshine) and is bounded by rule3's 20s cap + `transcribe_chunked`. A `Revise` for an empty-pass-2 result is skipped (the streaming text stands).
+The finish-flag flush:
 
-- [ ] **Step 3: machine verification (this environment can run it).** Re-create the throwaway wav probe (pattern of Plan 5's de-risk probe, now against the REAL `LiveSource` internals or the facade directly): feed `/tmp/talk_long.wav` (43s pause-free) and the short two-sentence wav through `Streaming`+pass-2; expect: partials stream, endpoints fire (incl. the 20s cap), every committed segment gets a non-empty pass-2 revision. Then the acoustic-loopback live session (`script` pty + `afplay` + `TALK_BASE_DIR` temp, as in Plan 2): the written file's text must be the PASS-2 (mixed-case, punctuated) text, not the shouty streaming text. Delete throwaway probes after.
+```rust
+                if ff.load(Ordering::Relaxed) {
+                    // Up to one pass-2's worth of chunks may be parked in the channel —
+                    // feed them all before flushing, or the last words are lost.
+                    while let Ok(chunk) = samples.try_recv() {
+                        let resampled = resample_to_16k(&chunk, cap_rate);
+                        streaming.push(&resampled);
+                        seg_buf.extend_from_slice(&resampled);
+                    }
+                    let text1 = streaming.partial();
+                    let segment = std::mem::take(&mut seg_buf);
+                    if !text1.trim().is_empty() {
+                        let _ = tx.send(Event::Commit(text1));
+                        let text2 = stt::transcribe_chunked(&stt, &segment, 16_000);
+                        if !text2.trim().is_empty() { let _ = tx.send(Event::Revise(text2)); }
+                    } else if plausibly_speech(&segment) {
+                        let text2 = stt::transcribe_chunked(&stt, &segment, 16_000);
+                        if !text2.trim().is_empty() { let _ = tx.send(Event::Commit(text2)); }
+                    }
+                    let _ = tx.send(Event::Done);
+                    break;
+                }
+```
+
+**The capture channel must grow:** `src/listen/capture.rs`'s `mpsc::sync_channel(64)` becomes `sync_channel(1024)` with the comment updated — 64 chunks ≈ 0.6s at ~10ms macOS callbacks, less than one pass-2 (~0.3–1.5s measured), so chunks would be DROPPED (`try_send`) mid-speech after every rule3 endpoint; 1024 ≈ ~10s headroom, trivial memory (~2MB worst case).
+
+The `speaking` handle is now partial-activity-based (rule 7); `LiveSource::new` constructs `Streaming` + `Stt` instead of `Segmenter` + `Stt`. Delete `src/listen/vad.rs` and its `pub mod vad;`. Deleting `vad.rs` breaks `examples/ffi_probe.rs`'s `#[path]` include — update ffi_probe IN THIS TASK to the new stack (Streaming + base Stt; T6 then only re-verifies it under the sandbox), keeping the build green at every commit. Keep `resample_to_16k` + its tests.
+
+Note: `seg_buf` includes leading silence (harmless to Moonshine) and is bounded by rule3's 20s cap + `transcribe_chunked`. A `Revise` for an empty-pass-2 result is skipped (the streaming text stands). rule3 seams cut mid-word in both passes — same artifact as today's 15s force-split; accepted (an overlap was considered and rejected: duplicate words at the seam are worse than one garbled word). `seg_buf` (raw f32 PCM, memory-only, bounded by rule3 + cleared each endpoint) falls under the existing FFI/heap threat boundary stated in the first-run disclosure; no zeroize for PCM.
+
+- [ ] **Step 3: machine verification (this environment can run it).** Re-create the throwaway wav probe (pattern of Plan 5's de-risk probe, now against the REAL `LiveSource` internals or the facade directly): feed `/tmp/talk_long.wav` (43s pause-free) and the short two-sentence wav through `Streaming`+pass-2; expect: partials stream, endpoints fire (incl. the 20s cap), every committed segment gets a non-empty pass-2 revision. Speak continuously across a rule3 endpoint and assert no words are lost at the seam (the channel-capacity fix). Then the acoustic-loopback live session (`script` pty + `afplay` + `TALK_BASE_DIR` temp, as in Plan 2): the written file's text must be the PASS-2 (mixed-case, punctuated) text, not the shouty streaming text. Delete throwaway probes after.
 - [ ] **Step 4:** suites + clippy green → commit `feat(listen): streaming two-pass worker (zipformer partials → base revise)`.
 
 ---
@@ -348,7 +412,7 @@ Note: `seg_buf` includes leading silence (harmless to Moonshine) and is bounded 
 
 **Files:** `src/live.rs`, `src/main.rs`
 
-- [ ] **Step 1: live.rs.** `Event::Partial(p)` in the drain arm: `settle.on_partial(&p)` (replacing the ignore; while paused, drop partials as today). The `Revise` arm from T2 Step 3 is already in place. The latch logic stays (driven by the `speaking` handle).
+- [ ] **Step 1: live.rs.** `Event::Partial(p)` in the drain arm: `settle.on_partial(&p)` (replacing the ignore; while paused, drop partials as today). On `Action::TogglePause` entering the paused state, call `settle.on_partial("")` — speech in flight will be discarded, so the edge must not keep advertising it (and the worker's change-only emission means no clearing event arrives otherwise). Render-level check + test: live text set → pause → the edge shows the paused state, not the stale partial. The `Revise` arm from T2 Step 3 is already in place. The latch logic stays (driven by the `speaking` handle). Update the stale `run_loop` doc comment ("speaking reports live VAD state") to "speaking reports streaming-partial activity".
 - [ ] **Step 2: main.rs.** `run_live_session` constructs `Streaming` (zipformer extracted paths) + `Stt` (base paths) → `LiveSource::new(capture, streaming, stt)`. Model-not-ready messages unchanged. `written_entry_count`/close flow unchanged.
 - [ ] **Step 3:** full suites + clippy (3 feature sets) → commit `feat: live streaming session wiring`.
 
@@ -358,7 +422,7 @@ Note: `seg_buf` includes leading silence (harmless to Moonshine) and is bounded 
 
 **Files:** `examples/ffi_probe.rs`, `tests/privacy.rs`, plan/spec notes
 
-- [ ] **Step 1:** `ffi_probe` updated: loads `Streaming` + base `Stt` from the models dir, pushes synthesized audio through BOTH passes, prints ok — the FFI-under-deny-network-sandbox test now proves the full new inference stack makes zero outbound connections. Run it here for real (models present).
+- [ ] **Step 1:** `ffi_probe` (already rewritten in T4 when `vad.rs` was deleted) loads `Streaming` + base `Stt` from the models dir, pushes synthesized audio through BOTH passes, prints ok — this task re-verifies it under the deny-network sandbox, proving the full new inference stack makes zero outbound connections. Run it here for real (models present).
 - [ ] **Step 2:** Spec delta note: append to the spec's §7 amendment trail — streaming live-jitter is now the default experience (user decision 2026-06-09); settle-on-pause retired; the settle machine, never-re-flow invariant, and §17 criteria unchanged.
 - [ ] **Step 3:** Final sweep: full suites ×3 feature sets + clippy; the long-monologue probe (no data loss); acoustic loopback (file content = pass-2 text); `talk download verify` green against the new manifest. Commit `test: plan 5 verification sweep`.
 
@@ -368,8 +432,8 @@ Note: `seg_buf` includes leading silence (harmless to Moonshine) and is bounded 
 
 - **Coverage vs the user's asks:** live transcription while talking (T4 partials + T1 edge rendering) · retroactive correction with more context (T4 pass-2 + T1 `revise_committing` + T2 `Revise`) · accuracy (base everywhere pass-2 runs; the live edge is explicitly a preview) · the long-monologue bug stays fixed (rule3 20s cap + `transcribe_chunked` unchanged).
 - **Placeholder scan:** the only deferrals are the `PIN_AT_IMPL` extracted-file hashes (computed in T3 from the already-verified local extractions — same one-command pattern as every prior pin step). All code blocks are complete; the worker rewrite shows the full new loop body and names what's unchanged.
-- **Type consistency:** `revise_committing(&str, &str) -> bool` consumed by session.rs/live.rs `Revise` arms · `Event::Revise(String)` added to the one `Event` enum (source.rs) used by both paths + `FakeTranscript` scripts it (T2 test) · `Streaming::{new, push, partial, endpoint, reset}` consumed only by the worker · `LiveSource::new(capture, streaming, stt)` signature change has exactly one caller (main.rs) · `EXTRACTED` replaces `MOONSHINE_EXTRACTED` (grep for the old name in main.rs + privacy tests — T3 Step 2/3 cover both).
-- **What is deliberately NOT here:** no config flag for streaming-vs-settle (one path; the doc-review may challenge — recorded rationale: a mode matrix doubles every live-path test and the user chose streaming as THE experience) · no beam-search/hotwords tuning (greedy default measured fine) · pass-2 is synchronous in the serial worker (no thread pool — ordering is the correctness argument; revisit only if pass-2 latency ever exceeds inter-utterance gaps in practice) · tiny/silero are removed, not kept as fallbacks (downloads are cheap to re-run; `talk download models` migrates users in one command).
+- **Type consistency:** `revise_committing(&str, &str) -> bool` consumed by session.rs/live.rs `Revise` arms · `Event::Revise(String)` added to the one `Event` enum (source.rs) used by both paths + `FakeTranscript` scripts it (T2 test) · `Streaming::{new, push, partial, endpoint, reset}` consumed by the worker + `ffi_probe` · `LiveSource::new(capture, streaming, stt)` signature change has exactly one caller (main.rs) · `EXTRACTED` replaces `MOONSHINE_EXTRACTED` (grep for the old name in main.rs + privacy tests — T3 Step 2/3 cover both).
+- **What is deliberately NOT here:** no config flag for streaming-vs-settle (one path; the doc-review may challenge — recorded rationale: a mode matrix doubles every live-path test and the user chose streaming as THE experience) · no beam-search/hotwords tuning (greedy default measured fine) · pass-2 is synchronous in the serial worker (no thread pool — ordering is the correctness argument; revisit only if pass-2 latency ever exceeds inter-utterance gaps in practice) · tiny/silero are removed, not kept as fallbacks (downloads are cheap to re-run; `talk download models` migrates users in one command) · the settle-on-pause speak-blind experience (DREAMING.md §5) is retired — users preferring eyes-closed, no-live-text reflection have no equivalent; accepted per the user's explicit request, revisit as a config flag if asked.
 - **Risks named:** users upgrading from v1.0 have stale tiny/silero caches — `models_ready` fails against the new manifest and the fetch offer/`talk download models` heals it (the old files are orphaned on disk, ~30MB; acceptable, note in the close-out) · the 20M streaming model's rough live text is visible product surface (dim + lowercase mitigates; pass-2 lands within ~0.3–1.5s) · rule2=0.8s commits feel identical to today's settle-on-pause cadence.
 
 ---
