@@ -240,24 +240,37 @@ fn run_live_session(
 
     // Verify every model before loading anything; an unpinned / missing / mismatched
     // artifact means the session can't run yet. On a TTY we offer to fetch them now
-    // (a one-time ~30 MB download) and continue; otherwise we print the hint and
+    // (a one-time ~239 MB download) and continue; otherwise we print the hint and
     // exit non-zero (a clean failure — no terminal state or file has been touched).
     if !models_ready() {
         if interactive && offer_first_run_fetch()? {
             fetch_all_models()?;
+            // Re-run the full gate: a fetch that early-returned on already-valid
+            // archives proves nothing about the extracted files the session loads.
+            if !models_ready() {
+                eprintln!("models still fail verification after fetch — run `talk download verify`");
+                std::process::exit(1);
+            }
         } else {
             eprintln!("models not ready — run `talk download models`");
             std::process::exit(1);
         }
     }
 
+    // The live first pass loads the streaming Zipformer-20M transducer (int8
+    // encoder/joiner + fp32 decoder — the standard sherpa recipe); pass-2
+    // transcription loads Moonshine base (drop-in for the old tiny `Stt`).
     let models = paths::models_dir();
-    let moonshine = models.join("sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27");
-    let (Some(enc), Some(dec), Some(tok), Some(silero)) = (
+    let moonshine = models.join("sherpa-onnx-moonshine-base-en-quantized-2026-02-27");
+    let zipformer = models.join("sherpa-onnx-streaming-zipformer-en-20M-2023-02-17");
+    let (Some(enc), Some(dec), Some(tok), Some(zenc), Some(zdec), Some(zjoin), Some(ztok)) = (
         moonshine.join("encoder_model.ort").to_str().map(str::to_owned),
         moonshine.join("decoder_model_merged.ort").to_str().map(str::to_owned),
         moonshine.join("tokens.txt").to_str().map(str::to_owned),
-        models.join("silero_vad.onnx").to_str().map(str::to_owned),
+        zipformer.join("encoder-epoch-99-avg-1.int8.onnx").to_str().map(str::to_owned),
+        zipformer.join("decoder-epoch-99-avg-1.onnx").to_str().map(str::to_owned),
+        zipformer.join("joiner-epoch-99-avg-1.int8.onnx").to_str().map(str::to_owned),
+        zipformer.join("tokens.txt").to_str().map(str::to_owned),
     ) else {
         eprintln!("model path is not valid UTF-8 — run `talk download models`");
         std::process::exit(1);
@@ -279,18 +292,19 @@ fn run_live_session(
         Ok(c) => c,
         Err(e) => { eprintln!("microphone unavailable: {e}"); std::process::exit(1); }
     };
-    let seg = match listen::vad::Segmenter::new(&silero) {
+    let streaming = match listen::streaming::Streaming::new(&zenc, &zdec, &zjoin, &ztok) {
         Ok(s) => s,
-        Err(e) => { eprintln!("VAD failed to load: {e}"); std::process::exit(1); }
+        Err(e) => { eprintln!("streaming model failed to load: {e}"); std::process::exit(1); }
     };
     let stt = match listen::stt::Stt::new(&enc, &dec, &tok) {
         Ok(s) => s,
         Err(e) => { eprintln!("speech model failed to load: {e}"); std::process::exit(1); }
     };
 
-    let mut source = listen::LiveSource::new(capture, seg, stt);
+    let mut source = listen::LiveSource::new(capture, streaming, stt);
     let finish_flag = source.finish_handle();
     let speaking = source.speaking_handle();
+    let pause = source.pause_handle();
 
     let choice = match shape {
         Shape::Reflect => Some(reflect_choice(base, &byo_question, time, &cfg.default_pack)?),
@@ -319,7 +333,7 @@ fn run_live_session(
     let live_cfg = live::LiveConfig {
         mode: rmode, question, held_label: held_label.as_deref(), cleanup, ephemeral,
     };
-    let mut result = live::run_loop(&mut source, finish_flag, speaking, &live_cfg)?;
+    let mut result = live::run_loop(&mut source, finish_flag, pause, speaking, &live_cfg)?;
 
     if result.cancelled {
         return Ok(Some(Ok(())));
@@ -428,12 +442,18 @@ fn byo_continue_or(base: &Path, q: &str) -> std::io::Result<Option<String>> {
     Ok(Some(if continue_it { existing_q.clone() } else { q.to_string() }))
 }
 
-/// First-run prompt: offer to fetch the models now (~30 MB is the MEASURED total —
-/// moonshine 29.8 MB + silero 0.6 MB). Reads one stdin line; only `y`/`Y` accepts.
+/// First-run prompt: offer to fetch the Plan-5 models now (~239 MB is the stated
+/// total — moonshine base + streaming zipformer). The returning-user copy explains
+/// why the download grew and that the old caches are now dead weight. Reads one
+/// stdin line; only `y`/`Y` accepts.
 #[cfg(feature = "listen")]
 fn offer_first_run_fetch() -> std::io::Result<bool> {
     use std::io::Write;
-    print!("models not downloaded (~30 MB, one time). download now? [y/N] ");
+    print!(
+        "talk's transcription engine changed (live streaming + a better model). \
+new models: ~239 MB, one time. your old models are no longer used (left in place, \
+~30 MB — harmless). download now? [y/N] "
+    );
     std::io::stdout().flush()?;
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
@@ -453,10 +473,10 @@ fn fetch_all_models() -> std::io::Result<()> {
 }
 
 /// True when every model the session will LOAD verifies against its pin: the
-/// archives (download integrity) AND the extracted Moonshine files (what the
-/// session actually reads — an attacker swapping an extracted .ort would slip
-/// past an archive-only check). A verified archive with missing extracted files
-/// is healed by re-extracting before giving up.
+/// archives (download integrity) AND the extracted files (what the session
+/// actually reads — an attacker swapping an extracted weight would slip past an
+/// archive-only check). A verified archive with missing extracted files is
+/// healed by re-extracting before giving up.
 #[cfg(feature = "listen")]
 fn models_ready() -> bool {
     let dir = paths::models_dir();
@@ -466,22 +486,21 @@ fn models_ready() -> bool {
     if !archives_ok {
         return false;
     }
-    let extracted_ok = || download::models::MOONSHINE_EXTRACTED.iter().all(|(rel, sha)| {
+    let extracted_ok = || download::models::EXTRACTED.iter().all(|(rel, sha)| {
         download::verify(&dir.join(rel), sha).unwrap_or(false)
     });
     if extracted_ok() {
         return true;
     }
-    let any_missing = download::models::MOONSHINE_EXTRACTED.iter().any(|(rel, _)| !dir.join(rel).exists());
-    if any_missing {
-        for art in download::models::MODELS.iter().filter(|a| a.name.ends_with(".tar.bz2")) {
-            if download::extract(&dir.join(art.name), &dir).is_err() {
-                return false;
-            }
+    // Heal from the already-verified archives. This covers missing AND
+    // present-but-mismatched extracted files alike: a tampered weight is
+    // overwritten with verified bytes before anything is loaded.
+    for art in download::models::MODELS.iter().filter(|a| a.name.ends_with(".tar.bz2")) {
+        if download::extract(&dir.join(art.name), &dir).is_err() {
+            return false;
         }
-        return extracted_ok();
     }
-    false
+    extracted_ok()
 }
 
 /// Best-effort entry count from a freshly-written file's frontmatter (reflect) or
@@ -543,7 +562,7 @@ fn handle_download(target: Option<&str>) -> std::io::Result<()> {
         Some("verify") => {
             let mut bad = 0;
             let names = download::models::MODELS.iter().map(|art| (art.name, art.sha256));
-            let extracted = download::models::MOONSHINE_EXTRACTED.iter().copied();
+            let extracted = download::models::EXTRACTED.iter().copied();
             for (name, sha) in names.chain(extracted) {
                 let p = paths::models_dir().join(name);
                 match download::verify(&p, sha) {

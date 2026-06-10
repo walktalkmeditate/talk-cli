@@ -6,7 +6,7 @@ pub enum Mode { Reflect, Journal, Ephemeral }
 
 /// The tone a line paints in: Settled = bright core text, Edge = dim live edge,
 /// Chrome = the dimmest border/hint/status tone.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LineKind { Chrome, Settled, Edge }
 
 /// Everything the screen needs, with no I/O. The live session rebuilds this each
@@ -16,7 +16,7 @@ pub struct View<'a> {
     pub question: Option<&'a str>, // reflect only
     pub held_label: Option<&'a str>, // e.g. "held 3 days"; None hides the box line
     pub settle: &'a Settle,
-    pub listening: bool,           // VAD currently hears speech
+    pub listening: bool,           // streaming-partial activity latch (decays in silence)
     pub elapsed: &'a str,          // "2:14"
     pub cleanup: &'a str,          // "Light"
     pub show_raw: bool,            // `u` toggle: show raw verbatim instead of clean
@@ -52,7 +52,10 @@ pub fn compose(v: &View) -> Vec<(String, LineKind)> {
         body += 1;
     }
     if let Some(c) = v.settle.committing() {
-        out.push((if v.show_raw { c.raw.clone() } else { c.clean.clone() }, LineKind::Settled));
+        // Bright = pass-2-final: the committing block stays DIM (Edge) until it is
+        // revised/upgraded, then brightens to Settled. Settled blocks never move.
+        let kind = if v.settle.committing_revised() { LineKind::Settled } else { LineKind::Edge };
+        out.push((if v.show_raw { c.raw.clone() } else { c.clean.clone() }, kind));
         body += 1;
     }
     // Empty body, not listening: a single dim placeholder keeps the region deterministic.
@@ -84,9 +87,30 @@ fn privacy_gap(label: &str, privacy: &str) -> usize {
     66usize.saturating_sub(label.chars().count() + privacy.chars().count()).max(2)
 }
 
+/// The edge line never exceeds the 66-column frame the rest of the chrome draws
+/// ("  " prefix + content), so it cannot wrap-and-bounce on terminals narrower
+/// than the partial — the one-line contract holds in rendered rows, not just
+/// character count.
+const EDGE_MAX_CHARS: usize = 64;
+const EDGE_TAIL_CHARS: usize = 63; // EDGE_MAX_CHARS minus the '…' marker
+
 fn edge_line(v: &View) -> String {
-    // Settle-on-pause: the live edge is a listening indicator, not partials.
-    if v.listening { "  …".to_string() } else { String::new() }
+    // The live edge: the streaming partial (dim, jittering) — held to ONE line so
+    // the layout never bounces; long partials show their tail. Else a calm dot.
+    let live = v.settle.live();
+    if !live.is_empty() {
+        let chars: Vec<char> = live.chars().collect();
+        if chars.len() > EDGE_MAX_CHARS {
+            let tail: String = chars[chars.len() - EDGE_TAIL_CHARS..].iter().collect();
+            format!("  …{tail}")
+        } else {
+            format!("  {live}")
+        }
+    } else if v.listening {
+        "  …".to_string()
+    } else {
+        String::new()
+    }
 }
 
 fn status_line(v: &View) -> String {
@@ -219,6 +243,111 @@ mod tests {
         let mut v = base(Mode::Reflect, &s);
         v.confirm_cancel = true;
         assert!(text(&v).contains("discard this reflection?"));
+    }
+
+    #[test]
+    fn live_partial_renders_at_the_edge() {
+        let mut s = Settle::new();
+        s.on_partial("the thing i keep");
+        let v = base(Mode::Reflect, &s);
+        let joined = text(&v);
+        assert!(joined.contains("the thing i keep"));
+    }
+
+    #[test]
+    fn empty_partial_falls_back_to_the_listening_dot() {
+        let s = Settle::new();
+        let mut v = base(Mode::Reflect, &s);
+        v.listening = true;
+        assert!(compose(&v).iter().any(|(l, k)| l.contains('…') && *k == LineKind::Edge));
+    }
+
+    #[test]
+    fn long_partial_renders_one_truncated_tail_line() {
+        let mut s = Settle::new();
+        let long = "x".repeat(200);
+        s.on_partial(&long);
+        let v = base(Mode::Reflect, &s);
+        let edge = compose(&v)
+            .into_iter()
+            .find(|(l, k)| *k == LineKind::Edge && l.contains('x'))
+            .map(|(l, _)| l)
+            .expect("edge line with partial");
+        assert!(edge.contains('…'));
+        assert!(edge.ends_with(&"x".repeat(63)));
+        assert_eq!(edge.chars().filter(|c| *c == 'x').count(), 63);
+        assert!(!edge.contains('\n'));
+        // The whole line fits the 66-column frame — it can't wrap-and-bounce.
+        assert!(edge.chars().count() <= 66, "edge line wider than the frame");
+    }
+
+    #[test]
+    fn multibyte_partial_truncates_on_char_boundaries() {
+        let mut s = Settle::new();
+        let long = "é".repeat(100) + "末尾";
+        s.on_partial(&long);
+        let v = base(Mode::Reflect, &s);
+        let edge = compose(&v)
+            .into_iter()
+            .find(|(l, k)| *k == LineKind::Edge && l.contains("末尾"))
+            .map(|(l, _)| l)
+            .expect("edge line with truncated partial");
+        assert!(edge.starts_with("  …"), "long multibyte partial must show a truncated tail");
+        assert!(edge.ends_with("末尾"), "tail must keep the newest characters");
+        assert!(edge.chars().count() <= 66);
+    }
+
+    #[test]
+    fn raw_toggle_works_on_the_unrevised_committing_block() {
+        // Before pass-2 lands, raw holds the lowercased streaming text — the `u`
+        // toggle must surface it on the committing (still dim) block too.
+        let mut s = Settle::new();
+        s.commit("loud streaming text", "Clean text.");
+        let mut v = base(Mode::Journal, &s);
+        v.show_raw = true;
+        let joined = text(&v);
+        assert!(joined.contains("loud streaming text"));
+        assert!(!joined.contains("Clean text."));
+    }
+
+    #[test]
+    fn clearing_the_partial_drops_the_stale_edge_text() {
+        // Pause clears the live edge (live.rs calls `settle.on_partial("")` on
+        // entering pause): the stale partial must vanish so a paused frame doesn't
+        // keep advertising in-flight, now off-record, speech.
+        let mut s = Settle::new();
+        s.on_partial("the thing i was mid saying");
+        let mut v = base(Mode::Reflect, &s);
+        assert!(text(&v).contains("the thing i was mid saying"));
+
+        s.on_partial("");
+        v = base(Mode::Reflect, &s);
+        v.paused = true;
+        let joined = text(&v);
+        assert!(!joined.contains("the thing i was mid saying"));
+        assert!(joined.contains("⏸ paused"));
+    }
+
+    #[test]
+    fn committing_block_dims_until_revised() {
+        let mut s = Settle::new();
+        s.commit("raw words", "Clean words.");
+        let v = base(Mode::Journal, &s);
+        let committing_kind = compose(&v)
+            .into_iter()
+            .find(|(l, _)| l.contains("Clean words."))
+            .map(|(_, k)| k)
+            .expect("committing line present");
+        assert_eq!(committing_kind, LineKind::Edge);
+
+        s.revise_committing("better raw", "Better clean.");
+        let v = base(Mode::Journal, &s);
+        let revised_kind = compose(&v)
+            .into_iter()
+            .find(|(l, _)| l.contains("Better clean."))
+            .map(|(_, k)| k)
+            .expect("revised committing line present");
+        assert_eq!(revised_kind, LineKind::Settled);
     }
 
     #[test]

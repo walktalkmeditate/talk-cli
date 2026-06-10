@@ -172,6 +172,8 @@ transcript clean⇄raw (always available because raw is always stored).
 > `Live`/`Committing`/`Settled` and the never-re-flow invariant still hold. A
 > streaming-Zipformer "live jitter" mode remains a later option behind a flag.
 
+> **Amended again (2026-06-09, Plan 5):** streaming live-jitter is now the default experience (user decision after field testing) — a streaming Zipformer feeds live partials to the edge and endpoints replace VAD; every committed phrase is re-transcribed by Moonshine base (two-pass) and revised in place while committing. Bright = pass-2-final. The settle machine, never-re-flow invariant, and §17 criteria are unchanged; settle-on-pause and the speak-blind texture are retired.
+
 **Rendering invariant that makes "never re-flows" true** (it must be engineered,
 not asserted): the settled region is an append-only stack of immutable blocks.
 Each committed phrase is laid out once into its *own* block; prior blocks are

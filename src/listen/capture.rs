@@ -16,7 +16,10 @@ impl Capture {
         let sample_rate = supported.sample_rate().0;
         let channels = supported.config().channels as usize;
         // Bounded: prevents an unbounded backlog if STT lags. Full → drop the chunk.
-        let (tx, rx): (SyncSender<Vec<f32>>, Receiver<Vec<f32>>) = mpsc::sync_channel(64);
+        // 1024 chunks ≈ ~10s headroom at ~10ms macOS callbacks — enough to absorb a
+        // worst-case pass-2 stall (~0.3–1.5s after a rule3 endpoint) without dropping
+        // mid-speech chunks (64 ≈ 0.6s was less than one pass-2, so words were lost).
+        let (tx, rx): (SyncSender<Vec<f32>>, Receiver<Vec<f32>>) = mpsc::sync_channel(1024);
 
         let err_fn = |e| eprintln!("audio stream error: {e}");
         let stream = match supported.sample_format() {

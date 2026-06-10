@@ -55,10 +55,10 @@ fn ephemeral_leaves_zero_bytes_in_the_base_dir() {
 fn tampered_model_refuses_to_run() {
     let home = tempfile::tempdir().unwrap();
     let models = tempfile::tempdir().unwrap();
-    // Place WRONG bytes at every manifest name: present, but hash-mismatched.
+    // Place WRONG bytes at every manifest archive name: present, but hash-mismatched.
     for name in [
-        "sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27.tar.bz2",
-        "silero_vad.onnx",
+        "sherpa-onnx-moonshine-base-en-quantized-2026-02-27.tar.bz2",
+        "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2",
     ] {
         std::fs::write(models.path().join(name), b"tampered").unwrap();
     }
@@ -70,20 +70,70 @@ fn tampered_model_refuses_to_run() {
 
     // Second scenario: the EXTRACTED files the session loads hold wrong bytes.
     // With fake archives both layers fail, which is exactly the point — an
-    // attacker swapping an extracted .ort must not slip past the gate either.
-    let moonshine = models
+    // attacker swapping an extracted weight must not slip past the gate either.
+    // Cover BOTH new model dirs: one base file and one zipformer file.
+    let base = models
         .path()
-        .join("sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27");
-    std::fs::create_dir_all(&moonshine).unwrap();
-    for name in ["encoder_model.ort", "decoder_model_merged.ort", "tokens.txt"] {
-        std::fs::write(moonshine.join(name), b"tampered extraction").unwrap();
-    }
+        .join("sherpa-onnx-moonshine-base-en-quantized-2026-02-27");
+    let zipformer = models
+        .path()
+        .join("sherpa-onnx-streaming-zipformer-en-20M-2023-02-17");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::create_dir_all(&zipformer).unwrap();
+    std::fs::write(base.join("encoder_model.ort"), b"tampered extraction").unwrap();
+    std::fs::write(
+        zipformer.join("encoder-epoch-99-avg-1.int8.onnx"),
+        b"tampered extraction",
+    )
+    .unwrap();
     let out = run_reflect(home.path(), models.path());
     assert!(
         !out.status.success(),
         "tampered extracted models must exit non-zero"
     );
     assert!(String::from_utf8_lossy(&out.stderr).contains("download"));
+}
+
+/// The extracted-file layer of the gate, proven INDEPENDENTLY of the archive
+/// layer (the scenarios above use fake archives, so the archive check fails
+/// first and says nothing about the extracted pins). With VERIFIED archives and
+/// a tampered extracted weight, the gate must heal: the wrong bytes are
+/// overwritten from the verified archive before anything is loaded — the
+/// tampered file never reaches the FFI. Models-present-gated; skips elsewhere.
+#[cfg(feature = "listen")]
+#[test]
+fn tampered_extracted_file_is_healed_from_verified_archives() {
+    let cached = cached_models_dir();
+    let archives = [
+        "sherpa-onnx-moonshine-base-en-quantized-2026-02-27.tar.bz2",
+        "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17.tar.bz2",
+    ];
+    if !archives.iter().all(|a| cached.join(a).exists()) {
+        eprintln!("skipping heal test: cached model archives not present");
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let models = tempfile::tempdir().unwrap();
+    for a in archives {
+        std::fs::copy(cached.join(a), models.path().join(a)).unwrap(); // APFS clone — cheap
+    }
+    let victim = models
+        .path()
+        .join("sherpa-onnx-streaming-zipformer-en-20M-2023-02-17")
+        .join("encoder-epoch-99-avg-1.int8.onnx");
+    std::fs::create_dir_all(victim.parent().unwrap()).unwrap();
+    std::fs::write(&victim, b"tampered extraction").unwrap();
+
+    let out = run_reflect(home.path(), models.path());
+    // The session still dies later (tests have no TTY for raw mode), but the
+    // GATE must have passed — a refusal would print the models-not-ready hint.
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("models not ready"),
+        "gate refused instead of healing"
+    );
+    let healed = std::fs::read(&victim).unwrap();
+    assert_ne!(healed.as_slice(), b"tampered extraction");
+    assert!(healed.len() > 1_000_000, "healed weight should be the real model file");
 }
 
 #[cfg(feature = "listen")]
@@ -131,10 +181,14 @@ fn text_pipeline_makes_no_network_calls_under_sandbox() {
         .contains("No packets were harmed."));
 }
 
-/// The REAL inference stack (sherpa-onnx FFI: VAD + Moonshine) under deny-network.
-/// Models-present-gated: skips on runners without the cached models; runs in full
-/// on dev machines (where Plan 2 downloaded them). This is the spec §14 check that
-/// the FFI path makes zero outbound connections.
+/// The REAL inference stack (sherpa-onnx FFI: streaming Zipformer pass-1 +
+/// Moonshine base pass-2) under deny-network. Models-present-gated: skips on
+/// runners without the cached models; runs in full on dev machines. This is the
+/// spec §14 check that the FFI path makes zero outbound connections.
+///
+/// `ffi_probe` loads the Plan 5 stack (Streaming + base Stt, migrated in T4) and
+/// drives both passes; the skip-gate paths below point at the base + zipformer
+/// dirs, so on a migrated machine this test RUNS — it does not skip.
 #[cfg(all(target_os = "macos", feature = "listen"))]
 #[test]
 fn inference_stack_runs_under_deny_network_sandbox() {
@@ -158,13 +212,17 @@ fn inference_stack_runs_under_deny_network_sandbox() {
         "sandbox-exec failed to deny network — the no-egress proof is void"
     );
 
-    // Skip when the cached models are absent (CI runners without Plan 2's download).
+    // Skip when the cached models are absent (CI runners without the download).
     let models = cached_models_dir();
-    let moonshine = models.join("sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27");
-    if !models.join("silero_vad.onnx").exists()
-        || !moonshine.join("encoder_model.ort").exists()
+    let moonshine = models.join("sherpa-onnx-moonshine-base-en-quantized-2026-02-27");
+    let zipformer = models.join("sherpa-onnx-streaming-zipformer-en-20M-2023-02-17");
+    if !moonshine.join("encoder_model.ort").exists()
         || !moonshine.join("decoder_model_merged.ort").exists()
         || !moonshine.join("tokens.txt").exists()
+        || !zipformer.join("encoder-epoch-99-avg-1.int8.onnx").exists()
+        || !zipformer.join("decoder-epoch-99-avg-1.onnx").exists()
+        || !zipformer.join("joiner-epoch-99-avg-1.int8.onnx").exists()
+        || !zipformer.join("tokens.txt").exists()
     {
         eprintln!(
             "skipping inference_stack_runs_under_deny_network_sandbox: cached models absent at {}",
