@@ -11,6 +11,9 @@ pub struct State {
     // Plan 4: streak display; collected but unused in Plan 1.
     pub streak: u32,
     pub last_session_date: Option<String>,
+    /// First-run privacy disclosure shown? Set once, the first time a non-ephemeral
+    /// session actually proceeds (serde default false for pre-existing state files).
+    pub disclosed: bool,
 }
 
 impl State {

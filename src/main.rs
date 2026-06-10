@@ -47,6 +47,7 @@ fn main() -> std::io::Result<()> {
     match args.command {
         Some(Command::Journal) => {
             let text = require_text(&args.from_text);
+            disclose_once(&base)?;
             run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: false, level: cfg.cleanup_for("journal"), held_day: None })?;
         }
         Some(Command::Unburden) | Some(Command::Vent) => {
@@ -74,6 +75,7 @@ fn main() -> std::io::Result<()> {
         _ => {
             if args.question.is_none() && cfg.default_mode == "journal" {
                 let text = require_text(&args.from_text);
+                disclose_once(&base)?;
                 run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: false, level: cfg.cleanup_for("journal"), held_day: None })?;
             } else {
                 reflect(&base, &args.question, &date, &time, &require_text(&args.from_text), &cfg)?;
@@ -142,6 +144,7 @@ fn reflect_choice(base: &Path, byo: &Option<String>, time: &str, default_pack: &
 
 /// Reflect: a BYO question if one was given, else select from the spine pack.
 fn reflect(base: &Path, byo: &Option<String>, date: &str, time: &str, text: &str, cfg: &config::Config) -> std::io::Result<()> {
+    disclose_once(base)?;
     let c = reflect_choice(base, byo, time, &cfg.default_pack)?;
 
     let target = Target::Reflect { id: &c.id, question: &c.question, slug: &c.slug, pack: &c.pack, addressee: &c.addressee };
@@ -221,17 +224,30 @@ fn run_live_session(
         | Some(Command::Download { .. }) => return Ok(None),
     };
 
+    // First-run disclosure: once a real (non-ephemeral) session is about to begin,
+    // before the models gate, so a brand-new user sees the privacy note first, then
+    // any fetch offer. Ephemeral discloses nothing — it writes nothing to disclose.
+    // TTY-gated: a non-TTY listen invocation (e.g. `talk journal` with no
+    // `--from-text` under test) never reaches a real session, and must write zero
+    // bytes (it falls through to the models gate's clean non-zero exit).
+    let interactive = unsafe { libc::isatty(0) } == 1;
+    if interactive && !matches!(shape, Shape::Ephemeral) {
+        disclose_once(base)?;
+    }
+
     // Verify every model before loading anything; an unpinned / missing / mismatched
-    // artifact prints the download hint and exits non-zero (a failure to do the
-    // reflection — never a panic, and the exit is clean since no terminal state or
-    // file has been touched yet).
-    for art in download::models::MODELS {
-        match download::verify(&paths::models_dir().join(art.name), art.sha256) {
-            Ok(true) => {}
-            _ => {
-                eprintln!("models not ready — run `talk download models`");
-                std::process::exit(1);
-            }
+    // artifact means the session can't run yet. On a TTY we offer to fetch them now
+    // (a one-time ~30 MB download) and continue; otherwise we print the hint and
+    // exit non-zero (a clean failure — no terminal state or file has been touched).
+    let models_ready = download::models::MODELS.iter().all(|art| {
+        download::verify(&paths::models_dir().join(art.name), art.sha256).unwrap_or(false)
+    });
+    if !models_ready {
+        if interactive && offer_first_run_fetch()? {
+            fetch_all_models()?;
+        } else {
+            eprintln!("models not ready — run `talk download models`");
+            std::process::exit(1);
         }
     }
 
@@ -373,6 +389,29 @@ fn run_live_session(
     Ok(Some(Ok(())))
 }
 
+/// First-run prompt: offer to fetch the models now (~30 MB is the MEASURED total —
+/// moonshine 29.8 MB + silero 0.6 MB). Reads one stdin line; only `y`/`Y` accepts.
+#[cfg(feature = "listen")]
+fn offer_first_run_fetch() -> std::io::Result<bool> {
+    use std::io::Write;
+    print!("models not downloaded (~30 MB, one time). download now? [y/N] ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(matches!(line.trim(), "y" | "Y"))
+}
+
+/// Fetch every model artifact — the same loop `talk download models` runs.
+#[cfg(feature = "listen")]
+fn fetch_all_models() -> std::io::Result<()> {
+    for art in download::models::MODELS {
+        println!("fetching {} …", art.name);
+        download::fetch(art, &paths::models_dir()).map_err(std::io::Error::other)?;
+        println!("  ✓ {}", art.name);
+    }
+    Ok(())
+}
+
 /// Best-effort entry count from a freshly-written file's frontmatter (reflect) or
 /// `## ` date headings (journal), for a simple `entry N` close-screen provenance.
 #[cfg(feature = "listen")]
@@ -434,6 +473,23 @@ fn handle_download(target: Option<&str>) -> std::io::Result<()> {
                 download::fetch(art, &paths::models_dir())
                     .map_err(std::io::Error::other)?;
                 println!("  ✓ {}", art.name);
+            }
+            Ok(())
+        }
+        Some("verify") => {
+            let mut bad = 0;
+            for art in download::models::MODELS {
+                let p = paths::models_dir().join(art.name);
+                match download::verify(&p, art.sha256) {
+                    Ok(true) => println!("  ✓ {}", art.name),
+                    _ => {
+                        println!("  ✗ {} (missing or hash mismatch)", art.name);
+                        bad += 1;
+                    }
+                }
+            }
+            if bad > 0 {
+                std::process::exit(1);
             }
             Ok(())
         }
@@ -528,6 +584,29 @@ fn load_config() -> std::io::Result<config::Config> {
 
 fn state_path(base: &Path) -> PathBuf {
     base.join(".state.json") // dot-prefixed so vault sync / indexing skip it
+}
+
+/// The first-run privacy note (spec §8) — printed to STDOUT once, since it's a
+/// feature of talk (everything stays local), not an error.
+const DISCLOSURE: &str = "talk keeps everything local — your words land only in ~/talk on this machine.\n\
+one honest note: the raw transcript is plaintext. if ~/talk lives in a\n\
+cloud-synced folder (iCloud, Dropbox), that cloud sees your words.\n\
+`keep_raw = false` stores only the cleaned text; `talk unburden` keeps\n\
+nothing at all. clipboard recovery, if you ever use it, passes through the\n\
+system clipboard. scrollback and OS swap are beyond any app's reach.";
+
+/// Print the first-run disclosure once, then record it in state. Must be called
+/// only when a non-ephemeral session actually proceeds, and BEFORE any other
+/// `State` load (reflect_choice's included), so reflect's later save doesn't
+/// clobber the flag with a pre-disclosure copy. Ephemeral never discloses.
+fn disclose_once(base: &Path) -> std::io::Result<()> {
+    let mut st = state::State::load(&std::fs::read_to_string(state_path(base)).unwrap_or_default());
+    if !st.disclosed {
+        println!("{DISCLOSURE}");
+        st.disclosed = true;
+        paths::write_private(&state_path(base), &st.save())?;
+    }
+    Ok(())
 }
 
 /// True if a file at `path` exists AND is not this question's own reflect file —

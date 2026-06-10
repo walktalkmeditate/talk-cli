@@ -189,6 +189,48 @@ fn raw_sidecar_config_routes_raw_out_of_the_main_file() {
 }
 
 #[test]
+fn first_journal_run_discloses_then_stays_quiet() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = talk(dir.path(), &["journal", "--from-text", "first words", "--date", "2026-06-09", "--time", "08:00"]);
+    assert!(first.status.success(), "stderr: {}", String::from_utf8_lossy(&first.stderr));
+    assert!(String::from_utf8_lossy(&first.stdout).contains("local"), "first run must disclose: {}", String::from_utf8_lossy(&first.stdout));
+
+    let second = talk(dir.path(), &["journal", "--from-text", "second words", "--date", "2026-06-10", "--time", "08:00"]);
+    assert!(second.status.success());
+    assert!(!String::from_utf8_lossy(&second.stdout).contains("local"), "second run must NOT disclose again: {}", String::from_utf8_lossy(&second.stdout));
+}
+
+#[test]
+fn unburden_never_discloses() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = talk(dir.path(), &["unburden", "--from-text", "let it go", "--date", "2026-06-09", "--time", "08:00"]);
+    assert!(out.status.success());
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("words land only"), "ephemeral must never disclose");
+}
+
+/// `talk download verify` re-hashes cached artifacts against their pins and exits
+/// non-zero on any mismatch, naming the bad artifact. Gated to `--features download`:
+/// the no-download stub exits 2 (not 1) for any explicit target.
+#[cfg(feature = "download")]
+#[test]
+fn download_verify_flags_a_tampered_artifact() {
+    let home = tempfile::tempdir().unwrap();
+    let models = tempfile::tempdir().unwrap();
+    // Wrong bytes under a real manifest name → present but hash-mismatched.
+    let bad_name = "silero_vad.onnx";
+    std::fs::write(models.path().join(bad_name), b"tampered").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_talk"))
+        .args(["download", "verify"])
+        .env("HOME", home.path())
+        .env("TALK_MODELS_DIR", models.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a tampered artifact must exit non-zero");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(bad_name), "verify must name the bad artifact: {stdout}");
+}
+
+#[test]
 fn date_traversal_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let out = talk(dir.path(), &["journal", "--from-text", "x", "--date", "../escape", "--time", "08:14"]);
