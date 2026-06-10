@@ -105,25 +105,26 @@ mod tests {
 
     #[test]
     fn quietest_cut_lands_in_the_silent_gap() {
-        // 10s of "speech" (constant tone) with one silent 200ms dip at 7.3s.
+        // 32s of "speech" (constant tone) with one silent 200ms dip at 28.3s.
         let rate = 16_000;
-        let mut s = vec![0.5f32; 10 * rate];
-        let dip = (7.3 * rate as f32) as usize;
+        let mut s = vec![0.5f32; 32 * rate];
+        let dip = (28.3 * rate as f32) as usize;
         for x in &mut s[dip..dip + (rate / 5)] {
             *x = 0.0;
         }
         let cut = quietest_cut(&s, rate as i32);
         let cut_secs = cut as f32 / rate as f32;
-        assert!((7.3..7.6).contains(&cut_secs), "cut at {cut_secs}s, expected inside the dip");
+        assert!((28.3..28.6).contains(&cut_secs), "cut at {cut_secs}s, expected inside the dip");
     }
 
     #[test]
     fn quietest_cut_stays_inside_the_search_band() {
         let rate = 16_000;
-        let s = vec![0.5f32; 12 * rate]; // uniform: any window ties, first wins
+        let s = vec![0.5f32; 32 * rate]; // uniform: any window ties, first wins
         let cut = quietest_cut(&s, rate as i32);
         let cut_secs = cut as f32 / rate as f32;
-        assert!((6.2..=7.8).contains(&cut_secs), "cut at {cut_secs}s outside ±slack band");
+        // search band: CUT_TARGET_SECS ± CUT_SLACK_SECS = 28.0 ± 1.5 → [26.5, 29.5]
+        assert!((26.5..=29.5).contains(&cut_secs), "cut at {cut_secs}s outside ±slack band");
     }
 
     #[test]
