@@ -1,2 +1,18 @@
 /target
 .DS_Store
+
+# Claude Code / OpenWolf — machine-local & transient state (not shared)
+.claude/settings.local.json
+.claude/.stuck-tracker
+.claude/.edit-counter
+.claude/.last-head
+.claude/.stuck-head
+.claude/.session-opened
+.claude/session-context.md
+.wolf/token-ledger.json
+.wolf/daemon.log
+.wolf/cron-state.json
+.wolf/designqc-report.json
+.wolf/suggestions.json
+.wolf/designqc-captures/
+.wolf/hooks/_session.json
