@@ -16,6 +16,9 @@ fn byo_reflect_writes_a_file() {
         "--date", "2026-06-08", "--time", "08:14",
     ]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    // Byte-clean contract: a non-TTY (scripted/agent) run emits nothing on stderr —
+    // the "preparing…" indicator and any other UI output must stay TTY-gated.
+    assert!(out.stderr.is_empty(), "non-TTY run polluted stderr: {}", String::from_utf8_lossy(&out.stderr));
 
     let text = std::fs::read_to_string(dir.path().join("talk/what-am-i-avoiding.md")).unwrap();
     assert!(text.contains("id: what-am-i-avoiding"));

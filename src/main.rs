@@ -241,8 +241,11 @@ fn run_live_session(
     // Verifying the model hashes and loading the nets takes ~1–2s warm (more on a
     // cold disk cache) before the alternate-screen UI appears — without a word here
     // it looks hung, and a user who starts speaking immediately loses their first
-    // words. One quiet line of feedback (TTY only; non-TTY must stay byte-clean).
-    if interactive {
+    // words. Show feedback only when the models are already present (so it labels
+    // the hash+load wait); a first-run user with no models falls through to the
+    // fetch offer instead, which speaks for itself. TTY-only: non-TTY stays
+    // byte-clean.
+    if interactive && models_present() {
         eprintln!("  preparing…");
     }
 
@@ -485,6 +488,14 @@ fn fetch_all_models() -> std::io::Result<()> {
 /// actually reads — an attacker swapping an extracted weight would slip past an
 /// archive-only check). A verified archive with missing extracted files is
 /// healed by re-extracting before giving up.
+/// Cheap existence check (no hashing) for the extracted model files — used only to
+/// decide whether to show the "preparing…" indicator, never as a security gate.
+#[cfg(feature = "listen")]
+fn models_present() -> bool {
+    let dir = paths::models_dir();
+    download::models::EXTRACTED.iter().all(|(rel, _)| dir.join(rel).exists())
+}
+
 #[cfg(feature = "listen")]
 fn models_ready() -> bool {
     let dir = paths::models_dir();

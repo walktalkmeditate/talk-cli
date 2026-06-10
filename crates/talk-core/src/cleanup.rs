@@ -188,7 +188,7 @@ pub fn rewrite_prompt(level: Level, text: &str) -> RewritePrompt {
     let restraint = "You clean up raw voice transcripts. Return ONLY the cleaned text, nothing else — no preamble, no quotes. NEVER change meaning: never swap a word for a different one, never add words that change meaning, never drop a negation, never reorder clauses. When unsure, leave it as it is.";
     let rule = match level {
         Level::None => "Return the text exactly as given.",
-        Level::Light => "Fix only capitalization and punctuation, and drop leading filler (um, uh, like). Remove no other words.",
+        Level::Light => "Fix only capitalization and punctuation, and drop leading non-lexical filler (um, uh, er, ah). Remove no other words.",
         Level::Medium => "Also remove disfluencies and false starts and join fragments into sentences. Keep every meaning-bearing word.",
         Level::High => "Also break into paragraphs at topic shifts and turn spoken lists into bullets. Keep every meaning-bearing word.",
     };
@@ -255,6 +255,16 @@ mod tests {
     fn still_strips_leading_nonlexical_disfluencies() {
         assert_eq!(deterministic_light("um uh the thing is"), "The thing is.");
         assert_eq!(deterministic_light("ah i see it now"), "I see it now.");
+        // Trailing punctuation on the disfluency token must not shield it.
+        assert_eq!(deterministic_light("um, the thing is"), "The thing is.");
+    }
+
+    #[test]
+    fn a_leading_pure_punctuation_token_survives() {
+        // It trims to "" which is not a disfluency, so the loop stops and the token
+        // is kept — no panic, no over-strip. (Capitalization still lands on the
+        // first real word.)
+        assert_eq!(deterministic_light("-- the thing is"), "-- The thing is.");
     }
 
     #[test]
