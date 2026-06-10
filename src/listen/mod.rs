@@ -36,7 +36,7 @@ impl LiveSource {
                     Ok(chunk) => {
                         let resampled = resample_to_16k(&chunk, cap_rate);
                         for s in seg.push(&resampled) {
-                            let text = stt.transcribe(&s.samples, s.sample_rate);
+                            let text = stt::transcribe_chunked(&stt, &s.samples, s.sample_rate);
                             if !text.trim().is_empty() { let _ = tx.send(Event::Commit(text)); }
                         }
                         sp.store(seg.is_speaking(), Ordering::Relaxed);
@@ -48,7 +48,7 @@ impl LiveSource {
                 }
                 if ff.load(Ordering::Relaxed) {
                     for s in seg.flush() {
-                        let text = stt.transcribe(&s.samples, s.sample_rate);
+                        let text = stt::transcribe_chunked(&stt, &s.samples, s.sample_rate);
                         if !text.trim().is_empty() { let _ = tx.send(Event::Commit(text)); }
                     }
                     let _ = tx.send(Event::Done);
