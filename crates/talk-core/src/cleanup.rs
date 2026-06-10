@@ -101,6 +101,50 @@ pub fn apply_backtrack(text: &str) -> String {
     result.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Continuation function-words: common enough as sentence-internal openers that
+/// lowercasing them when a sentence spans a pause is safe. Deliberately excludes
+/// anything proper-noun-shaped — we never lowercase an arbitrary capitalized token.
+const CONTINUATIONS: &[&str] = &[
+    "and", "but", "so", "or", "the", "a", "an", "it", "that", "this", "these",
+    "those", "all", "then", "because", "which", "who",
+];
+
+/// Lowercase the first letter of `text` when it CONTINUES the previous block —
+/// the previous block didn't end a sentence (no terminal `.!?`) AND the first word
+/// is an allow-listed continuation word. Whisper cases each segment as a fresh
+/// sentence; this undoes the spurious mid-sentence capital when a sentence spans a
+/// pause. Conservative by construction (only the allow-list; never a proper noun).
+pub fn decapitalize_continuation(text: &str, prev_clean: Option<&str>) -> String {
+    let continues = prev_clean.is_some_and(|p| {
+        !matches!(p.trim_end().chars().last(), Some('.') | Some('!') | Some('?') | None)
+    });
+    if !continues {
+        return text.to_string();
+    }
+    let first = text.split_whitespace().next().unwrap_or("");
+    let bare = first.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+    if !CONTINUATIONS.contains(&bare.as_str()) {
+        return text.to_string();
+    }
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(c) if c.is_uppercase() => c.to_lowercase().collect::<String>() + chars.as_str(),
+        _ => text.to_string(),
+    }
+}
+
+/// Format a pass-2 Whisper revise. Whisper already cased + punctuated, so this does
+/// NOT re-capitalize sentence starts or force terminal punctuation (that re-creates
+/// the per-segment mid-sentence capital). It applies only the spoken-command and
+/// `scratch that` backtrack features and the continuation de-capitalizer.
+///
+/// Order: backtrack first (operates on raw words), then spoken commands (inserts
+/// `\n` / `\n\n`), so the final join in `apply_backtrack` never collapses newlines.
+pub fn format_revise(whisper: &str, prev_clean: Option<&str>) -> String {
+    let pre = apply_spoken_commands(&apply_backtrack(whisper));
+    decapitalize_continuation(&pre, prev_clean)
+}
+
 /// Deterministic "Light": capitalize sentence starts, ensure terminal
 /// punctuation, strip leading fillers. Always guard-safe by construction.
 pub fn deterministic_light(text: &str) -> String {
@@ -343,5 +387,35 @@ mod tests {
         for lvl in [Level::Light, Level::Medium, Level::High] {
             assert!(rewrite_prompt(lvl, "x").system.to_lowercase().contains("never change meaning"));
         }
+    }
+
+    #[test]
+    fn decapitalize_lowercases_an_allowlist_continuation_after_unterminated_prior() {
+        assert_eq!(
+            decapitalize_continuation("All these edge cases get sorted out.", Some("with their product")),
+            "all these edge cases get sorted out."
+        );
+    }
+
+    #[test]
+    fn decapitalize_keeps_capital_after_a_terminated_prior() {
+        assert_eq!(
+            decapitalize_continuation("All these edge cases.", Some("That worked.")),
+            "All these edge cases."
+        );
+    }
+
+    #[test]
+    fn decapitalize_never_lowercases_a_non_allowlist_word_protecting_proper_nouns() {
+        assert_eq!(
+            decapitalize_continuation("Whisper does the rest", Some("the tool i use is")),
+            "Whisper does the rest"
+        );
+    }
+
+    #[test]
+    fn format_revise_trusts_whisper_casing_and_applies_features() {
+        assert_eq!(format_revise("hello there", None), "hello there");
+        assert_eq!(format_revise("first line new line second", None), "first line\nsecond");
     }
 }
