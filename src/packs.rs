@@ -17,10 +17,13 @@ pub fn vendored() -> Vec<Pack> {
 /// The pack to serve from. Unknown names fall back to the spine (never an error —
 /// a stale config must not block a reflection).
 pub fn by_name(name: &str) -> Pack {
-    vendored()
-        .into_iter()
-        .find(|p| p.name == name)
-        .unwrap_or_else(|| Pack::from_toml(SPINE).expect("spine TOML is valid"))
+    let mut packs = vendored();
+    let i = packs
+        .iter()
+        .position(|p| p.name == name)
+        .or_else(|| packs.iter().position(|p| p.name == "spine"))
+        .expect("the spine pack is vendored");
+    packs.swap_remove(i)
 }
 
 #[cfg(test)]

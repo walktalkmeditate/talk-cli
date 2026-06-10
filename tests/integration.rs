@@ -146,6 +146,42 @@ fn held_pack_prints_ascending_day_provenance() {
     assert!(String::from_utf8_lossy(&day2.stdout).contains("held day 2"), "{}", String::from_utf8_lossy(&day2.stdout));
 }
 
+/// Switching default_pack mid-held-run must pause the orphaned run cleanly (the
+/// run lives in the pack that started it), serve the new pack, and — once back on
+/// held — start a FRESH day-1 run rather than resuming the abandoned one.
+#[test]
+fn pack_switch_pauses_the_held_run_and_restarts_fresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let talk_dir = dir.path().join("talk");
+    std::fs::create_dir_all(&talk_dir).unwrap();
+
+    std::fs::write(talk_dir.join("config.toml"), "default_pack = \"held\"\n").unwrap();
+    let day1 = talk(dir.path(), &["--from-text", "held words", "--date", "2026-06-09", "--time", "10:00"]);
+    assert!(day1.status.success(), "stderr: {}", String::from_utf8_lossy(&day1.stderr));
+    assert!(String::from_utf8_lossy(&day1.stdout).contains("held day 1"));
+
+    std::fs::write(talk_dir.join("config.toml"), "default_pack = \"spine\"\n").unwrap();
+    let switched = talk(dir.path(), &["--from-text", "spine words", "--date", "2026-06-10", "--time", "10:00"]);
+    assert!(switched.status.success(), "stderr: {}", String::from_utf8_lossy(&switched.stderr));
+    assert!(
+        String::from_utf8_lossy(&switched.stderr).contains("held run paused"),
+        "stderr: {}", String::from_utf8_lossy(&switched.stderr)
+    );
+    let spine_files = std::fs::read_dir(&talk_dir).unwrap().flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
+        .filter(|e| std::fs::read_to_string(e.path()).is_ok_and(|t| t.contains("pack: spine")))
+        .count();
+    assert_eq!(spine_files, 1, "the switch must serve a spine question");
+
+    std::fs::write(talk_dir.join("config.toml"), "default_pack = \"held\"\n").unwrap();
+    let fresh = talk(dir.path(), &["--from-text", "held again", "--date", "2026-06-11", "--time", "10:00"]);
+    assert!(fresh.status.success(), "stderr: {}", String::from_utf8_lossy(&fresh.stderr));
+    assert!(
+        String::from_utf8_lossy(&fresh.stdout).contains("held day 1"),
+        "back on held must start a FRESH day-1 run: {}", String::from_utf8_lossy(&fresh.stdout)
+    );
+}
+
 #[test]
 fn streak_credits_consecutive_days() {
     let dir = tempfile::tempdir().unwrap();

@@ -30,7 +30,9 @@ impl Streak {
             Some(day) if today < day => {}
             _ => self.current_streak = 1,
         }
-        self.last_day = Some(today);
+        // High-water mark: never regress, so a backward clock followed by replayed
+        // days can't re-credit the streak day by day.
+        self.last_day = Some(self.last_day.map_or(today, |d| d.max(today)));
         self.longest_streak = self.longest_streak.max(self.current_streak);
     }
 
@@ -63,6 +65,21 @@ pub fn civil_day(date: &str) -> Option<i64> {
     let doy = (153 * mp + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     Some(era * 146_097 + doe - 719_468)
+}
+
+/// Howard Hinnant's civil-from-days (UTC), dependency-free — `civil_day`'s inverse.
+pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    (year, m as u32, d)
 }
 
 /// Record one saved entry under an exclusive file lock (read-modify-write, not
@@ -122,6 +139,28 @@ mod tests {
         assert_eq!(civil_day("1970-01-02"), Some(1));
         assert_eq!(civil_day("2026-06-09"), Some(20_613));
         assert_eq!(civil_day("not-a-date"), None);
+    }
+
+    #[test]
+    fn civil_from_days_round_trips_through_civil_day() {
+        // 19_782 is 2024-02-29 — a leap date must survive the round trip too.
+        for day in [0, 1, 20_613, 19_782] {
+            let (y, m, d) = civil_from_days(day);
+            assert_eq!(civil_day(&format!("{y:04}-{m:02}-{d:02}")), Some(day), "day {day}");
+        }
+    }
+
+    #[test]
+    fn backward_clock_replay_never_recredits_the_streak() {
+        let mut s = Streak::default();
+        s.record(105);
+        assert_eq!(s.current_streak, 1);
+        s.record(103); // clock jumped back
+        s.record(104); // replayed days must not re-credit day by day
+        s.record(105);
+        assert_eq!(s.current_streak, 1);
+        assert_eq!(s.last_day, Some(105));
+        assert_eq!(s.entries, 4);
     }
 
     #[test]

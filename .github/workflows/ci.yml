@@ -36,7 +36,7 @@ jobs:
             --from-text "no packets were harmed" --date 2026-06-09 --time 08:14
       - name: no-egress (macOS sandbox) + privacy suite
         if: runner.os == 'macOS'
-        run: cargo test --test privacy
+        run: cargo test --features listen --test privacy
 
   # New clippy lints surface here without blocking the gate.
   clippy-latest:

@@ -242,10 +242,7 @@ fn run_live_session(
     // artifact means the session can't run yet. On a TTY we offer to fetch them now
     // (a one-time ~30 MB download) and continue; otherwise we print the hint and
     // exit non-zero (a clean failure — no terminal state or file has been touched).
-    let models_ready = download::models::MODELS.iter().all(|art| {
-        download::verify(&paths::models_dir().join(art.name), art.sha256).unwrap_or(false)
-    });
-    if !models_ready {
+    if !models_ready() {
         if interactive && offer_first_run_fetch()? {
             fetch_all_models()?;
         } else {
@@ -266,6 +263,18 @@ fn run_live_session(
         std::process::exit(1);
     };
 
+    // Build the per-mode View config and the write target. For reflect we resolve
+    // the question (BYO or spine) up front; its owned strings back the Target.
+    // For a BYO question, a near-match against an EXISTING BYO thread offers to
+    // continue that thread instead of silently forking it (spec §8) — live + TTY
+    // only; pack/spine threads are never merged (they're served by id). Resolved
+    // BEFORE the mic starts: a stdin prompt over a hot mic would transcribe the
+    // user's answer-thinking into the entry.
+    let byo_question = match (&shape, &args.question) {
+        (Shape::Reflect, Some(q)) if interactive => byo_continue_or(base, q)?,
+        _ => args.question.clone(),
+    };
+
     let capture = match listen::capture::Capture::start() {
         Ok(c) => c,
         Err(e) => { eprintln!("microphone unavailable: {e}"); std::process::exit(1); }
@@ -283,15 +292,6 @@ fn run_live_session(
     let finish_flag = source.finish_handle();
     let speaking = source.speaking_handle();
 
-    // Build the per-mode View config and the write target. For reflect we resolve
-    // the question (BYO or spine) up front; its owned strings back the Target.
-    // For a BYO question, a near-match against an EXISTING BYO thread offers to
-    // continue that thread instead of silently forking it (spec §8) — live + TTY
-    // only; pack/spine threads are never merged (they're served by id).
-    let byo_question = match (&shape, &args.question) {
-        (Shape::Reflect, Some(q)) if interactive => byo_continue_or(base, q)?,
-        _ => args.question.clone(),
-    };
     let choice = match shape {
         Shape::Reflect => Some(reflect_choice(base, &byo_question, time, &cfg.default_pack)?),
         _ => None,
@@ -382,6 +382,15 @@ fn run_live_session(
         paths::write_private(&state_path(base), &c.state.save())?;
     }
 
+    // A saved live entry credits the streak — BEFORE the close dwell, so Ctrl-C
+    // at the close screen can't skip the credit. Ephemeral already returned above,
+    // so this path is never ephemeral. Streak failure never blocks the save.
+    if written.is_some() {
+        if let Some(day) = streak::civil_day(date) {
+            let _ = streak::record_entry(base, day);
+        }
+    }
+
     if let Some(path) = written {
         let entry_count = written_entry_count(&path);
         let held = choice.as_ref().and_then(|c| c.held_day)
@@ -390,11 +399,6 @@ fn run_live_session(
         let provenance = format!("entry {entry_count}{held}");
         let phrase = live::CLOSE_PHRASES[entry_count % live::CLOSE_PHRASES.len()];
         live::show_close(&path.display().to_string(), &provenance, phrase)?;
-        // A saved live entry credits the streak. Ephemeral already returned above,
-        // so this path is never ephemeral. Streak failure never blocks the save.
-        if let Some(day) = streak::civil_day(date) {
-            let _ = streak::record_entry(base, day);
-        }
     }
     Ok(Some(Ok(())))
 }
@@ -417,8 +421,10 @@ fn byo_continue_or(base: &Path, q: &str) -> std::io::Result<Option<String>> {
     print!("you've sat with \"{existing_q}\" before — continue that thread? [Y/n] ");
     std::io::stdout().flush()?;
     let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    let continue_it = !matches!(line.trim(), "n" | "N");
+    let n = std::io::stdin().read_line(&mut line)?;
+    // EOF (closed stdin) is no answer at all — start a new thread rather than
+    // silently merging into one the user never confirmed.
+    let continue_it = n > 0 && !matches!(line.trim(), "n" | "N");
     Ok(Some(if continue_it { existing_q.clone() } else { q.to_string() }))
 }
 
@@ -434,8 +440,9 @@ fn offer_first_run_fetch() -> std::io::Result<bool> {
     Ok(matches!(line.trim(), "y" | "Y"))
 }
 
-/// Fetch every model artifact — the same loop `talk download models` runs.
-#[cfg(feature = "listen")]
+/// Fetch every model artifact — shared by `talk download models` and the live
+/// session's first-run fetch offer (one implementation, one behavior).
+#[cfg(feature = "download")]
 fn fetch_all_models() -> std::io::Result<()> {
     for art in download::models::MODELS {
         println!("fetching {} …", art.name);
@@ -443,6 +450,38 @@ fn fetch_all_models() -> std::io::Result<()> {
         println!("  ✓ {}", art.name);
     }
     Ok(())
+}
+
+/// True when every model the session will LOAD verifies against its pin: the
+/// archives (download integrity) AND the extracted Moonshine files (what the
+/// session actually reads — an attacker swapping an extracted .ort would slip
+/// past an archive-only check). A verified archive with missing extracted files
+/// is healed by re-extracting before giving up.
+#[cfg(feature = "listen")]
+fn models_ready() -> bool {
+    let dir = paths::models_dir();
+    let archives_ok = download::models::MODELS.iter().all(|art| {
+        download::verify(&dir.join(art.name), art.sha256).unwrap_or(false)
+    });
+    if !archives_ok {
+        return false;
+    }
+    let extracted_ok = || download::models::MOONSHINE_EXTRACTED.iter().all(|(rel, sha)| {
+        download::verify(&dir.join(rel), sha).unwrap_or(false)
+    });
+    if extracted_ok() {
+        return true;
+    }
+    let any_missing = download::models::MOONSHINE_EXTRACTED.iter().any(|(rel, _)| !dir.join(rel).exists());
+    if any_missing {
+        for art in download::models::MODELS.iter().filter(|a| a.name.ends_with(".tar.bz2")) {
+            if download::extract(&dir.join(art.name), &dir).is_err() {
+                return false;
+            }
+        }
+        return extracted_ok();
+    }
+    false
 }
 
 /// Best-effort entry count from a freshly-written file's frontmatter (reflect) or
@@ -500,23 +539,17 @@ fn list_installed() -> std::io::Result<()> {
 fn handle_download(target: Option<&str>) -> std::io::Result<()> {
     match target {
         None => list_installed(),
-        Some("models") => {
-            for art in download::models::MODELS {
-                println!("fetching {} …", art.name);
-                download::fetch(art, &paths::models_dir())
-                    .map_err(std::io::Error::other)?;
-                println!("  ✓ {}", art.name);
-            }
-            Ok(())
-        }
+        Some("models") => fetch_all_models(),
         Some("verify") => {
             let mut bad = 0;
-            for art in download::models::MODELS {
-                let p = paths::models_dir().join(art.name);
-                match download::verify(&p, art.sha256) {
-                    Ok(true) => println!("  ✓ {}", art.name),
+            let names = download::models::MODELS.iter().map(|art| (art.name, art.sha256));
+            let extracted = download::models::MOONSHINE_EXTRACTED.iter().copied();
+            for (name, sha) in names.chain(extracted) {
+                let p = paths::models_dir().join(name);
+                match download::verify(&p, sha) {
+                    Ok(true) => println!("  ✓ {name}"),
                     _ => {
-                        println!("  ✗ {} (missing or hash mismatch)", art.name);
+                        println!("  ✗ {name} (missing or hash mismatch)");
                         bad += 1;
                     }
                 }
@@ -601,7 +634,16 @@ fn existing_threads(base: &Path) -> Vec<ThreadRow> {
         .filter(|p| p.extension().is_some_and(|x| x == "md"))
         .filter_map(|p| {
             let text = std::fs::read_to_string(&p).ok()?;
-            let (fm, _) = talk_core::frontmatter::Frontmatter::parse(&text)?;
+            let Some((fm, _)) = talk_core::frontmatter::Frontmatter::parse(&text) else {
+                // Journal date files legitimately have no frontmatter; anything
+                // else is a corrupt thread that would otherwise silently vanish
+                // from the list (and fork on the next near-match).
+                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                if !is_journal_date_slug(stem) {
+                    eprintln!("warning: skipping {} — unparseable frontmatter", p.display());
+                }
+                return None;
+            };
             Some(ThreadRow { path: p, slug: fm.slug, entries: fm.entries, last: fm.last, question: fm.question, pack: fm.pack })
         })
         .collect()
@@ -675,7 +717,7 @@ fn require_text(from: &Option<String>) -> String {
     match from {
         Some(t) if !t.trim().is_empty() => t.clone(),
         _ => {
-            eprintln!("Plan 1: pass --from-text <text> to drive the pipeline (the real audio source lands in Plan 2).");
+            eprintln!("no --from-text given and this build has no microphone support — rebuild with --features listen, or pass --from-text <text>");
             std::process::exit(2);
         }
     }
@@ -685,10 +727,10 @@ fn hour_of(hm: &str) -> u32 {
     hm.split(':').next().and_then(|h| h.parse().ok()).unwrap_or(12)
 }
 
-// Plan 1 wires a real (UTC) system clock so files aren't epoch-dated; tests pass
-// --date/--time for determinism. Plan 2 can add local-timezone handling.
+// A real (UTC) system clock so files aren't epoch-dated; tests pass --date/--time
+// for determinism.
 fn system_date() -> String {
-    let (y, m, d) = civil_from_days((unix_secs() / 86_400) as i64);
+    let (y, m, d) = streak::civil_from_days((unix_secs() / 86_400) as i64);
     format!("{:04}-{:02}-{:02}", y, m, d)
 }
 
@@ -704,17 +746,16 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Howard Hinnant's civil-from-days (UTC), dependency-free.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if m <= 2 { y + 1 } else { y };
-    (year, m as u32, d)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn journal_date_slug_accepts_only_yyyy_mm_dd_shapes() {
+        assert!(is_journal_date_slug("2026-06-09"));
+        assert!(!is_journal_date_slug("2026-6-9"));
+        assert!(!is_journal_date_slug("abcd-ef-gh"));
+        assert!(!is_journal_date_slug("2026-06-0"));
+        assert!(!is_journal_date_slug("abcdefghij"));
+    }
 }

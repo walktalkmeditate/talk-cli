@@ -23,3 +23,22 @@ pub const MODELS: &[Artifact] = &[
         sha256: "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
     },
 ];
+
+/// The three files a live session actually LOADS, as `(path-relative-to-models-dir,
+/// sha256)`. Sessions never read the archive, so the verify gate must hash these,
+/// not just the tarball. Hashes pinned from the verified archive's extraction —
+/// same release-stable provenance as the archive pin above.
+pub const MOONSHINE_EXTRACTED: &[(&str, &str)] = &[
+    (
+        "sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27/encoder_model.ort",
+        "94e90a4654fc45cdfedb77c4c08e1739f48862998e58fada384b25118134f221",
+    ),
+    (
+        "sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27/decoder_model_merged.ort",
+        "cf524c4862d36e9e5ab032eddc73637efd822d70e868ac575cf1a46e1e4708a0",
+    ),
+    (
+        "sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27/tokens.txt",
+        "2870d843e14c1e187bf1913a521562a63b53933814bd7f2145120468f494a049",
+    ),
+];

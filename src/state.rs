@@ -8,9 +8,6 @@ pub struct State {
     pub last_served: HashMap<String, u64>,
     pub tick: u64,
     pub held_run: Option<(String, u32)>,
-    // Plan 4: streak display; collected but unused in Plan 1.
-    pub streak: u32,
-    pub last_session_date: Option<String>,
     /// First-run privacy disclosure shown? Set once, the first time a non-ephemeral
     /// session actually proceeds (serde default false for pre-existing state files).
     pub disclosed: bool,

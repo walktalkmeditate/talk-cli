@@ -62,17 +62,38 @@ fn tampered_model_refuses_to_run() {
     ] {
         std::fs::write(models.path().join(name), b"tampered").unwrap();
     }
-    let out = Command::new(env!("CARGO_BIN_EXE_talk"))
-        .args(["reflect"]) // no --from-text → live path → verify gate fires pre-mic
-        .env("HOME", home.path())
-        .env("TALK_MODELS_DIR", models.path())
-        .output()
-        .unwrap();
+    let out = run_reflect(home.path(), models.path());
     assert!(!out.status.success(), "tampered models must exit non-zero");
-    // The gate prints "models not ready — run `talk download models`" on a
-    // hash-mismatch exactly as it does on a missing file (verify() returns
-    // Ok(false) for mismatch, Err for missing → both fold to the same hint).
-    assert!(String::from_utf8_lossy(&out.stderr).contains("talk download models"));
+    // Intent pin: the refusal must steer the user to the download command —
+    // the exact wording around it is free to change.
+    assert!(String::from_utf8_lossy(&out.stderr).contains("download"));
+
+    // Second scenario: the EXTRACTED files the session loads hold wrong bytes.
+    // With fake archives both layers fail, which is exactly the point — an
+    // attacker swapping an extracted .ort must not slip past the gate either.
+    let moonshine = models
+        .path()
+        .join("sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27");
+    std::fs::create_dir_all(&moonshine).unwrap();
+    for name in ["encoder_model.ort", "decoder_model_merged.ort", "tokens.txt"] {
+        std::fs::write(moonshine.join(name), b"tampered extraction").unwrap();
+    }
+    let out = run_reflect(home.path(), models.path());
+    assert!(
+        !out.status.success(),
+        "tampered extracted models must exit non-zero"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("download"));
+}
+
+#[cfg(feature = "listen")]
+fn run_reflect(home: &Path, models: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_talk"))
+        .args(["reflect"]) // no --from-text → live path → verify gate fires pre-mic
+        .env("HOME", home)
+        .env("TALK_MODELS_DIR", models)
+        .output()
+        .unwrap()
 }
 
 /// Spec §14: the TEXT pipeline makes zero outbound connections. macOS: run the
