@@ -98,7 +98,10 @@ impl LiveSource {
                                 // The 20M streaming model is the weakest link — speech it
                                 // mishears as nothing must still reach the strong model.
                                 let text2 = stt::transcribe_chunked(&stt, &segment, 16_000);
-                                if !text2.trim().is_empty() {
+                                let secs = segment.len() as f32 / 16_000.0;
+                                if !text2.trim().is_empty()
+                                    && !stt::suspect_hallucination(&text2, secs)
+                                {
                                     // Self-paired so the rescue renders bright (= pass-2-final)
                                     // like every other finished phrase.
                                     let _ = tx.send(Event::Commit(text2.clone()));
@@ -135,7 +138,10 @@ impl LiveSource {
                         if !text2.trim().is_empty() { let _ = tx.send(Event::Revise(text2)); }
                     } else if plausibly_speech(&segment, RESCUE_MIN_FLUSH_SAMPLES) {
                         let text2 = stt::transcribe_chunked(&stt, &segment, 16_000);
-                        if !text2.trim().is_empty() {
+                        let secs = segment.len() as f32 / 16_000.0;
+                        if !text2.trim().is_empty()
+                            && !stt::suspect_hallucination(&text2, secs)
+                        {
                             let _ = tx.send(Event::Commit(text2.clone()));
                             let _ = tx.send(Event::Revise(text2));
                         }
