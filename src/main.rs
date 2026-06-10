@@ -251,26 +251,24 @@ fn run_live_session(
         }
     }
 
-    // Pass-2 transcription loads Moonshine base (drop-in for the old tiny `Stt`).
-    // The streaming Zipformer-20M paths are computed here too; the `Streaming`
-    // facade that consumes them lands in Plan 5 T4/T5 — for now this build still
-    // segments via the VAD path while the manifest gate already requires the new
-    // models. Field order tracks the eventual `LiveSource::new` signature.
+    // The live first pass loads the streaming Zipformer-20M transducer (int8
+    // encoder/joiner + fp32 decoder — the standard sherpa recipe); pass-2
+    // transcription loads Moonshine base (drop-in for the old tiny `Stt`).
     let models = paths::models_dir();
     let moonshine = models.join("sherpa-onnx-moonshine-base-en-quantized-2026-02-27");
     let zipformer = models.join("sherpa-onnx-streaming-zipformer-en-20M-2023-02-17");
-    let (Some(enc), Some(dec), Some(tok), Some(silero)) = (
+    let (Some(enc), Some(dec), Some(tok), Some(zenc), Some(zdec), Some(zjoin), Some(ztok)) = (
         moonshine.join("encoder_model.ort").to_str().map(str::to_owned),
         moonshine.join("decoder_model_merged.ort").to_str().map(str::to_owned),
         moonshine.join("tokens.txt").to_str().map(str::to_owned),
-        // Plan 5 T4 deletes the VAD path; until then the live session still
-        // segments with silero, so this path is still constructed here.
-        models.join("silero_vad.onnx").to_str().map(str::to_owned),
+        zipformer.join("encoder-epoch-99-avg-1.int8.onnx").to_str().map(str::to_owned),
+        zipformer.join("decoder-epoch-99-avg-1.onnx").to_str().map(str::to_owned),
+        zipformer.join("joiner-epoch-99-avg-1.int8.onnx").to_str().map(str::to_owned),
+        zipformer.join("tokens.txt").to_str().map(str::to_owned),
     ) else {
         eprintln!("model path is not valid UTF-8 — run `talk download models`");
         std::process::exit(1);
     };
-    let _ = &zipformer; // wired into the `Streaming` facade in Plan 5 T5.
 
     // Build the per-mode View config and the write target. For reflect we resolve
     // the question (BYO or spine) up front; its owned strings back the Target.
@@ -288,16 +286,16 @@ fn run_live_session(
         Ok(c) => c,
         Err(e) => { eprintln!("microphone unavailable: {e}"); std::process::exit(1); }
     };
-    let seg = match listen::vad::Segmenter::new(&silero) {
+    let streaming = match listen::streaming::Streaming::new(&zenc, &zdec, &zjoin, &ztok) {
         Ok(s) => s,
-        Err(e) => { eprintln!("VAD failed to load: {e}"); std::process::exit(1); }
+        Err(e) => { eprintln!("streaming model failed to load: {e}"); std::process::exit(1); }
     };
     let stt = match listen::stt::Stt::new(&enc, &dec, &tok) {
         Ok(s) => s,
         Err(e) => { eprintln!("speech model failed to load: {e}"); std::process::exit(1); }
     };
 
-    let mut source = listen::LiveSource::new(capture, seg, stt);
+    let mut source = listen::LiveSource::new(capture, streaming, stt);
     let finish_flag = source.finish_handle();
     let speaking = source.speaking_handle();
 
