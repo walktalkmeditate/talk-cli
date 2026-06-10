@@ -7,6 +7,7 @@ mod keymap;
 mod live;
 #[cfg(feature = "listen")]
 mod listen;
+mod packs;
 mod paths;
 mod render;
 mod session;
@@ -20,9 +21,6 @@ use session::{run, RunConfig};
 use source::FakeTranscript;
 use std::path::{Path, PathBuf};
 use writer::Target;
-
-/// The spine pack is compiled in, so Plan 1 has no runtime file dependency.
-const SPINE_TOML: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/questions/spine.toml"));
 
 fn main() -> std::io::Result<()> {
     let args = Cli::parse();
@@ -86,8 +84,8 @@ struct ReflectChoice {
 }
 
 /// Select a reflect question: a BYO question if one was given, else from the
-/// spine pack (recording the serving in the returned `State`).
-fn reflect_choice(base: &Path, byo: &Option<String>, time: &str) -> std::io::Result<ReflectChoice> {
+/// configured pack (recording the serving in the returned `State`).
+fn reflect_choice(base: &Path, byo: &Option<String>, time: &str, default_pack: &str) -> std::io::Result<ReflectChoice> {
     let mut st = state::State::load(&std::fs::read_to_string(state_path(base)).unwrap_or_default());
 
     let (id, question, slug, pack, addressee) = match byo {
@@ -99,18 +97,25 @@ fn reflect_choice(base: &Path, byo: &Option<String>, time: &str) -> std::io::Res
             (slug.clone(), q.clone(), slug, "byo".to_string(), "self".to_string())
         }
         None => {
-            let spine = talk_core::questions::Pack::from_toml(SPINE_TOML).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bundled spine.toml invalid: {e}"))
-            })?;
-            let chosen = match talk_core::selection::select(&spine, &st.selection_state(), hour_of(time)) {
+            let pack = crate::packs::by_name(default_pack);
+            let chosen = match talk_core::selection::select(&pack, &st.selection_state(), hour_of(time)) {
                 Some(q) => q.clone(),
                 None => return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData, "spine pack has no questions")),
+                    std::io::ErrorKind::InvalidData, "pack has no questions")),
             };
+            // A held run lives in the pack that started it; if the active pack
+            // changed mid-run, the run's question won't be served here — abandon
+            // it cleanly rather than stranding a half-finished run.
+            if let Some((run_id, _)) = &st.held_run {
+                if run_id != &chosen.id {
+                    st.held_run = None;
+                    eprintln!("your held run paused — it lives in the `held` pack");
+                }
+            }
             let slug = chosen.slug.clone().unwrap_or_else(|| chosen.id.clone());
             st.record_served(&chosen.id);
             st.advance_held(&chosen);
-            (chosen.id, chosen.text, slug, spine.name, chosen.addressee)
+            (chosen.id, chosen.text, slug, pack.name, chosen.addressee)
         }
     };
 
@@ -119,7 +124,7 @@ fn reflect_choice(base: &Path, byo: &Option<String>, time: &str) -> std::io::Res
 
 /// Reflect: a BYO question if one was given, else select from the spine pack.
 fn reflect(base: &Path, byo: &Option<String>, date: &str, time: &str, text: &str, cfg: &config::Config) -> std::io::Result<()> {
-    let c = reflect_choice(base, byo, time)?;
+    let c = reflect_choice(base, byo, time, &cfg.default_pack)?;
 
     let target = Target::Reflect { id: &c.id, question: &c.question, slug: &c.slug, pack: &c.pack, addressee: &c.addressee };
     run_and_report(Report { base, target, date, time, text, keep_raw: cfg.keep_raw, ephemeral: false, level: cfg.cleanup_for("reflect") })?;
@@ -230,7 +235,7 @@ fn run_live_session(
     // Build the per-mode View config and the write target. For reflect we resolve
     // the question (BYO or spine) up front; its owned strings back the Target.
     let choice = match shape {
-        Shape::Reflect => Some(reflect_choice(base, &args.question, time)?),
+        Shape::Reflect => Some(reflect_choice(base, &args.question, time, &cfg.default_pack)?),
         _ => None,
     };
     let (rmode, target, cleanup, ephemeral, question): (RMode, Target, &str, bool, Option<&str>) =
@@ -311,12 +316,34 @@ fn handle_config(action: Option<&str>) -> std::io::Result<()> {
     Ok(())
 }
 
-/// `talk download models` — fetch + SHA-256-verify the model artifacts (behind
-/// the `download` feature). Without the feature, this build can't fetch.
+/// `talk download` (no arg) — list what's installed. The pack list prints in
+/// every build; the models section is only meaningful with the `download` feature.
+fn list_installed() -> std::io::Result<()> {
+    println!("installed packs:");
+    for p in packs::vendored() {
+        println!("  {:<12} {:>2} questions — {}", p.name, p.questions.len(), p.description);
+    }
+    #[cfg(feature = "download")]
+    {
+        println!("\nmodels ({}):", paths::models_dir().display());
+        for art in download::models::MODELS {
+            let ok = download::verify(&paths::models_dir().join(art.name), art.sha256).unwrap_or(false);
+            println!("  {} {}", if ok { "✓" } else { "✗" }, art.name);
+        }
+        println!("\nfetch models with `talk download models` · re-check with `talk download verify`");
+    }
+    println!("\nmore packs arrive post-launch via `talk download <pack>`.");
+    Ok(())
+}
+
+/// `talk download` dispatch. No-arg lists installed packs + models status (in
+/// every build); `talk download models` fetches the model artifacts (behind the
+/// `download` feature — without it, this build can't fetch).
 #[cfg(feature = "download")]
 fn handle_download(target: Option<&str>) -> std::io::Result<()> {
     match target {
-        Some("models") | None => {
+        None => list_installed(),
+        Some("models") => {
             for art in download::models::MODELS {
                 println!("fetching {} …", art.name);
                 download::fetch(art, &paths::models_dir())
@@ -333,9 +360,14 @@ fn handle_download(target: Option<&str>) -> std::io::Result<()> {
 }
 
 #[cfg(not(feature = "download"))]
-fn handle_download(_target: Option<&str>) -> std::io::Result<()> {
-    eprintln!("this build has no download support — rebuild with `--features download`");
-    std::process::exit(2);
+fn handle_download(target: Option<&str>) -> std::io::Result<()> {
+    match target {
+        None => list_installed(),
+        Some(_) => {
+            eprintln!("this build has no download support — rebuild with `--features download`");
+            std::process::exit(2);
+        }
+    }
 }
 
 fn print_thread(base: &Path, question: Option<&str>) {

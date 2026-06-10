@@ -101,6 +101,19 @@ fn thread_returns_the_right_file_on_slug_collision() {
 }
 
 #[test]
+fn default_pack_config_serves_from_that_pack() {
+    let dir = tempfile::tempdir().unwrap();
+    let talk_dir = dir.path().join("talk");
+    std::fs::create_dir_all(&talk_dir).unwrap();
+    std::fs::write(talk_dir.join("config.toml"), "default_pack = \"examen\"\n").unwrap();
+    let out = talk(dir.path(), &["--from-text", "today held more than i noticed", "--date", "2026-06-09", "--time", "20:30"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    // 20:30 → evening slot → examen's first evening question by declaration order.
+    let text = std::fs::read_to_string(talk_dir.join("most-alive-today.md")).unwrap();
+    assert!(text.contains("pack: examen"));
+}
+
+#[test]
 fn date_traversal_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let out = talk(dir.path(), &["journal", "--from-text", "x", "--date", "../escape", "--time", "08:14"]);

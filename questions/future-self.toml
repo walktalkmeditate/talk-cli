@@ -1,0 +1,32 @@
+name = "future-self"
+description = "Talk to the you that's coming."
+
+[[questions]]
+id = "tell-december-you"
+text = "Tell the you of next December what you're most scared of right now."
+addressee = "future-self"
+
+[[questions]]
+id = "hope-still-true"
+text = "What do you hope is still true about your life a year from now?"
+addressee = "future-self"
+
+[[questions]]
+id = "promise-to-hold"
+text = "What promise do you want future-you to hold you to?"
+addressee = "future-self"
+
+[[questions]]
+id = "what-they-forgave"
+text = "What will the you of ten years from now have forgiven you for?"
+addressee = "future-self"
+
+[[questions]]
+id = "ask-the-you-beyond"
+text = "What would you ask the you who has already been through this?"
+addressee = "future-self"
+
+[[questions]]
+id = "small-thing-noticed"
+text = "Tell future-you about a small thing from today they'd be glad you noticed."
+addressee = "future-self"

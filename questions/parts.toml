@@ -1,0 +1,33 @@
+name = "parts"
+description = "Talk to a part of you. Drawn from parts-work (IFS) — go gently; this frame can reach deep."
+# addressee "the-part": these are spoken TO a part of you. The spec's addressee vocabulary is open ("self · future-self · empty-chair · the-critic · …") — "the-part" extends it deliberately; it lands in thread frontmatter as-is.
+
+[[questions]]
+id = "part-speaking-loudest"
+text = "Which part of you is speaking loudest today? Let it talk."
+addressee = "the-part"
+
+[[questions]]
+id = "what-the-worrier-protects"
+text = "What is the worried part of you trying to protect?"
+addressee = "the-part"
+
+[[questions]]
+id = "how-old-is-the-hurt"
+text = "How old is the part that's hurting, and what does it need to hear?"
+addressee = "the-part"
+
+[[questions]]
+id = "thank-the-protector"
+text = "Thank the part that's been working hardest lately. What has it been carrying?"
+addressee = "the-part"
+
+[[questions]]
+id = "part-not-heard"
+text = "Which part of you hasn't been allowed to speak in a long time?"
+addressee = "the-part"
+
+[[questions]]
+id = "calmest-part-answers"
+text = "If the calmest part of you could answer, what would it say to the rest?"
+addressee = "the-part"

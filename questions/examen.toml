@@ -1,0 +1,27 @@
+name = "examen"
+description = "An evening look back over the day."
+
+[[questions]]
+id = "most-alive-today"
+text = "Where did you feel most alive today?"
+slot = "evening"
+
+[[questions]]
+id = "what-drained-today"
+text = "What drained you today — and did it have to?"
+slot = "evening"
+
+[[questions]]
+id = "received-and-given"
+text = "What did you receive today? What did you give?"
+slot = "evening"
+
+[[questions]]
+id = "tomorrow-differently"
+text = "Knowing what today taught you, what will you do differently tomorrow?"
+slot = "evening"
+
+[[questions]]
+id = "gratitude-almost-missed"
+text = "What almost went unnoticed today that deserves gratitude?"
+slot = "evening"
