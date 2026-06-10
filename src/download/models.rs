@@ -6,40 +6,38 @@ pub struct Artifact {
     pub sha256: &'static str,
 }
 
-/// Plan-5 models: Moonshine **base** (en, quantized) for the pass-2 transcription
-/// and the streaming **Zipformer-20M** transducer for the live first pass. URLs are
-/// k2-fsa release assets; the SHAs are release-stable and corroborated below.
+/// Models for live transcription: **Whisper base.en** (int8 encoder/decoder) for
+/// pass-2 transcription and the streaming **Zipformer-20M** transducer for the
+/// live first pass. URLs are k2-fsa release assets; the SHAs are release-stable
+/// and corroborated below. Combined download ≈ 327 MB (zipformer 128 MB + whisper
+/// base 199 MB), stated honestly in the fetch offer.
 ///
-/// Replaces the Plan-2 manifest (moonshine-tiny + silero_vad): the streaming
-/// model's built-in endpoint rules do the VAD's old job, so silero is gone, and
-/// base supersedes tiny for accuracy (~239 MB combined, stated honestly in the
-/// fetch offer). Old tiny/silero caches are left in place on disk (~30 MB,
-/// harmless — never loaded again); a `talk download clean` is deliberately NOT
-/// added (YAGNI: there is no downgrade path once the code stops referencing them).
+/// Pin corroboration (required by spec §11 for weights that run on private audio):
+/// The zipformer archive predates GitHub's digest field (uploaded 2024-01-03,
+/// `digest: null`), so its archive pin rests on download-and-rehash (2026-06-09);
+/// all three of its pinned weight files in `EXTRACTED` (encoder/decoder/joiner)
+/// were corroborated against the Hugging Face mirror
+/// `csukuangfj/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17` (LFS sha256
+/// `3810755c…`/`45a7f940…`/`e085d73b…` match). NOTE: a similarly-named
+/// `…-20M-2023-02-17-mobile.tar.bz2` (107.6 MB) is a DIFFERENT asset — this
+/// manifest pins the non-mobile 127.9 MB archive (`9c559283…`).
 ///
-/// Pin corroboration (2026-06-09, required by spec §11 for weights that run on
-/// private audio): both archive SHAs were independently re-derived by downloading
-/// from the URLs below and hashing. The moonshine-base SHA additionally matches
-/// GitHub's stored release-asset digest (`sha256:43232c1d…`); the zipformer asset
-/// predates GitHub's digest field (uploaded 2024-01-03, `digest: null`), so its
-/// archive pin rests on the download-and-rehash above — but all three of its
-/// pinned WEIGHT files in `EXTRACTED` (encoder/decoder/joiner) were corroborated
-/// 2026-06-09 against an independent channel: the Hugging Face mirror
-/// `csukuangfj/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17` serves
-/// byte-identical files (LFS sha256 `3810755c…`/`45a7f940…`/`e085d73b…` match).
-/// NOTE: a similarly-named `…-20M-2023-02-17-mobile.tar.bz2`
-/// (107.6 MB) is a DIFFERENT asset — this manifest pins the non-mobile 127.9 MB
-/// archive, which is what `9c559283…` hashes to.
+/// The Whisper base.en archive also predates GitHub's stored-digest field
+/// (`digest: null`), so its archive pin (`475bc705…`) rests on
+/// download-and-rehash (2026-06-10); its int8 encoder and decoder were
+/// corroborated against the Hugging Face mirror
+/// `csukuangfj/sherpa-onnx-whisper-base.en` (LFS sha256 `ef6b936f…` /
+/// `f7162ad6…` match).
 pub const MODELS: &[Artifact] = &[
-    // Moonshine base, quantized merged-decoder. Extracts to
-    // `sherpa-onnx-moonshine-base-en-quantized-2026-02-27/`; the loader reads
-    // `encoder_model.ort`, `decoder_model_merged.ort`, `tokens.txt` (drop-in for
-    // the `Stt` that previously loaded tiny — identical file layout).
+    // Whisper base.en (int8 encoder/decoder + tokens) for pass-2 transcription.
+    // Extracts to `sherpa-onnx-whisper-base.en/`; the loader reads
+    // `base.en-encoder.int8.onnx`, `base.en-decoder.int8.onnx`, `base.en-tokens.txt`.
     Artifact {
-        name: "sherpa-onnx-moonshine-base-en-quantized-2026-02-27.tar.bz2",
-        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-base-en-quantized-2026-02-27.tar.bz2",
-        // Corroborated against the GitHub release-asset digest, 2026-06-09.
-        sha256: "43232c1d13013d37317163baec3135bd771a186a4356f28c889bab453bb0e891",
+        name: "sherpa-onnx-whisper-base.en.tar.bz2",
+        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-base.en.tar.bz2",
+        // GitHub asset digest is null (predates the field); corroborated by
+        // download-and-rehash, with the int8 weights matching the HF mirror below.
+        sha256: "475bc7052ce299c007f6d5d5407ba8601f819a2867f6eecee510ed17df581542",
     },
     // Streaming Zipformer-20M transducer (encoder/decoder/joiner + tokens).
     Artifact {
@@ -62,16 +60,16 @@ pub const MODELS: &[Artifact] = &[
 /// 2026-06-09.
 pub const EXTRACTED: &[(&str, &str)] = &[
     (
-        "sherpa-onnx-moonshine-base-en-quantized-2026-02-27/encoder_model.ort",
-        "7c66495948d0d08ec1af454cd4b5514862ae6511e94712a60e6d83eaec8dc8cf",
+        "sherpa-onnx-whisper-base.en/base.en-encoder.int8.onnx",
+        "ef6b936f4c9b1d90a3b68634b60c4ed8576b26172b33c2535ec0e933c9edb823",
     ),
     (
-        "sherpa-onnx-moonshine-base-en-quantized-2026-02-27/decoder_model_merged.ort",
-        "d9d7b333af34bc552580576ddcf248a1c6c839e0d3b43b09afb9376ed009899d",
+        "sherpa-onnx-whisper-base.en/base.en-decoder.int8.onnx",
+        "f7162ad6db2dbef16cfaeaa7f945b9d7dd9c1b8d472f6aca82f2273d185e4d41",
     ),
     (
-        "sherpa-onnx-moonshine-base-en-quantized-2026-02-27/tokens.txt",
-        "2870d843e14c1e187bf1913a521562a63b53933814bd7f2145120468f494a049",
+        "sherpa-onnx-whisper-base.en/base.en-tokens.txt",
+        "306cd27f03c1a714eca7108e03d66b7dc042abe8c258b44c199a7ed9838dd930",
     ),
     (
         "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17/encoder-epoch-99-avg-1.int8.onnx",
