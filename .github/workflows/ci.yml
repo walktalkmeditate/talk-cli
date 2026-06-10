@@ -1,0 +1,61 @@
+# talk-cli CI.
+#
+# Actions are pinned by full commit SHA (supply-chain hygiene); trailing comments
+# record the human-readable version. The gating clippy runs on a PINNED toolchain
+# (1.96.0) so `-D warnings` is deterministic; a separate non-gating `clippy-latest`
+# job runs @stable so new lints surface without blocking.
+#
+# Cargo.lock policy (spec §14 bump audit): any PR that changes Cargo.lock gets a
+# manual network-behavior review note. The no-egress steps below are the runtime
+# backstop — they are NOT a substitute for that human review.
+name: ci
+
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: 1.96.0
+          components: clippy
+      - run: cargo test --workspace
+      - run: cargo clippy --all-targets -- -D warnings # deterministic: pinned toolchain
+      - name: no-egress (Linux netns)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build
+          HOME=$(mktemp -d) unshare -rn target/debug/talk journal \
+            --from-text "no packets were harmed" --date 2026-06-09 --time 08:14
+      - name: no-egress (macOS sandbox) + privacy suite
+        if: runner.os == 'macOS'
+        run: cargo test --test privacy
+
+  # New clippy lints surface here without blocking the gate.
+  clippy-latest:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+          components: clippy
+      - run: cargo clippy --all-targets -- -D warnings
+
+  listen-build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: 1.96.0
+      - run: cargo build --features listen
+      - run: cargo test --features listen

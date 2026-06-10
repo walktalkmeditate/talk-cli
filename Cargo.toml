@@ -17,6 +17,12 @@ exclude = ["/crates", "/web", "/demo", "/docs", "/tests", "/.github"]
 name = "talk"
 path = "src/main.rs"
 
+# No-egress FFI probe for the privacy suite — needs the sherpa-onnx stack, so it
+# only builds under `--features listen`. Kept out of default `--all-targets` builds.
+[[example]]
+name = "ffi_probe"
+required-features = ["listen"]
+
 [features]
 listen = ["download", "dep:cpal", "dep:sherpa-onnx", "dep:coreaudio-sys", "dep:zeroize"]
 download = ["dep:ureq"]
