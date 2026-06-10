@@ -1,6 +1,6 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-06-10T22:13:22.367Z
+> Auto-maintained by OpenWolf. Last scanned: 2026-06-10T22:20:08.094Z
 > Files: 75 tracked | Anatomy hits: 0 | Misses: 0
 
 ## ../../../../../tmp/compound-engineering/ce-code-review/20260610-154006-9b113dea/
@@ -44,7 +44,7 @@
 
 ## .github/workflows/
 
-- `ci.yml` — talk-cli CI. (~654 tok)
+- `ci.yml` — talk-cli CI. (~754 tok)
 - `release.yml` — /*.tar.gz (~2253 tok)
 
 ## crates/talk-core/

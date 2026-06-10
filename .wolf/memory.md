@@ -152,3 +152,5 @@
 | 17:12 | Created install.sh | — | ~630 |
 | 17:13 | Created install.ps1 | — | ~595 |
 | 17:13 | Created .github/talk.rb.tpl | — | ~270 |
+| 17:19 | Edited .github/workflows/ci.yml | 6→10 lines | ~166 |
+| 17:20 | Edited .github/workflows/ci.yml | 4→5 lines | ~35 |

@@ -17,6 +17,7 @@ on:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
@@ -32,6 +33,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           cargo build
+          # ubuntu-24.04 runners restrict unprivileged user namespaces via AppArmor,
+          # so `unshare -rn` can't write /proc/self/uid_map. Relax it for the netns
+          # the no-egress check needs (the runner is ephemeral; scope is this step).
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           HOME=$(mktemp -d) unshare -rn target/debug/talk journal \
             --from-text "no packets were harmed" --date 2026-06-09 --time 08:14
       - name: no-egress (macOS sandbox) + privacy suite
