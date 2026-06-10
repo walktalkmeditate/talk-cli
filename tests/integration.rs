@@ -132,6 +132,24 @@ fn thread_lists_questions_by_recency() {
 }
 
 #[test]
+fn streak_credits_consecutive_days() {
+    let dir = tempfile::tempdir().unwrap();
+    talk(dir.path(), &["journal", "--from-text", "day one", "--date", "2026-06-08", "--time", "08:00"]);
+    talk(dir.path(), &["journal", "--from-text", "day two", "--date", "2026-06-09", "--time", "08:00"]);
+    let out = talk(dir.path(), &["streak"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("current run 2 days"), "{stdout}");
+}
+
+#[test]
+fn ephemeral_never_credits_streak() {
+    let dir = tempfile::tempdir().unwrap();
+    talk(dir.path(), &["unburden", "--from-text", "let it go", "--date", "2026-06-09", "--time", "08:00"]);
+    let out = talk(dir.path(), &["streak"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("No reflections yet"));
+}
+
+#[test]
 fn date_traversal_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let out = talk(dir.path(), &["journal", "--from-text", "x", "--date", "../escape", "--time", "08:14"]);

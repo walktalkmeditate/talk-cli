@@ -13,6 +13,7 @@ mod render;
 mod session;
 mod source;
 mod state;
+mod streak;
 mod writer;
 
 use clap::Parser;
@@ -55,7 +56,18 @@ fn main() -> std::io::Result<()> {
         }
         Some(Command::Config { action }) => return handle_config(action.as_deref()),
         Some(Command::Thread { question }) => print_thread(&base, question.as_deref()),
-        Some(Command::Streak) => println!("streak: (Plan 4)"),
+        Some(Command::Streak) => {
+            let s = streak::Streak::load_from(&base);
+            if s.entries == 0 {
+                println!("No reflections yet — run `talk` to start.");
+            } else {
+                println!("{} reflection{} · current run {} day{} · longest {}",
+                    s.entries, if s.entries == 1 { "" } else { "s" },
+                    s.current_streak, if s.current_streak == 1 { "" } else { "s" },
+                    s.longest_streak);
+            }
+            return Ok(());
+        }
         Some(Command::Download { target }) => return handle_download(target.as_deref()),
         Some(Command::Reflect) => reflect(&base, &args.question, &date, &time, &require_text(&args.from_text), &cfg)?,
         // Bare `talk`: honor config.default_mode (journal) unless a BYO question was given.
@@ -151,6 +163,13 @@ fn run_and_report(r: Report) -> std::io::Result<()> {
         })?;
     if let Some(p) = path {
         println!("→ {}", p.display());
+        // A saved entry credits the streak (ephemeral writes nothing, so it never
+        // reaches here with a path — gated anyway). Streak failure never blocks a save.
+        if !r.ephemeral {
+            if let Some(day) = streak::civil_day(r.date) {
+                let _ = streak::record_entry(r.base, day);
+            }
+        }
     }
     Ok(())
 }
@@ -284,6 +303,11 @@ fn run_live_session(
     if let Some(path) = written {
         let provenance = format!("entry {}", written_entry_count(&path));
         live::show_close(&path.display().to_string(), &provenance, "Stillness carries forward.")?;
+        // A saved live entry credits the streak. Ephemeral already returned above,
+        // so this path is never ephemeral. Streak failure never blocks the save.
+        if let Some(day) = streak::civil_day(date) {
+            let _ = streak::record_entry(base, day);
+        }
     }
     Ok(Some(Ok(())))
 }
