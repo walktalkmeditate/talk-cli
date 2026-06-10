@@ -41,7 +41,10 @@ pub fn run(
                 settle.commit(&raw, &clean);
             }
             Event::Revise(raw2) => {
-                let clean2 = guarded_format(cfg.formatter, cfg.level, &raw2);
+                // Pass-2 (Whisper) text is self-cased/punctuated — thin format only
+                // (spoken commands + backtrack + continuation de-cap), no re-cap.
+                let prev = settle.settled().last().map(|b| b.clean.clone());
+                let clean2 = talk_core::cleanup::format_revise(&raw2, prev.as_deref());
                 settle.revise_committing(&raw2, &clean2);
             }
             Event::Done => break,
@@ -131,7 +134,8 @@ mod tests {
         ]);
         let p = run(&mut src, Target::Journal, &cfg(dir.path(), false)).unwrap().unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
-        assert!(text.contains("The corrected transcription."));
+        // Whisper revise is thin-formatted — no force-capitalize or terminal punct.
+        assert!(text.contains("the corrected transcription"));
         assert!(!text.contains("streaming hypothesis"));
         assert!(text.contains("<!-- raw: the corrected transcription -->"));
     }
@@ -147,7 +151,9 @@ mod tests {
         ]);
         let p = run(&mut src, Target::Journal, &cfg(dir.path(), false)).unwrap().unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
-        assert!(text.contains("Alpha corrected."));
+        // Whisper revise is verbatim — no force-capitalize on the Revise path.
+        // Commit path (bravo) still uses guarded_format → deterministic_light.
+        assert!(text.contains("alpha corrected"));
         assert!(text.contains("Bravo streaming."));
         assert!(!text.contains("Alpha streaming."));
     }
@@ -159,6 +165,42 @@ mod tests {
         let out = run(&mut src, Target::Journal, &cfg(dir.path(), true)).unwrap();
         assert!(out.is_none());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn whisper_revise_is_thin_formatted_and_continuation_decapitalized() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut src = FakeTranscript::new(vec![
+            Event::Commit("rough one".into()),
+            Event::Revise("With their product.".into()),
+            Event::Commit("rough two".into()),
+            Event::Revise("All these edge cases.".into()),
+            Event::Done,
+        ]);
+        let p = run(&mut src, Target::Journal, &cfg(dir.path(), false)).unwrap().unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("With their product."));
+        // "With their product." ends in '.', so "All these" is a NEW sentence — capital KEPT.
+        assert!(text.contains("All these edge cases."));
+    }
+
+    #[test]
+    fn continuation_decapitalizes_across_an_unterminated_prior_revise() {
+        // The de-cap FIRING case: prior Revise ends without terminal punctuation, so
+        // a following allow-listed word ("All") is lowercased — the "just All these"
+        // mid-sentence-capital artifact, undone.
+        let dir = tempfile::tempdir().unwrap();
+        let mut src = FakeTranscript::new(vec![
+            Event::Commit("rough one".into()),
+            Event::Revise("with their product".into()), // no terminal punctuation
+            Event::Commit("rough two".into()),
+            Event::Revise("All these edge cases.".into()),
+            Event::Done,
+        ]);
+        let p = run(&mut src, Target::Journal, &cfg(dir.path(), false)).unwrap().unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("with their product all these edge cases."),
+            "de-cap should lowercase 'All' after an unterminated prior: {text}");
     }
 
     #[test]

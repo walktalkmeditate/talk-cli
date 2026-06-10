@@ -1,5 +1,5 @@
 //! No-egress FFI probe: drives the REAL sherpa-onnx inference stack (streaming
-//! Zipformer-20M first pass + Moonshine base second pass) from cached model files,
+//! Zipformer-20M first pass + Whisper base.en second pass) from cached model files,
 //! with NO network surface of its own. The
 //! `inference_stack_runs_under_deny_network_sandbox` privacy test shells out to this
 //! under a deny-network sandbox to prove the FFI path makes zero outbound calls.
@@ -27,7 +27,7 @@ fn main() {
         .nth(1)
         .expect("usage: ffi_probe <models_dir>");
     let models = Path::new(&models);
-    let moonshine = models.join("sherpa-onnx-moonshine-base-en-quantized-2026-02-27");
+    let whisper = models.join("sherpa-onnx-whisper-base.en");
     let zipformer = models.join("sherpa-onnx-streaming-zipformer-en-20M-2023-02-17");
 
     let mut live = streaming::Streaming::new(
@@ -47,17 +47,17 @@ fn main() {
     )
     .expect("streaming Zipformer loads from the cached model dir");
     let recognizer = stt::Stt::new(
-        moonshine
-            .join("encoder_model.ort")
+        whisper
+            .join("base.en-encoder.int8.onnx")
             .to_str()
             .expect("encoder path is UTF-8"),
-        moonshine
-            .join("decoder_model_merged.ort")
+        whisper
+            .join("base.en-decoder.int8.onnx")
             .to_str()
             .expect("decoder path is UTF-8"),
-        moonshine.join("tokens.txt").to_str().expect("tokens path is UTF-8"),
+        whisper.join("base.en-tokens.txt").to_str().expect("tokens path is UTF-8"),
     )
-    .expect("Moonshine base loads from the cached model dir");
+    .expect("Whisper base.en loads from the cached model dir");
 
     // ~2s of synthesized 16 kHz mono audio: 1s of silence, then a 440 Hz tone so
     // BOTH passes get a quiet stretch and a speech-like onset to chew on.

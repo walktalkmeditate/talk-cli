@@ -14,7 +14,7 @@ use resample::Resampler;
 use streaming::Streaming;
 use stt::Stt;
 
-/// Live mic → streaming Zipformer (pass 1) → Moonshine base (pass 2), running both
+/// Live mic → streaming Zipformer (pass 1) → Whisper base.en (pass 2), running both
 /// passes on a WORKER THREAD so the UI loop never blocks. `next()` is non-blocking:
 /// it drains a results channel. The worker is serial — it emits `Commit(streaming)`,
 /// runs pass-2, emits `Revise(better)`, then resumes feeding — so a Revise always
@@ -98,7 +98,10 @@ impl LiveSource {
                                 // The 20M streaming model is the weakest link — speech it
                                 // mishears as nothing must still reach the strong model.
                                 let text2 = stt::transcribe_chunked(&stt, &segment, 16_000);
-                                if !text2.trim().is_empty() {
+                                let secs = segment.len() as f32 / 16_000.0;
+                                if !text2.trim().is_empty()
+                                    && !stt::suspect_hallucination(&text2, secs)
+                                {
                                     // Self-paired so the rescue renders bright (= pass-2-final)
                                     // like every other finished phrase.
                                     let _ = tx.send(Event::Commit(text2.clone()));
@@ -135,7 +138,10 @@ impl LiveSource {
                         if !text2.trim().is_empty() { let _ = tx.send(Event::Revise(text2)); }
                     } else if plausibly_speech(&segment, RESCUE_MIN_FLUSH_SAMPLES) {
                         let text2 = stt::transcribe_chunked(&stt, &segment, 16_000);
-                        if !text2.trim().is_empty() {
+                        let secs = segment.len() as f32 / 16_000.0;
+                        if !text2.trim().is_empty()
+                            && !stt::suspect_hallucination(&text2, secs)
+                        {
                             let _ = tx.send(Event::Commit(text2.clone()));
                             let _ = tx.send(Event::Revise(text2));
                         }
@@ -203,7 +209,7 @@ const RESCUE_MIN_FLUSH_SAMPLES: usize = 5_600;
 
 /// A segment is plausibly speech (not a silence-only endpoint) when it outlasts the
 /// caller's duration floor AND its loudest 0.5s window clears the quiet-room RMS
-/// floor. Pure-silence endpoints fail this, so they cost zero Moonshine runs; only
+/// floor. Pure-silence endpoints fail this, so they cost zero Whisper runs; only
 /// segments that might carry words the 20M misheard as nothing are rescued by pass-2.
 fn plausibly_speech(samples: &[f32], min_samples: usize) -> bool {
     samples.len() > min_samples && peak_window_rms(samples) > RESCUE_RMS_FLOOR

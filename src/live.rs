@@ -60,9 +60,9 @@ fn apply_event(ev: Event, g: &mut EventGuards, settle: &mut Settle) -> bool {
     match ev {
         Event::Done => return true,
         Event::Revise(raw2) if !g.commit_dropped => {
-            let pre = talk_core::cleanup::apply_backtrack(
-                &talk_core::cleanup::apply_spoken_commands(&raw2));
-            settle.revise_committing(&raw2, &talk_core::cleanup::deterministic_light(&pre));
+            let prev = settle.settled().last().map(|b| b.clean.clone());
+            let clean = talk_core::cleanup::format_revise(&raw2, prev.as_deref());
+            settle.revise_committing(&raw2, &clean);
         }
         Event::Revise(_) => {} // paired Commit was dropped (off-record) → drop its pass-2 too
         Event::Commit(_) if g.paused => { g.commit_dropped = true; }

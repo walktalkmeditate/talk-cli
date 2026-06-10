@@ -256,7 +256,7 @@ fn download_verify_flags_a_tampered_artifact() {
     let home = tempfile::tempdir().unwrap();
     let models = tempfile::tempdir().unwrap();
     // Wrong bytes under a real manifest name → present but hash-mismatched.
-    let bad_name = "sherpa-onnx-moonshine-base-en-quantized-2026-02-27.tar.bz2";
+    let bad_name = "sherpa-onnx-whisper-base.en.tar.bz2";
     std::fs::write(models.path().join(bad_name), b"tampered").unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_talk"))
         .args(["download", "verify"])

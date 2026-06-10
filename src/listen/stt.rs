@@ -5,40 +5,40 @@ pub struct Stt {
 }
 
 impl Stt {
-    /// Paths from the unpacked quantized merged-decoder Moonshine base model dir:
-    /// `encoder_model.ort`, `decoder_model_merged.ort`, `tokens.txt`.
+    /// Paths from the unpacked Whisper base.en (int8) model dir:
+    /// `base.en-encoder.int8.onnx`, `base.en-decoder.int8.onnx`, `base.en-tokens.txt`.
     pub fn new(encoder: &str, decoder: &str, tokens: &str) -> Result<Stt, String> {
         let mut cfg = OfflineRecognizerConfig::default();
-        cfg.model_config.moonshine.encoder = Some(encoder.to_string());
-        cfg.model_config.moonshine.merged_decoder = Some(decoder.to_string());
+        cfg.model_config.whisper.encoder = Some(encoder.to_string());
+        cfg.model_config.whisper.decoder = Some(decoder.to_string());
+        cfg.model_config.whisper.language = Some("en".to_string());
+        cfg.model_config.whisper.task = Some("transcribe".to_string());
         cfg.model_config.tokens = Some(tokens.to_string());
         cfg.model_config.provider = Some("cpu".to_string());
         cfg.model_config.num_threads = 2;
         let recognizer = OfflineRecognizer::create(&cfg)
-            .ok_or_else(|| "failed to create Moonshine recognizer (check model paths)".to_string())?;
+            .ok_or_else(|| "failed to create Whisper recognizer (check model paths)".to_string())?;
         Ok(Stt { recognizer })
     }
 
-    /// Transcribe one 16 kHz mono segment (must fit the model envelope — use
-    /// `transcribe_chunked` for arbitrary lengths).
+    /// Transcribe one 16 kHz mono segment. Whisper takes one ≤30s window; use
+    /// `transcribe_chunked` for anything that could exceed it.
     pub fn transcribe(&self, samples: &[f32], sample_rate: i32) -> String {
         let stream = self.recognizer.create_stream();
         stream.accept_waveform(sample_rate, samples);
         self.recognizer.decode(&stream);
-        stream.get_result().map(|r| r.text).unwrap_or_default()
+        stream.get_result().map(|r| r.text.trim().to_string()).unwrap_or_default()
     }
 }
 
-/// The quantized Moonshine export decodes only short segments reliably — its
-/// decoder errors past the envelope and sherpa returns EMPTY text (measured on
-/// the pinned 2026-02-27 export: 8s ok, 10s fails), which once silently erased
-/// an entire pause-free monologue.
-const MAX_DECODE_SECS: f32 = 8.0;
-/// Preferred chunk cut point, searched ±CUT_SLACK_SECS for the quietest gap.
-const CUT_TARGET_SECS: f32 = 7.0;
-const CUT_SLACK_SECS: f32 = 0.75;
+/// Whisper decodes a fixed 30 s mel window; segments are ≤20 s (rule3 cap), so a
+/// single call covers them. The chunker only fires defensively past 30 s.
+const MAX_DECODE_SECS: f32 = 30.0;
+/// Preferred cut point, searched ±CUT_SLACK_SECS for the quietest gap.
+const CUT_TARGET_SECS: f32 = 28.0;
+const CUT_SLACK_SECS: f32 = 1.5;
 
-/// Transcribe a segment of ANY length: segments inside the model envelope go
+/// Transcribe a segment of ANY length: segments inside Whisper's 30 s window go
 /// straight through; longer ones are split at low-energy points (breath gaps,
 /// not mid-word, when possible) and the per-chunk transcripts joined — so no
 /// segment can ever vanish into an empty result.
@@ -82,30 +82,98 @@ fn quietest_cut(samples: &[f32], sample_rate: i32) -> usize {
     best.1
 }
 
+/// Natural speech tops out near 3 words/sec; above this density a transcript is
+/// implausible for the audio length.
+const HALLUCINATION_WPS_CEILING: f32 = 4.0;
+/// Grace added to the density ceiling so a short genuine clip isn't flagged.
+const HALLUCINATION_WORD_GRACE: f32 = 4.0;
+/// Whisper's signature non-speech / silence hallucinations (normalized: lowercase,
+/// punctuation-stripped). On the RESCUE path (pass-1 heard nothing) these are far
+/// likelier invented from silence than actually spoken — a reflection journal must
+/// never sprout "please subscribe" — so we drop them. The density/repeat heuristics
+/// below cannot catch these because they are short and plausibly-worded.
+const SILENCE_HALLUCINATIONS: &[&str] = &[
+    "thank you", "thank you very much", "thanks for watching",
+    "thank you for watching", "thanks for watching everyone", "please subscribe",
+    "please like and subscribe", "subscribe to my channel", "see you next time",
+    "see you in the next video", "the end", "you", "bye", "goodbye",
+    "subtitles by the amara.org community",
+];
+
+/// A Whisper transcript is a suspected hallucination over near-silence when it is a
+/// canned silence phrase, a single token repeated, or implausibly dense for the
+/// audio length. Used ONLY on the quiet-speech rescue path (pass-1 found nothing),
+/// where Whisper is most prone to inventing text from silence. Tokens are
+/// punctuation-stripped so `"you, you, you."` is still seen as a repeat.
+pub fn suspect_hallucination(text: &str, audio_secs: f32) -> bool {
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if SILENCE_HALLUCINATIONS.contains(&words.join(" ").as_str()) {
+        return true;
+    }
+    if words.len() < 4 {
+        // Too short for the density check; a repeated short token still reads as noise.
+        return words.len() >= 2 && words.iter().all(|w| *w == words[0]);
+    }
+    if words.len() as f32 > audio_secs * HALLUCINATION_WPS_CEILING + HALLUCINATION_WORD_GRACE {
+        return true;
+    }
+    words.iter().collect::<std::collections::HashSet<_>>().len() == 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn quietest_cut_lands_in_the_silent_gap() {
-        // 10s of "speech" (constant tone) with one silent 200ms dip at 7.3s.
+        // 32s of "speech" (constant tone) with one silent 200ms dip at 28.3s.
         let rate = 16_000;
-        let mut s = vec![0.5f32; 10 * rate];
-        let dip = (7.3 * rate as f32) as usize;
+        let mut s = vec![0.5f32; 32 * rate];
+        let dip = (28.3 * rate as f32) as usize;
         for x in &mut s[dip..dip + (rate / 5)] {
             *x = 0.0;
         }
         let cut = quietest_cut(&s, rate as i32);
         let cut_secs = cut as f32 / rate as f32;
-        assert!((7.3..7.6).contains(&cut_secs), "cut at {cut_secs}s, expected inside the dip");
+        assert!((28.3..28.6).contains(&cut_secs), "cut at {cut_secs}s, expected inside the dip");
     }
 
     #[test]
     fn quietest_cut_stays_inside_the_search_band() {
         let rate = 16_000;
-        let s = vec![0.5f32; 12 * rate]; // uniform: any window ties, first wins
+        let s = vec![0.5f32; 32 * rate]; // uniform: any window ties, first wins
         let cut = quietest_cut(&s, rate as i32);
         let cut_secs = cut as f32 / rate as f32;
-        assert!((6.2..=7.8).contains(&cut_secs), "cut at {cut_secs}s outside ±slack band");
+        // search band: CUT_TARGET_SECS ± CUT_SLACK_SECS = 28.0 ± 1.5 → [26.5, 29.5]
+        assert!((26.5..=29.5).contains(&cut_secs), "cut at {cut_secs}s outside ±slack band");
+    }
+
+    #[test]
+    fn suspect_hallucination_flags_repetition_and_density() {
+        assert!(suspect_hallucination("you you you you", 3.0));
+        assert!(suspect_hallucination("a b c d e f g h i j k l", 1.0));
+        assert!(!suspect_hallucination("oh well that worked", 1.3));
+        assert!(!suspect_hallucination("", 2.0));
+    }
+
+    #[test]
+    fn suspect_hallucination_flags_canonical_silence_phrases() {
+        // Whisper's signature silence outputs — short, plausible, density-passing.
+        assert!(suspect_hallucination("Thank you for watching.", 2.0));
+        assert!(suspect_hallucination("you", 1.0));
+        assert!(suspect_hallucination("Please subscribe!", 1.5));
+        assert!(suspect_hallucination("Bye.", 1.0));
+        // punctuation must not defeat the repeat check
+        assert!(suspect_hallucination("you, you, you, you.", 2.0));
+    }
+
+    #[test]
+    fn suspect_hallucination_keeps_genuine_short_speech() {
+        assert!(!suspect_hallucination("i feel grateful", 1.5));
+        assert!(!suspect_hallucination("that surprised me", 1.2));
     }
 }

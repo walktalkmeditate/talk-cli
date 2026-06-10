@@ -251,7 +251,7 @@ fn run_live_session(
 
     // Verify every model before loading anything; an unpinned / missing / mismatched
     // artifact means the session can't run yet. On a TTY we offer to fetch them now
-    // (a one-time ~239 MB download) and continue; otherwise we print the hint and
+    // (a one-time ~330 MB download) and continue; otherwise we print the hint and
     // exit non-zero (a clean failure — no terminal state or file has been touched).
     if !models_ready() {
         if interactive && offer_first_run_fetch()? {
@@ -270,14 +270,14 @@ fn run_live_session(
 
     // The live first pass loads the streaming Zipformer-20M transducer (int8
     // encoder/joiner + fp32 decoder — the standard sherpa recipe); pass-2
-    // transcription loads Moonshine base (drop-in for the old tiny `Stt`).
+    // transcription loads Whisper base.en (int8 encoder/decoder).
     let models = paths::models_dir();
-    let moonshine = models.join("sherpa-onnx-moonshine-base-en-quantized-2026-02-27");
+    let whisper = models.join("sherpa-onnx-whisper-base.en");
     let zipformer = models.join("sherpa-onnx-streaming-zipformer-en-20M-2023-02-17");
     let (Some(enc), Some(dec), Some(tok), Some(zenc), Some(zdec), Some(zjoin), Some(ztok)) = (
-        moonshine.join("encoder_model.ort").to_str().map(str::to_owned),
-        moonshine.join("decoder_model_merged.ort").to_str().map(str::to_owned),
-        moonshine.join("tokens.txt").to_str().map(str::to_owned),
+        whisper.join("base.en-encoder.int8.onnx").to_str().map(str::to_owned),
+        whisper.join("base.en-decoder.int8.onnx").to_str().map(str::to_owned),
+        whisper.join("base.en-tokens.txt").to_str().map(str::to_owned),
         zipformer.join("encoder-epoch-99-avg-1.int8.onnx").to_str().map(str::to_owned),
         zipformer.join("decoder-epoch-99-avg-1.onnx").to_str().map(str::to_owned),
         zipformer.join("joiner-epoch-99-avg-1.int8.onnx").to_str().map(str::to_owned),
@@ -453,8 +453,8 @@ fn byo_continue_or(base: &Path, q: &str) -> std::io::Result<Option<String>> {
     Ok(Some(if continue_it { existing_q.clone() } else { q.to_string() }))
 }
 
-/// First-run prompt: offer to fetch the Plan-5 models now (~239 MB is the stated
-/// total — moonshine base + streaming zipformer). The returning-user copy explains
+/// First-run prompt: offer to fetch the models now (~330 MB is the stated
+/// total — whisper base.en + streaming zipformer). The returning-user copy explains
 /// why the download grew and that the old caches are now dead weight. Reads one
 /// stdin line; only `y`/`Y` accepts.
 #[cfg(feature = "listen")]
@@ -462,7 +462,7 @@ fn offer_first_run_fetch() -> std::io::Result<bool> {
     use std::io::Write;
     print!(
         "talk's transcription engine changed (live streaming + a better model). \
-new models: ~239 MB, one time. your old models are no longer used (left in place, \
+new models: ~330 MB, one time. your old models are no longer used (left in place, \
 ~30 MB — harmless). download now? [y/N] "
     );
     std::io::stdout().flush()?;
@@ -503,7 +503,7 @@ fn models_ready() -> bool {
         download::verify(&dir.join(rel), sha).unwrap_or(false)
     });
     // Happy path: the extracted files are exactly what the session loads, so
-    // hashing THEM is the load-time guarantee. The ~239 MB archives are NOT touched
+    // hashing THEM is the load-time guarantee. The ~330 MB archives are NOT touched
     // here — only when healing below — so a normal launch hashes the ~178 MB it
     // actually loads instead of re-hashing the archives too (a real startup cost,
     // worst on a cold disk cache).
