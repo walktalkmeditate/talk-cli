@@ -165,6 +165,30 @@ fn ephemeral_never_credits_streak() {
 }
 
 #[test]
+fn raw_sidecar_config_routes_raw_out_of_the_main_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let talk_dir = dir.path().join("talk");
+    std::fs::create_dir_all(&talk_dir).unwrap();
+    std::fs::write(talk_dir.join("config.toml"), "raw_sidecar = true\n").unwrap();
+    let out = talk(dir.path(), &["journal", "--from-text", "um the verbatim words", "--date", "2026-06-09", "--time", "08:14"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+    let main = std::fs::read_to_string(talk_dir.join("2026-06-09.md")).unwrap();
+    assert!(!main.contains("<!-- raw"), "main file kept the inline raw: {main}");
+    let side = std::fs::read_to_string(talk_dir.join(".raw").join("2026-06-09.md")).unwrap();
+    assert!(side.contains("um the verbatim words"), "sidecar missing raw: {side}");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let dmode = std::fs::metadata(talk_dir.join(".raw")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dmode, 0o700);
+        let fmode = std::fs::metadata(talk_dir.join(".raw").join("2026-06-09.md")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(fmode, 0o600);
+    }
+}
+
+#[test]
 fn date_traversal_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let out = talk(dir.path(), &["journal", "--from-text", "x", "--date", "../escape", "--time", "08:14"]);

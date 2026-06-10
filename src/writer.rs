@@ -18,6 +18,9 @@ pub struct WriteRequest<'a> {
     pub raw: Option<&'a str>,
     pub clean: &'a str,
     pub keep_raw: bool,
+    /// Route the verbatim raw to `~/talk/.raw/<filename>` instead of an inline
+    /// comment in the main file (opt-in; `keep_raw=false` still means no raw).
+    pub raw_sidecar: bool,
     pub ephemeral: bool,
 }
 
@@ -38,7 +41,23 @@ pub fn write_entry(req: &WriteRequest) -> std::io::Result<Option<PathBuf>> {
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
 
     let raw = if req.keep_raw { req.raw } else { None };
-    let entry = Entry { date: req.date, time: req.time, raw, clean: req.clean };
+    // Sidecar mode pulls the raw out of the main file: the inline comment is
+    // dropped and the verbatim raw lands under `.raw/` instead.
+    let (inline_raw, sidecar_raw) = if req.raw_sidecar { (None, raw) } else { (raw, None) };
+    let entry = Entry { date: req.date, time: req.time, raw: inline_raw, clean: req.clean };
+
+    // Write the SIDECAR before the main file: a sidecar failure aborts before the
+    // entry exists, so the raw words are never silently dropped from a main file
+    // that nonetheless got written (the words stay in memory for the caller's
+    // recovery path). `.raw/` is created 0700 at creation (no umask window).
+    if let Some(r) = sidecar_raw {
+        let raw_dir = req.base.join(".raw");
+        crate::paths::ensure_base_dir(&raw_dir)?;
+        let side = raw_dir.join(path.file_name().expect("entry paths have file names"));
+        let existing_side = std::fs::read_to_string(&side).unwrap_or_default();
+        let appended = format!("{existing_side}## {} {}\n{r}\n\n", req.date, req.time);
+        write_private(&side, &appended)?;
+    }
 
     let new_contents = match &req.target {
         Target::Reflect { id, question, slug, pack, addressee } => {
@@ -89,7 +108,7 @@ mod tests {
             target: Target::Journal,
             date: "2026-06-08", time: "08:14",
             raw: Some("secret"), clean: "Secret.",
-            keep_raw: true, ephemeral: true,
+            keep_raw: true, raw_sidecar: false, ephemeral: true,
         };
         assert!(write_entry(&req).unwrap().is_none());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
@@ -107,7 +126,7 @@ mod tests {
                     id: "avoidance-core", question: "What am I avoiding?",
                     slug: "what-am-i-avoiding", pack: "examen", addressee: "self",
                 },
-                date, time: "08:14", raw: Some("um"), clean, keep_raw: true, ephemeral: false,
+                date, time: "08:14", raw: Some("um"), clean, keep_raw: true, raw_sidecar: false, ephemeral: false,
             }
         }
         write_entry(&mk(dir.path(), "2026-06-06", "First.")).unwrap();
@@ -126,10 +145,34 @@ mod tests {
         let req = WriteRequest {
             base: dir.path(), target: Target::Journal,
             date: "2026-06-08", time: "08:14",
-            raw: Some("secret"), clean: "Clean.", keep_raw: false, ephemeral: false,
+            raw: Some("secret"), clean: "Clean.", keep_raw: false, raw_sidecar: false, ephemeral: false,
         };
         let p = write_entry(&req).unwrap().unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(!text.contains("<!-- raw"));
+    }
+
+    #[test]
+    fn sidecar_routes_raw_out_of_the_main_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let req = WriteRequest {
+            base: dir.path(), target: Target::Journal,
+            date: "2026-06-09", time: "08:14",
+            raw: Some("um the verbatim words"), clean: "The verbatim words.",
+            keep_raw: true, raw_sidecar: true, ephemeral: false,
+        };
+        let p = write_entry(&req).unwrap().unwrap();
+        let main_text = std::fs::read_to_string(&p).unwrap();
+        assert!(!main_text.contains("<!-- raw"));
+        let side = dir.path().join(".raw").join(p.file_name().unwrap());
+        let side_text = std::fs::read_to_string(&side).unwrap();
+        assert!(side_text.contains("## 2026-06-09"));
+        assert!(side_text.contains("um the verbatim words"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dmode = std::fs::metadata(dir.path().join(".raw")).unwrap().permissions().mode();
+            assert_eq!(dmode & 0o777, 0o700);
+        }
     }
 }

@@ -47,11 +47,11 @@ fn main() -> std::io::Result<()> {
     match args.command {
         Some(Command::Journal) => {
             let text = require_text(&args.from_text);
-            run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, ephemeral: false, level: cfg.cleanup_for("journal"), held_day: None })?;
+            run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: false, level: cfg.cleanup_for("journal"), held_day: None })?;
         }
         Some(Command::Unburden) | Some(Command::Vent) => {
             let text = require_text(&args.from_text);
-            run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, ephemeral: true, level: talk_core::cleanup::Level::None, held_day: None })?;
+            run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: true, level: talk_core::cleanup::Level::None, held_day: None })?;
             println!("Released. Nothing was written.");
         }
         Some(Command::Config { action }) => return handle_config(action.as_deref()),
@@ -74,7 +74,7 @@ fn main() -> std::io::Result<()> {
         _ => {
             if args.question.is_none() && cfg.default_mode == "journal" {
                 let text = require_text(&args.from_text);
-                run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, ephemeral: false, level: cfg.cleanup_for("journal"), held_day: None })?;
+                run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: false, level: cfg.cleanup_for("journal"), held_day: None })?;
             } else {
                 reflect(&base, &args.question, &date, &time, &require_text(&args.from_text), &cfg)?;
             }
@@ -145,7 +145,7 @@ fn reflect(base: &Path, byo: &Option<String>, date: &str, time: &str, text: &str
     let c = reflect_choice(base, byo, time, &cfg.default_pack)?;
 
     let target = Target::Reflect { id: &c.id, question: &c.question, slug: &c.slug, pack: &c.pack, addressee: &c.addressee };
-    run_and_report(Report { base, target, date, time, text, keep_raw: cfg.keep_raw, ephemeral: false, level: cfg.cleanup_for("reflect"), held_day: c.held_day })?;
+    run_and_report(Report { base, target, date, time, text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: false, level: cfg.cleanup_for("reflect"), held_day: c.held_day })?;
     paths::write_private(&state_path(base), &c.state.save())?;
     Ok(())
 }
@@ -157,6 +157,7 @@ struct Report<'a> {
     time: &'a str,
     text: &'a str,
     keep_raw: bool,
+    raw_sidecar: bool,
     ephemeral: bool,
     level: talk_core::cleanup::Level,
     /// 1-based held-run day for the printed provenance; `None` for non-held entries.
@@ -166,7 +167,7 @@ struct Report<'a> {
 fn run_and_report(r: Report) -> std::io::Result<()> {
     let path = run(&mut FakeTranscript::from_text(r.text), r.target,
         &RunConfig {
-            base: r.base, date: r.date, time: r.time, keep_raw: r.keep_raw, ephemeral: r.ephemeral,
+            base: r.base, date: r.date, time: r.time, keep_raw: r.keep_raw, raw_sidecar: r.raw_sidecar, ephemeral: r.ephemeral,
             formatter: &talk_core::format::DeterministicFormatter, level: r.level,
         })?;
     if let Some(p) = path {
@@ -308,7 +309,7 @@ fn run_live_session(
     let written = writer::write_entry(&writer::WriteRequest {
         base, target, date, time,
         raw: Some(&result.raw), clean: &result.clean,
-        keep_raw: cfg.keep_raw, ephemeral,
+        keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral,
     })?;
 
     // Persist the reflect rotation only after the write succeeded.

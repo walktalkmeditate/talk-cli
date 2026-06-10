@@ -7,6 +7,7 @@ pub struct Config {
     pub base_dir: Option<String>,
     pub default_mode: String,        // "reflect" | "journal"
     pub keep_raw: bool,
+    pub raw_sidecar: bool,           // true: raw goes to ~/talk/.raw/, not inline
     pub auto_end_silence_seconds: u32, // 0 = off
     pub default_pack: String,
     pub reflect_cleanup: String,     // none | light | medium | high
@@ -19,6 +20,7 @@ impl Default for Config {
             base_dir: None,
             default_mode: "reflect".into(),
             keep_raw: true,
+            raw_sidecar: false,
             auto_end_silence_seconds: 0,
             default_pack: "spine".into(),
             reflect_cleanup: "light".into(),
@@ -46,12 +48,13 @@ impl Config {
              # base_dir = \"~/talk\"          # where reflections land\n\
              default_mode = \"{mode}\"          # bare `talk` runs this\n\
              keep_raw = {keep}                 # store verbatim transcript in a hidden comment\n\
+             raw_sidecar = {sidecar}           # true: verbatim raw goes to ~/talk/.raw/ (skipped by vault sync) instead of inline comments\n\
              auto_end_silence_seconds = {silence}  # 0 = off; you press space to finish\n\
              default_pack = \"{pack}\"\n\
              # cleanup levels: none · light · medium · high\n\
              reflect_cleanup = \"{rc}\"        # light: caps + punctuation + leading filler. \"um so i guess\" → \"I guess.\"\n\
              journal_cleanup = \"{jc}\"       # medium/high: deterministic-only in v1 (LLM enhances light); full LLM rewrite is future work\n",
-            mode = d.default_mode, keep = d.keep_raw,
+            mode = d.default_mode, keep = d.keep_raw, sidecar = d.raw_sidecar,
             silence = d.auto_end_silence_seconds, pack = d.default_pack,
             rc = d.reflect_cleanup, jc = d.journal_cleanup,
         )
