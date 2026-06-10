@@ -114,6 +114,24 @@ fn default_pack_config_serves_from_that_pack() {
 }
 
 #[test]
+fn thread_lists_questions_by_recency() {
+    let dir = tempfile::tempdir().unwrap();
+    talk(dir.path(), &["Old question?", "--from-text", "first words", "--date", "2026-06-01", "--time", "08:00"]);
+    talk(dir.path(), &["New question?", "--from-text", "second words", "--date", "2026-06-09", "--time", "08:00"]);
+    let out = talk(dir.path(), &["thread"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let new_pos = stdout.find("new-question").unwrap();
+    let old_pos = stdout.find("old-question").unwrap();
+    assert!(new_pos < old_pos, "most recent first:\n{stdout}");
+    assert!(stdout.contains("1 entr"));
+
+    let empty = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(empty.path().join("talk")).unwrap();
+    let out = talk(empty.path(), &["thread"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("No threads yet"));
+}
+
+#[test]
 fn date_traversal_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let out = talk(dir.path(), &["journal", "--from-text", "x", "--date", "../escape", "--time", "08:14"]);

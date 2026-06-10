@@ -386,19 +386,54 @@ fn print_thread(base: &Path, question: Option<&str>) {
                 None => println!("No thread yet for \"{}\".", q),
             }
         }
-        None => println!("(thread list — Plan 4)"),
+        None => {
+            let mut rows = existing_threads(base);
+            if rows.is_empty() {
+                println!("No threads yet — run `talk` to start one.");
+                return;
+            }
+            rows.sort_by(|a, b| b.last.cmp(&a.last)); // last-date desc (ISO dates sort lexically)
+            for t in rows {
+                println!("{} · {} {} · {}", t.slug, t.entries,
+                    if t.entries == 1 { "entry" } else { "entries" }, t.last);
+            }
+        }
     }
 }
 
-/// Scan the base dir for a reflect file whose frontmatter question matches `q`
-/// (covers spine id-named and collision-suffixed files).
-fn find_by_question(base: &Path, q: &str) -> Option<PathBuf> {
-    std::fs::read_dir(base).ok()?.flatten()
+/// One thread file's frontmatter plus its on-disk path, as scanned from the base
+/// dir.
+struct ThreadRow {
+    path: PathBuf,
+    slug: String,
+    entries: u32,
+    last: String,
+    question: String,
+}
+
+/// Scan the base dir for every thread file (frontmatter-bearing `.md`), parsing
+/// each into a `ThreadRow`. The `.md` filter excludes the `.raw/` subdir (a dir
+/// has no extension); journal date files have no frontmatter and drop out. Shared
+/// by `print_thread`'s list view and `find_by_question`.
+fn existing_threads(base: &Path) -> Vec<ThreadRow> {
+    std::fs::read_dir(base)
+        .into_iter()
+        .flatten()
+        .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|x| x == "md"))
-        .find(|p| std::fs::read_to_string(p).ok()
-            .and_then(|t| talk_core::frontmatter::Frontmatter::parse(&t).map(|(fm, _)| fm.question == q))
-            .unwrap_or(false))
+        .filter_map(|p| {
+            let text = std::fs::read_to_string(&p).ok()?;
+            let (fm, _) = talk_core::frontmatter::Frontmatter::parse(&text)?;
+            Some(ThreadRow { path: p, slug: fm.slug, entries: fm.entries, last: fm.last, question: fm.question })
+        })
+        .collect()
+}
+
+/// Find a reflect file whose frontmatter question matches `q` (covers spine
+/// id-named and collision-suffixed files). Returns its on-disk path.
+fn find_by_question(base: &Path, q: &str) -> Option<PathBuf> {
+    existing_threads(base).into_iter().find(|t| t.question == q).map(|t| t.path)
 }
 
 fn load_config() -> std::io::Result<config::Config> {
