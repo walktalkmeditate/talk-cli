@@ -3,6 +3,7 @@ use talk_core::entry::{append, Entry, Mode};
 use talk_core::frontmatter::Frontmatter;
 use crate::paths::write_private;
 
+#[derive(Clone, Copy)]
 pub enum Target<'a> {
     /// Reflect: one file per question, bound by id.
     Reflect { id: &'a str, question: &'a str, slug: &'a str, pack: &'a str, addressee: &'a str },

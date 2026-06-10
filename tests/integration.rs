@@ -195,3 +195,31 @@ fn date_traversal_is_rejected() {
     assert!(!out.status.success(), "a traversal date should fail, not write outside base");
     assert!(!dir.path().join("escape.md").exists());
 }
+
+/// A write that can't land must surface a clear non-zero failure on the
+/// `--from-text` seam (which has no interactive recovery loop — the live path's
+/// retry/clipboard/discard prompt is TTY-only). A read-only HOME blocks creating
+/// `~/talk` (the binary re-chmods an existing base dir 0o700 on startup, so
+/// chmod-ing the base dir itself is undone before the write — locking the parent
+/// is the reliable way to force the failure).
+#[cfg(unix)]
+#[test]
+fn write_failure_errors_non_zero_on_from_text_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    // Do NOT create ~/talk — a read-only HOME makes ensure_base_dir fail to
+    // create it, which is the write-path failure the --from-text seam must report.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let out = talk(dir.path(), &["journal", "--from-text", "x", "--date", "2026-06-09", "--time", "08:14"]);
+
+    // Restore perms FIRST so tempdir cleanup can recurse, regardless of asserts.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(!out.status.success(), "a write into a read-only home must exit non-zero");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.to_lowercase().contains("denied") || stderr.to_lowercase().contains("permission"),
+        "stderr should name the write failure: {stderr}"
+    );
+}

@@ -312,11 +312,44 @@ fn run_live_session(
         return Ok(Some(Ok(())));
     }
 
-    let written = writer::write_entry(&writer::WriteRequest {
-        base, target, date, time,
-        raw: Some(&result.raw), clean: &result.clean,
-        keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral,
-    })?;
+    // Write with in-session recovery (spec §13): on failure offer retry /
+    // clipboard / discard so the spoken words are never silently lost. Clipboard
+    // and discard exits return before the rotation save and streak credit — a
+    // failed write never burns the question (intentional). Discard zeroizes the
+    // in-memory transcript.
+    let mut attempts = 0u32;
+    let written = loop {
+        match writer::write_entry(&writer::WriteRequest {
+            base, target, date, time,
+            raw: Some(&result.raw), clean: &result.clean,
+            keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral,
+        }) {
+            Ok(w) => break w,
+            Err(e) => {
+                attempts += 1;
+                match live::ask_recover(&e.to_string(), attempts)? {
+                    live::Recover::Retry => continue,
+                    live::Recover::Clipboard => {
+                        match live::copy_to_clipboard(&result.clean) {
+                            Ok(()) => {
+                                render::paint_plain(&["  copied — note: clipboard managers and Universal Clipboard may keep or sync a copy.".to_string()])?;
+                            }
+                            Err(ce) => {
+                                render::paint_plain(&[format!("  clipboard failed too: {ce} — try [r]etry")])?;
+                                continue;
+                            }
+                        }
+                        return Ok(Some(Ok(())));
+                    }
+                    live::Recover::Discard => {
+                        result.raw.zeroize();
+                        result.clean.zeroize();
+                        return Ok(Some(Ok(())));
+                    }
+                }
+            }
+        }
+    };
 
     // Persist the reflect rotation only after the write succeeded.
     if let Some(c) = &choice {

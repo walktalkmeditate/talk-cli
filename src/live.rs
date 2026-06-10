@@ -191,3 +191,79 @@ pub fn show_released() -> std::io::Result<()> {
     paint_plain(&compose_released())?;
     await_keypress()
 }
+
+/// What the user chose at the write-failure prompt (spec §13).
+pub enum Recover {
+    Retry,
+    Clipboard,
+    Discard,
+}
+
+/// Inline write-failure prompt. Returns the chosen action.
+pub fn ask_recover(err: &str, attempts: u32) -> std::io::Result<Recover> {
+    let hint = if attempts >= 3 {
+        " (3 failures — clipboard recommended)"
+    } else {
+        ""
+    };
+    paint_plain(&[
+        format!("  write failed: {err}{hint}"),
+        "  [r]etry · [c]opy to clipboard · [d]iscard".to_string(),
+    ])?;
+    loop {
+        if let CtEvent::Key(k) = event::read()? {
+            match k.code {
+                KeyCode::Char('r') => return Ok(Recover::Retry),
+                KeyCode::Char('c') => return Ok(Recover::Clipboard),
+                KeyCode::Char('d') => return Ok(Recover::Discard),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Best-effort system clipboard (pbcopy / xclip). Errors surface to the caller.
+pub fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    let mut cmd = if cfg!(target_os = "macos") {
+        Command::new("pbcopy")
+    } else {
+        let mut c = Command::new("xclip");
+        c.args(["-selection", "clipboard"]);
+        c
+    };
+    let mut child = cmd.stdin(Stdio::piped()).spawn()?;
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(text.as_bytes())?;
+    let status = child.wait()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("clipboard helper exited non-zero"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// On macOS dev machines `pbcopy` exists — the helper should run cleanly.
+    /// Headless runners without a pasteboard make `pbcopy` fail to spawn; skip
+    /// there so CI doesn't flake.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn clipboard_roundtrip() {
+        if std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .is_err()
+        {
+            return;
+        }
+        copy_to_clipboard("x").unwrap();
+    }
+}
