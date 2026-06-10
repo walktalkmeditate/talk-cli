@@ -240,7 +240,7 @@ fn run_live_session(
 
     // Verify every model before loading anything; an unpinned / missing / mismatched
     // artifact means the session can't run yet. On a TTY we offer to fetch them now
-    // (a one-time ~219 MB download) and continue; otherwise we print the hint and
+    // (a one-time ~239 MB download) and continue; otherwise we print the hint and
     // exit non-zero (a clean failure — no terminal state or file has been touched).
     if !models_ready() {
         if interactive && offer_first_run_fetch()? {
@@ -437,7 +437,7 @@ fn byo_continue_or(base: &Path, q: &str) -> std::io::Result<Option<String>> {
     Ok(Some(if continue_it { existing_q.clone() } else { q.to_string() }))
 }
 
-/// First-run prompt: offer to fetch the Plan-5 models now (~219 MB is the stated
+/// First-run prompt: offer to fetch the Plan-5 models now (~239 MB is the stated
 /// total — moonshine base + streaming zipformer). The returning-user copy explains
 /// why the download grew and that the old caches are now dead weight. Reads one
 /// stdin line; only `y`/`Y` accepts.
@@ -446,7 +446,7 @@ fn offer_first_run_fetch() -> std::io::Result<bool> {
     use std::io::Write;
     print!(
         "talk's transcription engine changed (live streaming + a better model). \
-new models: ~219 MB, one time. your old models are no longer used (left in place, \
+new models: ~239 MB, one time. your old models are no longer used (left in place, \
 ~30 MB — harmless). download now? [y/N] "
     );
     std::io::stdout().flush()?;
