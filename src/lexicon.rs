@@ -17,7 +17,7 @@ impl Lexicon {
     /// Build from already-parsed corrections (pure; used by `load` and tests).
     pub fn from_map(map: BTreeMap<String, String>) -> Lexicon {
         let mut pairs: Vec<(String, String)> = map.into_iter().collect();
-        pairs.sort_by_key(|p| std::cmp::Reverse(p.0.len())); // longest key first
+        pairs.sort_by_key(|p| std::cmp::Reverse(p.0.len()));
         Lexicon { pairs }
     }
 
@@ -89,5 +89,22 @@ mod tests {
     fn shipped_template_parses_to_an_empty_map() {
         let f: LexiconFile = toml::from_str(template()).unwrap();
         assert!(f.corrections.is_empty());
+    }
+
+    #[test]
+    fn load_missing_file_is_empty() {
+        let lex = Lexicon::load(std::path::Path::new("/nonexistent/talk/lexicon.toml"));
+        assert!(lex.pairs.is_empty());
+    }
+
+    #[test]
+    fn load_malformed_toml_is_empty() {
+        let dir = std::env::temp_dir().join(format!("talk-lex-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("lexicon.toml");
+        std::fs::write(&p, "this is not = valid = toml [[[").unwrap();
+        let lex = Lexicon::load(&p);
+        assert!(lex.pairs.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

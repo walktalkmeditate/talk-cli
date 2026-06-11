@@ -236,6 +236,30 @@ mod tests {
     }
 
     #[test]
+    fn run_applies_lexicon_on_the_revise_arm_keeps_raw_verbatim() {
+        let lex = crate::lexicon::Lexicon::from_map(
+            [("TOC".to_string(), "talk".to_string())].into_iter().collect());
+        let dir = tempfile::tempdir().unwrap();
+        let mut src = FakeTranscript::new(vec![
+            Event::Commit("rough".into()),
+            Event::Revise("the TOC (applause) shipped".into()),
+            Event::Done,
+        ]);
+        let cfg = RunConfig {
+            base: dir.path(), date: "2026-06-08", time: "08:14", keep_raw: true,
+            raw_sidecar: false, ephemeral: false,
+            formatter: &talk_core::format::DeterministicFormatter, level: Level::Light,
+            lexicon: &lex,
+        };
+        let p = run(&mut src, Target::Journal, &cfg).unwrap().unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        let clean: String = text.lines().filter(|l| !l.trim_start().starts_with("<!--")).collect::<Vec<_>>().join("\n");
+        assert!(clean.contains("the talk shipped"));
+        assert!(!clean.contains("applause"));
+        assert!(text.contains("<!-- raw: the TOC (applause) shipped -->"));
+    }
+
+    #[test]
     fn an_over_editing_formatter_cannot_corrupt_the_file() {
         struct Flip;
         impl talk_core::format::Formatter for Flip {

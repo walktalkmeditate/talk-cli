@@ -602,8 +602,12 @@ fn handle_config(action: Option<&str>) -> std::io::Result<()> {
             if let Some(dir) = p.parent() { paths::ensure_base_dir(dir)?; }
             paths::write_private(&p, &config::Config::commented_template())?;
             let lp = paths::lexicon_path();
-            paths::write_private(&lp, lexicon::template())?;
-            println!("wrote {} and {}", p.display(), lp.display());
+            if lp.exists() {
+                println!("wrote {} (kept existing {})", p.display(), lp.display());
+            } else {
+                paths::write_private(&lp, lexicon::template())?;
+                println!("wrote {} and {}", p.display(), lp.display());
+            }
         }
         Some("path") => println!("{}", p.display()),
         _ => print!("{}", config::Config::commented_template()),

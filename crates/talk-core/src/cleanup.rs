@@ -232,7 +232,11 @@ pub fn strip_sound_tags(text: &str) -> String {
     while let Some(open) = rest.find(['(', '[']) {
         let open_ch = rest.as_bytes()[open];
         let close_ch = if open_ch == b'(' { ')' } else { ']' };
-        let Some(rel) = rest[open + 1..].find(close_ch) else { break }; // unmatched → stop
+        let Some(rel) = rest[open + 1..].find(close_ch) else {
+            out.push_str(&rest[..=open]);
+            rest = &rest[open + 1..];
+            continue;
+        };
         let close = open + 1 + rel;
         let inner = rest[open + 1..close].trim();
         let remove = if open_ch == b'(' {
@@ -266,16 +270,9 @@ fn is_event_bracket(inner: &str) -> bool {
     if SOUND_WORDS.contains(&inner.to_lowercase().as_str()) {
         return true;
     }
-    // all-caps event shape: only A-Z, '_', or space, with at least one A-Z.
-    let mut has_alpha = false;
-    for c in inner.chars() {
-        if c.is_ascii_uppercase() {
-            has_alpha = true;
-        } else if c != '_' && c != ' ' {
-            return false;
-        }
-    }
-    has_alpha
+    inner.contains('_')
+        && inner.chars().any(|c| c.is_ascii_uppercase())
+        && inner.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c == ' ')
 }
 
 /// Parse a config string into a `Level` (defaults to Light — the safe, restrained
@@ -516,8 +513,22 @@ mod tests {
     }
 
     #[test]
+    fn strip_sound_tags_keeps_user_acronyms_but_strips_whisper_events() {
+        assert_eq!(strip_sound_tags("the [FBI] case"), "the [FBI] case");
+        assert_eq!(strip_sound_tags("sign the [NDA] today"), "sign the [NDA] today");
+        assert_eq!(strip_sound_tags("a [TODO] item"), "a [TODO] item");
+        assert_eq!(strip_sound_tags("a [BLANK_AUDIO] b"), "a b");
+        assert_eq!(strip_sound_tags("a [MUSIC] b"), "a b");
+    }
+
+    #[test]
     fn strip_sound_tags_keeps_an_unmatched_bracket() {
         assert_eq!(strip_sound_tags("hello (world"), "hello (world"); // unmatched open → kept
+    }
+
+    #[test]
+    fn strip_sound_tags_skips_a_lone_opener_and_keeps_stripping() {
+        assert_eq!(strip_sound_tags("a [ b (buzzer) c"), "a [ b c");
     }
 
     #[test]

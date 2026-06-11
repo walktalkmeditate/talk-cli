@@ -17,14 +17,14 @@ pub fn apply_lexicon(text: &str, corrections: &[(String, String)]) -> String {
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     while i < b.len() {
-        let at_word_start = i == 0 || !b[i - 1].is_ascii_alphanumeric();
+        let at_word_start = text[..i].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
         let hit = if at_word_start {
             corrections.iter().find_map(|(key, val)| {
                 let kb = key.as_bytes();
                 let end = i + kb.len();
                 if !kb.is_empty() && end <= b.len()
                     && b[i..end].eq_ignore_ascii_case(kb)
-                    && (end == b.len() || !b[end].is_ascii_alphanumeric())
+                    && text[end..].chars().next().is_none_or(|c| !c.is_alphanumeric())
                 {
                     Some((kb.len(), val.as_str()))
                 } else {
@@ -37,7 +37,7 @@ pub fn apply_lexicon(text: &str, corrections: &[(String, String)]) -> String {
         match hit {
             Some((klen, val)) => {
                 out.push_str(val);
-                i += klen; // advance past the matched span — never re-scan output
+                i += klen;
             }
             None => {
                 let ch = text[i..].chars().next().expect("i on a char boundary");
@@ -96,5 +96,13 @@ mod tests {
     fn matches_key_at_end_of_input() {
         let c = pairs(&[("toc", "talk")]);
         assert_eq!(apply_lexicon("open toc", &c), "open talk"); // exercises end == b.len()
+    }
+
+    #[test]
+    fn does_not_match_across_a_non_ascii_letter_boundary() {
+        let c = pairs(&[("na", "X"), ("ve", "Y"), ("TOC", "talk")]);
+        assert_eq!(apply_lexicon("naïve", &c), "naïve");
+        assert_eq!(apply_lexicon("caféTOC", &c), "caféTOC");
+        assert_eq!(apply_lexicon("TOCé", &c), "TOCé");
     }
 }
