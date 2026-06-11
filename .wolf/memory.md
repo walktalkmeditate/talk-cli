@@ -238,3 +238,52 @@
 | 22:30 | Edited crates/talk-core/Cargo.toml | 2→2 lines | ~10 |
 | 22:30 | Edited Cargo.toml | 0.1 → 0.2 | ~16 |
 | 22:32 | Created ../../../../../tmp/palette_after.py | — | ~502 |
+| 22:36 | Edited ../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/talk-cli-build-state.md | modified MERGED() | ~584 |
+| 22:37 | Session end: 53 writes across 18 files (release.yml, talk-cli-build-state.md, MEMORY.md, README.md, record.py) | 36 reads | ~59818 tok |
+
+## Session: 2026-06-11 10:40
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+| 11:59 | Created docs/superpowers/specs/2026-06-11-talk-cli-config-paths-design.md | — | ~1886 |
+| 11:59 | Session end: 1 writes across 1 files (2026-06-11-talk-cli-config-paths-design.md) | 1 reads | ~3799 tok |
+| 12:06 | Created docs/superpowers/plans/2026-06-11-talk-cli-config-paths.md | — | ~3490 |
+| 12:08 | Edited src/paths.rs | modified config_dir_honors_xdg_then_falls_back() | ~153 |
+| 12:08 | Edited src/paths.rs | modified config_dir() | ~224 |
+| 12:08 | Edited src/main.rs | base_dir() → config_dir() | ~19 |
+| 12:08 | Edited tests/integration.rs | modified talk() | ~66 |
+| 12:08 | Edited tests/integration.rs | 2→2 lines | ~47 |
+| 12:08 | Edited tests/integration.rs | modified default_pack_config_serves_from_that_pack() | ~102 |
+| 12:08 | Edited tests/integration.rs | modified held_pack_prints_ascending_day_provenance() | ~123 |
+| 12:08 | Edited tests/integration.rs | modified pack_switch_pauses_the_held_run_and_restarts_fresh() | ~202 |
+| 12:09 | Edited tests/integration.rs | 2→2 lines | ~53 |
+| 12:09 | Edited tests/integration.rs | modified raw_sidecar_config_routes_raw_out_of_the_main_file() | ~103 |
+| 12:09 | Edited tests/integration.rs | modified held_seven_serves_one_question_across_days() | ~102 |
+| 12:11 | Edited src/paths.rs | modified config_dir_honors_xdg_then_falls_back() | ~225 |
+| 12:11 | Edited src/streak.rs | modified streak_file_is_not_dot_prefixed() | ~65 |
+| 12:11 | Edited src/paths.rs | modified config_dir() | ~90 |
+| 12:11 | Edited src/streak.rs | ".streak.toml" → "streak.toml" | ~12 |
+| 12:11 | Edited src/main.rs | modified state_path() | ~19 |
+| 12:11 | Edited src/main.rs | modified disclose_once() | ~81 |
+| 12:11 | Edited src/main.rs | 3→3 lines | ~32 |
+| 12:11 | Edited src/main.rs | 3→3 lines | ~44 |
+| 12:11 | Edited src/main.rs | inline fix | ~26 |
+| 12:12 | Edited src/main.rs | modified reflect() | ~40 |
+| 12:12 | Edited src/main.rs | 5→5 lines | ~23 |
+| 12:12 | Edited src/main.rs | 3→3 lines | ~24 |
+| 12:12 | Edited src/main.rs | 3→3 lines | ~27 |
+| 12:12 | Edited src/main.rs | 2→2 lines | ~27 |
+| 12:12 | Edited src/main.rs | modified civil_day() | ~48 |
+| 12:12 | Edited src/main.rs | modified is_some() | ~44 |
+| 12:12 | Edited src/main.rs | 4→5 lines | ~43 |
+| 12:12 | Edited tests/privacy.rs | modified talk() | ~68 |
+| 12:12 | Edited tests/privacy.rs | 6→6 lines | ~52 |
+| 12:14 | Task 2: data_dir() + state.json + streak.toml → ~/.local/share/talk; de-dot STREAK_FILE; repoint all callers; privacy.rs updated | src/paths.rs, src/main.rs, src/streak.rs, tests/privacy.rs | commit c221acc; all tests green, clippy clean | ~3500 |
+| 12:15 | Edited README.md | 3→5 lines | ~110 |
+| 12:19 | Created ../../../../../tmp/xdg_leak_test.sh | — | ~174 |
+| 12:24 | Edited src/paths.rs | modified xdg_dir() | ~168 |
+| 12:24 | Edited src/paths.rs | modified xdg_dir_uses_the_env_override_else_the_home_subdir() | ~149 |
+| 12:24 | Edited tests/privacy.rs | 5→7 lines | ~71 |
+| 12:24 | Edited tests/privacy.rs | 7→9 lines | ~59 |
+| 12:25 | Edited tests/privacy.rs | modified state_and_streak_land_private_in_the_data_dir() | ~365 |
+| 12:25 | Edited src/streak.rs | create_dir_all() → ensure_base_dir() | ~90 |

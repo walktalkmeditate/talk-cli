@@ -681,6 +681,118 @@
       "related_bugs": [],
       "occurrences": 2,
       "last_seen": "2026-06-11T03:30:02.337Z"
+    },
+    {
+      "id": "bug-042",
+      "timestamp": "2026-06-11T17:08:37.723Z",
+      "error_message": "Incorrect value in code",
+      "file": "tests/integration.rs",
+      "root_cause": "Had \"talk\"",
+      "fix": "Changed to \".config/talk\"",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-11T17:08:37.723Z"
+    },
+    {
+      "id": "bug-043",
+      "timestamp": "2026-06-11T17:09:03.751Z",
+      "error_message": "Wrong reference: talk_dir should be config_dir",
+      "file": "tests/integration.rs",
+      "root_cause": "Used \"talk_dir\" instead of \"config_dir\"",
+      "fix": "Changed talk_dir → config_dir",
+      "tags": [
+        "auto-detected",
+        "wrong-reference",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-11T17:09:03.751Z"
+    },
+    {
+      "id": "bug-044",
+      "timestamp": "2026-06-11T17:11:25.539Z",
+      "error_message": "Incorrect value in code",
+      "file": "src/streak.rs",
+      "root_cause": "Had \".streak.toml\"",
+      "fix": "Changed to \"streak.toml\"",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-11T17:11:25.539Z"
+    },
+    {
+      "id": "bug-045",
+      "timestamp": "2026-06-11T17:11:35.146Z",
+      "error_message": "Incorrect value in code",
+      "file": "src/main.rs",
+      "root_cause": "Had \".state.json\"",
+      "fix": "Changed to \"state.json\"",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-11T17:11:35.146Z"
+    },
+    {
+      "id": "bug-046",
+      "timestamp": "2026-06-11T17:11:54.945Z",
+      "error_message": "Wrong reference: base should be unwrap_or_default",
+      "file": "src/main.rs",
+      "root_cause": "Used \"base\" instead of \"unwrap_or_default\"",
+      "fix": "Changed base → unwrap_or_default",
+      "tags": [
+        "auto-detected",
+        "wrong-reference",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 2,
+      "last_seen": "2026-06-11T17:12:15.286Z"
+    },
+    {
+      "id": "bug-047",
+      "timestamp": "2026-06-11T17:24:19.196Z",
+      "error_message": "Significant refactor of ",
+      "file": "src/paths.rs",
+      "root_cause": "3 lines replaced/restructured",
+      "fix": "Rewrote 13→17 lines (3 removed) | Also: fn config_dir_honors_xdg_then_falls_back() {; std::env::set_var(\"XDG_CONFIG_HOME\", \"/tmp/xdg-con",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 2,
+      "last_seen": "2026-06-11T17:24:32.123Z"
+    },
+    {
+      "id": "bug-048",
+      "timestamp": "2026-06-11T17:25:42.758Z",
+      "error_message": "Significant refactor of ",
+      "file": "src/streak.rs",
+      "root_cause": "2 lines replaced/restructured",
+      "fix": "Rewrote 4→4 lines (2 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-11T17:25:42.758Z"
     }
   ]
 }
