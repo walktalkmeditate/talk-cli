@@ -559,7 +559,7 @@ fn empty_lex() -> crate::lexicon::Lexicon {
 }
 ```
 
-Then change each existing `apply_event(<ev>, &mut g, &mut settle)` in the tests to `apply_event(<ev>, &mut g, &mut settle, &empty_lex())`.
+Then change **every** existing `apply_event(<ev>, &mut g, &mut settle)` call in the test module to `apply_event(<ev>, &mut g, &mut settle, &empty_lex())` — there are ~10 of them across the pairing/pause/drain tests; a missed one is an arity-mismatch compile error. (Each `&empty_lex()` is a statement-scoped temporary, which compiles fine; the value-returning helper is intentionally simpler than session.rs's `cfg`, which must `Box::leak` because it *returns* an owned `RunConfig` that outlives the call.)
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -663,7 +663,18 @@ fn cfg(base: &Path, ephemeral: bool) -> RunConfig<'_> {
 }
 ```
 
-For the two inline `RunConfig { ... }` literals in the test module (`spoken_command_words_do_not_survive` and `an_over_editing_formatter_cannot_corrupt_the_file`), add `lexicon: &crate::lexicon::Lexicon::from_map(std::collections::BTreeMap::new())` to each.
+There are two inline `RunConfig { ... }` literals in the test module — they differ in lifetime and must be edited differently:
+
+- **`spoken_command_words_do_not_survive`** builds the `RunConfig` *inline as an argument* to `run(...)` in a single statement, so a borrowed temporary lives to the end of the statement. Add the field inline: `lexicon: &crate::lexicon::Lexicon::from_map(std::collections::BTreeMap::new()),`.
+- **`an_over_editing_formatter_cannot_corrupt_the_file`** does `let cfg = RunConfig { ... };` and uses `cfg` on a *later* line. An inline `&...from_map(...)` temporary would be dropped at the `let`'s semicolon → `error[E0716]: temporary value dropped while borrowed`. Bind it first:
+
+```rust
+let lex = crate::lexicon::Lexicon::from_map(std::collections::BTreeMap::new());
+let cfg = RunConfig {
+    base: dir.path(), date: "2026-06-08", time: "08:14", keep_raw: true, raw_sidecar: false, ephemeral: false,
+    formatter: &Flip, level: Level::Light, lexicon: &lex,
+};
+```
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -739,7 +750,7 @@ Run: `cargo build && env HOME=/tmp/lex-smoke ./target/debug/talk config init`
 Expected: prints `wrote /tmp/lex-smoke/.config/talk/config.toml and /tmp/lex-smoke/.config/talk/lexicon.toml`.
 
 Run: `printf '[corrections]\n"TOC" = "talk"\n' > /tmp/lex-smoke/.config/talk/lexicon.toml && env HOME=/tmp/lex-smoke ./target/debug/talk journal --from-text "open TOC (buzzer) now"`
-Expected: the written entry contains `open talk now` (no `TOC`, no `(buzzer)`); the `<!-- raw: -->` comment keeps `open TOC (buzzer) now`. (Inspect `/tmp/lex-smoke/talk/`.)
+Expected: the written entry contains `Open talk now.` (journal → DeterministicFormatter → `deterministic_light` caps the sentence start; no `TOC`, no `(buzzer)`); the `<!-- raw: -->` comment keeps `open TOC (buzzer) now`. (Inspect `/tmp/lex-smoke/talk/`.)
 
 - [ ] **Step 5: Commit**
 
