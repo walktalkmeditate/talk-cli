@@ -1,7 +1,12 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-06-11T02:11:38.081Z
-> Files: 76 tracked | Anatomy hits: 0 | Misses: 0
+> Auto-maintained by OpenWolf. Last scanned: 2026-06-11T03:32:31.689Z
+> Files: 80 tracked | Anatomy hits: 0 | Misses: 0
+
+## ../../../../../tmp/
+
+- `palette_after.py` — Render BEFORE (shipped) vs AFTER (this branch) of the talk reflect frame. (~502 tok)
+- `palette_preview.py` — Render candidate talk palettes as one terminal screen -> asciinema .cast. (~519 tok)
 
 ## ../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/
 
@@ -49,7 +54,7 @@
 
 ## crates/talk-core/
 
-- `Cargo.toml` — Rust package manifest (~95 tok)
+- `Cargo.toml` — Rust package manifest (~88 tok)
 
 ## crates/talk-core/src/
 
@@ -61,9 +66,9 @@
 - `frontmatter.rs` — Render as a `---`-delimited YAML block (trailing newline included). (~1054 tok)
 - `lib.rs` — The pure talk-cli engine. No I/O, no audio, no ML. (~88 tok)
 - `matchq.rs` — Near-match detection for bring-your-own questions, so a rephrasing offers to (~595 tok)
-- `palette.rs` — The talk pillar base tone — `rust`, from pilgrim-ios rust.colorset (light). (~320 tok)
+- `palette.rs` — The talk pillar brand tone — rust, from pilgrim-ios rust.colorset (light). The (~1294 tok)
 - `questions.rs` — Immutable identity — binds the thread, never derived from `text`. (~638 tok)
-- `render_model.rs` — Which mode's chrome to show. (~3931 tok)
+- `render_model.rs` — Which mode's chrome to show. (~3788 tok)
 - `selection.rs` — Caller-supplied selection state (persisted on disk by the binary). (~964 tok)
 - `settle.rs` — Raw is retained so `u` (raw⇄clean toggle) and recovery work. (~1908 tok)
 - `slug.rs` — Deterministic kebab slug for a bring-your-own question. (~931 tok)
@@ -80,11 +85,13 @@
 - `2026-06-09-talk-cli-plan3-formatter.md` — talk-cli Formatter + Restraint Implementation Plan (Plan 3 of 4) (~18728 tok)
 - `2026-06-09-talk-cli-plan4-packs-privacy.md` — talk-cli Packs, Privacy & Polish Implementation Plan (Plan 4 of 4) (~17451 tok)
 - `2026-06-09-talk-cli-plan5-streaming.md` — talk-cli Streaming Two-Pass Transcription Implementation Plan (Plan 5, v1.1) (~8658 tok)
+- `2026-06-10-talk-cli-palettes.md` — talk Palettes Implementation Plan (~6106 tok)
 - `2026-06-10-talk-cli-whisper-base-pass2.md` — Whisper base.en Pass-2 Swap — Implementation Plan (~5491 tok)
 
 ## docs/superpowers/specs/
 
 - `2026-06-08-talk-cli-design.md` — talk-cli — Design (v1, CLI) (~7007 tok)
+- `2026-06-10-talk-cli-palettes-design.md` — talk palettes — legible default + pinnable themes (~3424 tok)
 - `2026-06-10-talk-cli-whisper-threaded-pass2-design.md` — talk-cli — Whisper base.en Pass-2 Swap Design (v3) (~2801 tok)
 
 ## examples/
@@ -101,11 +108,11 @@
 
 ## src/
 
-- `cli.rs` — A bring-your-own question (bare `talk "..."`). (~402 tok)
-- `config.rs` — [derive(Clone, Debug, Serialize, Deserialize)] (~1013 tok)
+- `cli.rs` — A bring-your-own question (bare `talk "..."`). (~1050 tok)
+- `config.rs` — [derive(Clone, Debug, Serialize, Deserialize)] (~1080 tok)
 - `keymap.rs` — [derive(Clone, Copy, Debug, PartialEq, Eq)] (~465 tok)
-- `live.rs` — Curated close phrases (spec §7) — rotated by entry count so a returning user (~4978 tok)
-- `main.rs` — Declares Shape (~10099 tok)
+- `live.rs` — Curated close phrases (spec §7) — rotated by entry count so a returning user (~4662 tok)
+- `main.rs` — Declares Shape (~9534 tok)
 - `packs.rs` — Every pack compiled into the binary, in display order. (~583 tok)
 - `paths.rs` — Resolve the base dir: explicit override, else `TALK_BASE_DIR`, else `~/talk`. (~1778 tok)
 - `session.rs` — Consume the whole source, cleaning each committed phrase through (~2787 tok)
@@ -129,7 +136,7 @@
 
 ## src/render/
 
-- `mod.rs` — RAII terminal guard — restores the terminal on drop (incl. on panic), exactly (~556 tok)
+- `mod.rs` — RAII terminal guard — restores the terminal on drop (incl. on panic), exactly (~995 tok)
 
 ## tests/
 
