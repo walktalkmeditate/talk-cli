@@ -553,6 +553,134 @@
       "related_bugs": [],
       "occurrences": 1,
       "last_seen": "2026-06-11T02:11:30.739Z"
+    },
+    {
+      "id": "bug-034",
+      "timestamp": "2026-06-11T03:01:39.237Z",
+      "error_message": "Incorrect value in code",
+      "file": "docs/superpowers/plans/2026-06-10-talk-cli-palettes.md",
+      "root_cause": "Had `paint(&View, Palette)`",
+      "fix": "Changed to `LiveConfig.palette`",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "md"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-11T03:01:39.237Z"
+    },
+    {
+      "id": "bug-035",
+      "timestamp": "2026-06-11T03:01:49.797Z",
+      "error_message": "Significant refactor of ",
+      "file": "docs/superpowers/plans/2026-06-10-talk-cli-palettes.md",
+      "root_cause": "2 lines replaced/restructured",
+      "fix": "Rewrote 7→14 lines (2 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "md"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-11T03:01:49.797Z"
+    },
+    {
+      "id": "bug-036",
+      "timestamp": "2026-06-11T03:04:47.473Z",
+      "error_message": "Wrong operator: && should be >=",
+      "file": "crates/talk-core/src/palette.rs",
+      "root_cause": "Used \"&&\" instead of \">=\"",
+      "fix": "Changed operator && → >=",
+      "tags": [
+        "auto-detected",
+        "operator-fix",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-11T03:04:47.473Z"
+    },
+    {
+      "id": "bug-037",
+      "timestamp": "2026-06-11T03:05:14.411Z",
+      "error_message": "Significant refactor of ",
+      "file": "crates/talk-core/src/palette.rs",
+      "root_cause": "10 lines replaced/restructured",
+      "fix": "Rewrote 26→72 lines (10 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-11T03:05:14.411Z"
+    },
+    {
+      "id": "bug-038",
+      "timestamp": "2026-06-11T03:05:32.927Z",
+      "error_message": "Significant refactor of ",
+      "file": "src/render/mod.rs",
+      "root_cause": "5 lines replaced/restructured",
+      "fix": "Rewrote 19→33 lines (5 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-11T03:05:32.927Z"
+    },
+    {
+      "id": "bug-039",
+      "timestamp": "2026-06-11T03:08:27.479Z",
+      "error_message": "Wrong reference: Chrome should be Question",
+      "file": "crates/talk-core/src/render_model.rs",
+      "root_cause": "Used \"Chrome\" instead of \"Question\"",
+      "fix": "Changed Chrome → Question",
+      "tags": [
+        "auto-detected",
+        "wrong-reference",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-11T03:08:27.479Z"
+    },
+    {
+      "id": "bug-040",
+      "timestamp": "2026-06-11T03:29:48.137Z",
+      "error_message": "Significant refactor of ",
+      "file": "src/render/mod.rs",
+      "root_cause": "7 lines replaced/restructured",
+      "fix": "Rewrote 10→4 lines (7 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-11T03:29:48.137Z"
+    },
+    {
+      "id": "bug-041",
+      "timestamp": "2026-06-11T03:30:01.130Z",
+      "error_message": "Incorrect value in code",
+      "file": "crates/talk-core/Cargo.toml",
+      "root_cause": "Had \"0.1.0\"",
+      "fix": "Changed to \"0.2.0\"",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "toml"
+      ],
+      "related_bugs": [],
+      "occurrences": 2,
+      "last_seen": "2026-06-11T03:30:02.337Z"
     }
   ]
 }

@@ -28,6 +28,7 @@ pub struct LiveConfig<'a> {
     pub held_label: Option<&'a str>,
     pub cleanup: &'a str,
     pub ephemeral: bool,
+    pub palette: talk_core::palette::Palette,
 }
 
 /// Outcome the caller uses to persist (or not) and print the close screen.
@@ -119,7 +120,7 @@ pub fn run_loop(
             settle: &settle, listening, elapsed: &elapsed, cleanup: cfg.cleanup,
             show_raw, paused: guards.paused, confirm_cancel,
         };
-        paint(&v)?;
+        paint(&v, cfg.palette)?;
 
         if finished { break; }
 

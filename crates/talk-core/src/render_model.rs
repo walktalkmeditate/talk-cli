@@ -7,7 +7,7 @@ pub enum Mode { Reflect, Journal, Ephemeral }
 /// The tone a line paints in: Settled = bright core text, Edge = dim live edge,
 /// Chrome = the dimmest border/hint/status tone.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum LineKind { Chrome, Settled, Edge }
+pub enum LineKind { Chrome, Settled, Edge, Question }
 
 /// Everything the screen needs, with no I/O. The live session rebuilds this each
 /// frame from the Settle machine + clock + listening flag.
@@ -36,7 +36,7 @@ pub fn compose(v: &View) -> Vec<(String, LineKind)> {
         } else {
             out.push(("┌".to_string() + &"─".repeat(64), LineKind::Chrome));
         }
-        out.push((format!("│  {}", q), LineKind::Chrome));
+        out.push((format!("│  {}", q), LineKind::Question));
         out.push(("└".to_string() + &"─".repeat(64), LineKind::Chrome));
         out.push((String::new(), LineKind::Chrome));
     }
@@ -362,5 +362,18 @@ mod tests {
     #[test]
     fn released_frame_is_the_keeps_nothing_line() {
         assert_eq!(compose_released(), vec!["Released. Nothing was written.".to_string()]);
+    }
+
+    #[test]
+    fn question_line_is_its_own_kind_not_chrome() {
+        let s = Settle::new();
+        let mut v = base(Mode::Reflect, &s);
+        v.question = Some("What am I avoiding?");
+        let kind = compose(&v)
+            .into_iter()
+            .find(|(l, _)| l.contains("What am I avoiding?"))
+            .map(|(_, k)| k)
+            .expect("question line present");
+        assert_eq!(kind, LineKind::Question);
     }
 }

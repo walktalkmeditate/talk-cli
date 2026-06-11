@@ -341,8 +341,18 @@ fn run_live_session(
     let held_label = choice.as_ref().and_then(|c| c.held_day).map(|d| {
         format!("held {} day{}", d, if d == 1 { "" } else { "s" })
     });
+    let no_color = std::env::var_os("NO_COLOR").is_some()
+        || std::env::var("TERM").map(|t| t == "dumb").unwrap_or(false);
+    let theme = match cli::resolve_theme(no_color, args.palette, cfg.palette.as_deref()) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let palette = talk_core::palette::palette(theme);
     let live_cfg = live::LiveConfig {
-        mode: rmode, question, held_label: held_label.as_deref(), cleanup, ephemeral,
+        mode: rmode, question, held_label: held_label.as_deref(), cleanup, ephemeral, palette,
     };
     let mut result = live::run_loop(&mut source, finish_flag, pause, speaking, &live_cfg)?;
 
