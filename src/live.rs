@@ -63,8 +63,8 @@ fn apply_event(ev: Event, g: &mut EventGuards, settle: &mut Settle, lexicon: &cr
         Event::Done => return true,
         Event::Revise(raw2) if !g.commit_dropped => {
             let prev = settle.settled().last().map(|b| b.clean.clone());
-            let clean = talk_core::cleanup::format_revise(
-                &crate::lexicon::correct(&raw2, lexicon), prev.as_deref());
+            let corrected = crate::lexicon::correct(&raw2, lexicon);
+            let clean = talk_core::cleanup::format_revise(&corrected, prev.as_deref());
             settle.revise_committing(&raw2, &clean);
         }
         Event::Revise(_) => {} // paired Commit was dropped (off-record) → drop its pass-2 too
@@ -403,9 +403,25 @@ mod tests {
         apply_event(Event::Commit("open TOC (buzzer)".into()), &mut g, &mut settle, &lex);
         settle.finalize();
         let block = settle.settled().last().unwrap();
-        assert!(block.clean.to_lowercase().contains("open talk"));
+        assert!(block.clean.contains("Open talk")); // corrected + sentence-start capped
         assert!(!block.clean.contains("buzzer"));
         assert_eq!(block.raw, "open TOC (buzzer)"); // raw is verbatim
+    }
+
+    #[test]
+    fn revise_applies_lexicon_and_strips_tags_to_clean_only() {
+        let lex = crate::lexicon::Lexicon::from_map(
+            [("TOC".to_string(), "talk".to_string())].into_iter().collect(),
+        );
+        let mut settle = Settle::new();
+        let mut g = guards(false, false);
+        apply_event(Event::Commit("rough".into()), &mut g, &mut settle, &empty_lex());
+        apply_event(Event::Revise("the TOC (applause) shipped".into()), &mut g, &mut settle, &lex);
+        settle.finalize();
+        let block = settle.settled().last().unwrap();
+        assert!(block.clean.contains("the talk shipped")); // format_revise trusts Whisper casing
+        assert!(!block.clean.contains("applause"));
+        assert_eq!(block.raw, "the TOC (applause) shipped"); // verbatim pass-2 raw
     }
 
     /// On macOS dev machines `pbcopy` exists — copied text must read back via
