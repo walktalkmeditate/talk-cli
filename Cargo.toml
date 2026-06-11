@@ -5,7 +5,7 @@ members = ["crates/talk-core"]
 # unrelated crate); the installed command stays `talk` via the [[bin]] below.
 [package]
 name = "talk-cli"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.82"
 license = "MIT"
@@ -30,7 +30,10 @@ path = "src/main.rs"
 name = "ffi_probe"
 required-features = ["listen"]
 
+# talk is a voice CLI — the microphone (`listen`) is on by default so
+# `cargo install talk-cli` Just Works. Build text-only with `--no-default-features`.
 [features]
+default = ["listen"]
 listen = ["download", "dep:cpal", "dep:sherpa-onnx", "dep:coreaudio-sys", "dep:zeroize"]
 download = ["dep:ureq"]
 

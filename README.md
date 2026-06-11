@@ -40,6 +40,10 @@ brew install walktalkmeditate/tap/talk
 cargo install talk-cli
 ```
 
+This compiles the on-device speech stack (sherpa-onnx) — the first build takes a few
+minutes and needs a C/C++ toolchain. For a text-only build (no microphone), add
+`--no-default-features`.
+
 **One-line installer (macOS / Linux)**
 
 ```sh
