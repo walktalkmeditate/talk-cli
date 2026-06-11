@@ -5,6 +5,10 @@
 # (1.96.0) so `-D warnings` is deterministic; a separate non-gating `clippy-latest`
 # job runs @stable so new lints surface without blocking.
 #
+# `listen` (the sherpa-onnx mic stack) is the DEFAULT feature, so the fast `test` and
+# `clippy` jobs pass `--no-default-features` to stay text-only and quick; the
+# `listen-build` job exercises the full default (mic) build.
+#
 # Cargo.lock policy (spec §14 bump audit): any PR that changes Cargo.lock gets a
 # manual network-behavior review note. The no-egress steps below are the runtime
 # backstop — they are NOT a substitute for that human review.
@@ -27,12 +31,12 @@ jobs:
         with:
           toolchain: 1.96.0
           components: clippy
-      - run: cargo test --workspace
-      - run: cargo clippy --all-targets -- -D warnings # deterministic: pinned toolchain
+      - run: cargo test --workspace --no-default-features
+      - run: cargo clippy --all-targets --no-default-features -- -D warnings # deterministic: pinned toolchain
       - name: no-egress (Linux netns)
         if: runner.os == 'Linux'
         run: |
-          cargo build
+          cargo build --no-default-features
           # ubuntu-24.04 runners restrict unprivileged user namespaces via AppArmor,
           # so `unshare -rn` can't write /proc/self/uid_map. Relax it for the netns
           # the no-egress check needs (the runner is ephemeral; scope is this step).
@@ -53,7 +57,7 @@ jobs:
         with:
           toolchain: stable
           components: clippy
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --no-default-features -- -D warnings
 
   listen-build:
     runs-on: macos-latest
