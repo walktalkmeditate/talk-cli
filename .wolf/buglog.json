@@ -793,6 +793,38 @@
       "related_bugs": [],
       "occurrences": 1,
       "last_seen": "2026-06-11T17:25:42.758Z"
+    },
+    {
+      "id": "bug-049",
+      "timestamp": "2026-06-11T17:31:01.819Z",
+      "error_message": "Incorrect value in code",
+      "file": "Cargo.toml",
+      "root_cause": "Had \"0.1.0\"",
+      "fix": "Changed to \"0.2.0\"",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "toml"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-11T17:31:01.819Z"
+    },
+    {
+      "id": "bug-050",
+      "timestamp": "2026-06-11T17:51:49.161Z",
+      "error_message": "Incorrect value in code",
+      "file": "Cargo.toml",
+      "root_cause": "Had \"0.2.0\"",
+      "fix": "Changed to \"0.2.1\"",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "toml"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-11T17:51:49.161Z"
     }
   ]
 }

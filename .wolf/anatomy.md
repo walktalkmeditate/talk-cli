@@ -1,22 +1,27 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-06-11T17:25:42.746Z
-> Files: 79 tracked | Anatomy hits: 0 | Misses: 0
+> Auto-maintained by OpenWolf. Last scanned: 2026-06-11T17:51:49.135Z
+> Files: 81 tracked | Anatomy hits: 0 | Misses: 0
 
 ## ../../../../../tmp/
 
 - `xdg_leak_test.sh` (~174 tok)
 
+## ../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/
+
+- `MEMORY.md` — Memory index (~136 tok)
+- `talk-cli-build-state.md` (~4943 tok)
+
 ## ./
 
 - `.gitignore` — Git ignore rules (~112 tok)
-- `Cargo.toml` — Rust package manifest (~636 tok)
+- `Cargo.toml` — Rust package manifest (~641 tok)
 - `CLAUDE.md` — OpenWolf (~57 tok)
 - `DREAMING.md` — talk-cli — Dreaming Notes (~4818 tok)
 - `install.ps1` — talk installer (Windows). Downloads the latest release, verifies its checksum, (~595 tok)
 - `install.sh` — talk installer (macOS / Linux). Downloads the latest release binary, verifies its (~675 tok)
 - `LICENSE` — Project license (~285 tok)
-- `README.md` — Project documentation (~1501 tok)
+- `README.md` — Project documentation (~1549 tok)
 
 ## .claude/
 
@@ -39,7 +44,7 @@
 
 ## .github/workflows/
 
-- `ci.yml` — talk-cli CI. (~754 tok)
+- `ci.yml` — talk-cli CI. (~844 tok)
 - `release.yml` — /*.tar.gz (~2139 tok)
 
 ## crates/talk-core/
