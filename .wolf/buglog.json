@@ -825,6 +825,22 @@
       "related_bugs": [],
       "occurrences": 1,
       "last_seen": "2026-06-11T17:51:49.161Z"
+    },
+    {
+      "id": "bug-051",
+      "timestamp": "2026-06-11T18:28:55.717Z",
+      "error_message": "Significant refactor of ",
+      "file": "src/download/mod.rs",
+      "root_cause": "5 lines replaced/restructured",
+      "fix": "Rewrote 10→25 lines (5 removed) | Also: /// ever touches disk, so there is no bad file to ; pub fn fetch(art: &Artifact, dir: &Path) -> Result | Also: assert_eq!(read_capped(Cursor::new(b\"0123456789\"),; assert!(read_capped(Cursor::new(b\"0123456789!\"), 1",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "rs"
+      ],
+      "related_bugs": [],
+      "occurrences": 3,
+      "last_seen": "2026-06-11T18:30:03.062Z"
     }
   ]
 }
