@@ -211,6 +211,73 @@ fn ensure_terminal(text: &str) -> String {
     }
 }
 
+/// Non-speech event words Whisper emits inside `(...)`. A parenthesized span is
+/// removed only when EVERY inner word is in this set, so multi-word events
+/// (`(wind blowing)`) strip while a real aside (`(I think)`) survives.
+const SOUND_WORDS: &[&str] = &[
+    "buzzer", "buzzing", "music", "applause", "applauding", "laughter", "laughs",
+    "laughing", "coughs", "coughing", "cough", "sighs", "sigh", "beep", "beeping",
+    "breathing", "breath", "breathes", "static", "noise", "silence", "blank_audio",
+    "wind", "blowing", "clears", "throat", "typing", "footsteps", "door", "closes",
+    "knock", "knocking", "indistinct", "inaudible", "sniffles", "chuckles",
+];
+
+/// Remove Whisper's non-speech tags. `[...]` spans go only when a known tag or an
+/// all-caps event shape (`[BLANK_AUDIO]`); `(...)` spans go only when every inner
+/// word is a sound word. Runs in the pre-layer (before the content-word guard), so
+/// nothing it removes ever reaches the guard as a content-word change.
+pub fn strip_sound_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find(['(', '[']) {
+        let open_ch = rest.as_bytes()[open];
+        let close_ch = if open_ch == b'(' { ')' } else { ']' };
+        let Some(rel) = rest[open + 1..].find(close_ch) else { break }; // unmatched → stop
+        let close = open + 1 + rel;
+        let inner = rest[open + 1..close].trim();
+        let remove = if open_ch == b'(' {
+            is_all_sound_words(inner)
+        } else {
+            is_event_bracket(inner)
+        };
+        out.push_str(&rest[..open]);
+        if !remove {
+            out.push_str(&rest[open..=close]);
+        }
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn is_all_sound_words(inner: &str) -> bool {
+    let mut any = false;
+    for w in inner.split_whitespace() {
+        any = true;
+        let bare = w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+        if !SOUND_WORDS.contains(&bare.as_str()) {
+            return false;
+        }
+    }
+    any
+}
+
+fn is_event_bracket(inner: &str) -> bool {
+    if SOUND_WORDS.contains(&inner.to_lowercase().as_str()) {
+        return true;
+    }
+    // all-caps event shape: only A-Z, '_', or space, with at least one A-Z.
+    let mut has_alpha = false;
+    for c in inner.chars() {
+        if c.is_ascii_uppercase() {
+            has_alpha = true;
+        } else if c != '_' && c != ' ' {
+            return false;
+        }
+    }
+    has_alpha
+}
+
 /// Parse a config string into a `Level` (defaults to Light — the safe, restrained
 /// default — on anything unrecognized).
 pub fn parse_level(s: &str) -> Level {
@@ -424,5 +491,27 @@ mod tests {
     fn format_revise_trusts_whisper_casing_and_applies_features() {
         assert_eq!(format_revise("hello there", None), "hello there");
         assert_eq!(format_revise("first line new line second", None), "first line\nsecond");
+    }
+
+    #[test]
+    fn strip_sound_tags_removes_known_parenthesized_and_collapses_space() {
+        assert_eq!(strip_sound_tags("woke up (buzzer) early"), "woke up early");
+        assert_eq!(strip_sound_tags("(wind blowing) i sat down"), "i sat down");
+        assert_eq!(strip_sound_tags("then (clears throat) i spoke"), "then i spoke");
+    }
+
+    #[test]
+    fn strip_sound_tags_removes_bracketed_events_only() {
+        assert_eq!(strip_sound_tags("a [BLANK_AUDIO] b"), "a b");
+        assert_eq!(strip_sound_tags("a [MUSIC] b"), "a b");
+        // not an event shape → kept
+        assert_eq!(strip_sound_tags("see note [7] here"), "see note [7] here");
+        assert_eq!(strip_sound_tags("from [Smith] today"), "from [Smith] today");
+    }
+
+    #[test]
+    fn strip_sound_tags_keeps_real_words_and_asides() {
+        assert_eq!(strip_sound_tags("the buzzer rang"), "the buzzer rang"); // bare word kept
+        assert_eq!(strip_sound_tags("it works (I think) well"), "it works (I think) well");
     }
 }
