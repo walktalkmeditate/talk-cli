@@ -548,8 +548,7 @@ fn written_entry_count(path: &Path) -> usize {
     text.lines().filter(|l| l.starts_with("## ")).count().max(1)
 }
 
-// config.toml always lives at the default ~/talk; base_dir only relocates where entries land.
-fn config_path() -> PathBuf { paths::base_dir(None).join("config.toml") }
+fn config_path() -> PathBuf { paths::config_dir().join("config.toml") }
 
 fn handle_config(action: Option<&str>) -> std::io::Result<()> {
     let p = config_path();

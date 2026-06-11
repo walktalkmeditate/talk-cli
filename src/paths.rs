@@ -20,6 +20,28 @@ pub fn models_dir() -> PathBuf {
         .unwrap_or_else(|| base_dir(None).join("models"))
 }
 
+/// Where `config.toml` lives: `$XDG_CONFIG_HOME/talk`, else `~/.config/talk`.
+pub fn config_dir() -> PathBuf {
+    xdg_dir("XDG_CONFIG_HOME", ".config")
+}
+
+/// `$<env_var>/talk` when the env var is a valid absolute path (reusing
+/// `safe_env_dir`'s absolute + no-`..` check, which also ignores a relative
+/// `$XDG_*_HOME` per the XDG spec), else `~/<home_subdir>/talk`.
+fn xdg_dir(env_var: &str, home_subdir: &str) -> PathBuf {
+    if let Some(base) = safe_env_dir(env_var) {
+        return base.join("talk");
+    }
+    let mut dir = directories::UserDirs::new()
+        .map(|d| d.home_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    for part in home_subdir.split('/') {
+        dir.push(part);
+    }
+    dir.push("talk");
+    dir
+}
+
 /// Read an env-supplied dir, accepting it only if absolute and free of `..`
 /// components (reject traversal / relative paths). Warns + returns None otherwise.
 fn safe_env_dir(var: &str) -> Option<PathBuf> {
@@ -143,6 +165,16 @@ mod tests {
         assert!(resolve_base(Some("/etc")).is_err());           // outside home
         assert!(resolve_base(Some("/tmp/../etc")).is_err());    // '..' traversal
         assert!(resolve_base(None).is_ok());                    // default ok
+    }
+
+    #[test]
+    fn config_dir_honors_xdg_then_falls_back() {
+        std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-config-test");
+        assert_eq!(config_dir(), PathBuf::from("/tmp/xdg-config-test/talk"));
+        std::env::set_var("XDG_CONFIG_HOME", "relative/dir"); // not absolute → ignored
+        assert!(config_dir().ends_with(".config/talk"), "{:?}", config_dir());
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert!(config_dir().ends_with(".config/talk"), "{:?}", config_dir());
     }
 
     #[cfg(unix)]

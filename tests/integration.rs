@@ -5,7 +5,11 @@ use std::process::{Command, Output};
 // steers the binary's writes under the tempdir.
 fn talk(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_talk"))
-        .args(args).env("HOME", home).output().unwrap()
+        .args(args)
+        .env("HOME", home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME")
+        .output().unwrap()
 }
 
 #[test]
@@ -82,8 +86,8 @@ fn missing_from_text_errors_without_writing() {
 #[test]
 fn config_default_mode_journal_routes_bare_talk_to_journal() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join("talk")).unwrap();
-    std::fs::write(dir.path().join("talk/config.toml"), "default_mode = \"journal\"\n").unwrap();
+    std::fs::create_dir_all(dir.path().join(".config/talk")).unwrap();
+    std::fs::write(dir.path().join(".config/talk/config.toml"), "default_mode = \"journal\"\n").unwrap();
     let out = talk(dir.path(), &["--from-text", "just talking", "--date", "2026-06-08", "--time", "09:00"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     assert!(dir.path().join("talk/2026-06-08.md").exists(), "bare talk should have written a journal file");
@@ -108,7 +112,9 @@ fn default_pack_config_serves_from_that_pack() {
     let dir = tempfile::tempdir().unwrap();
     let talk_dir = dir.path().join("talk");
     std::fs::create_dir_all(&talk_dir).unwrap();
-    std::fs::write(talk_dir.join("config.toml"), "default_pack = \"examen\"\n").unwrap();
+    let config_dir = dir.path().join(".config/talk");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("config.toml"), "default_pack = \"examen\"\n").unwrap();
     let out = talk(dir.path(), &["--from-text", "today held more than i noticed", "--date", "2026-06-09", "--time", "20:30"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     // 20:30 → evening slot → examen's first evening question by declaration order.
@@ -139,7 +145,9 @@ fn held_pack_prints_ascending_day_provenance() {
     let dir = tempfile::tempdir().unwrap();
     let talk_dir = dir.path().join("talk");
     std::fs::create_dir_all(&talk_dir).unwrap();
-    std::fs::write(talk_dir.join("config.toml"), "default_pack = \"held\"\n").unwrap();
+    let config_dir = dir.path().join(".config/talk");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("config.toml"), "default_pack = \"held\"\n").unwrap();
     // A held:7 question stays selected across runs until the run completes — so
     // two consecutive runs are day 1 and day 2 of the same run.
     let day1 = talk(dir.path(), &["--from-text", "first day words", "--date", "2026-06-09", "--time", "10:00"]);
@@ -157,13 +165,15 @@ fn pack_switch_pauses_the_held_run_and_restarts_fresh() {
     let dir = tempfile::tempdir().unwrap();
     let talk_dir = dir.path().join("talk");
     std::fs::create_dir_all(&talk_dir).unwrap();
+    let config_dir = dir.path().join(".config/talk");
+    std::fs::create_dir_all(&config_dir).unwrap();
 
-    std::fs::write(talk_dir.join("config.toml"), "default_pack = \"held\"\n").unwrap();
+    std::fs::write(config_dir.join("config.toml"), "default_pack = \"held\"\n").unwrap();
     let day1 = talk(dir.path(), &["--from-text", "held words", "--date", "2026-06-09", "--time", "10:00"]);
     assert!(day1.status.success(), "stderr: {}", String::from_utf8_lossy(&day1.stderr));
     assert!(String::from_utf8_lossy(&day1.stdout).contains("held day 1"));
 
-    std::fs::write(talk_dir.join("config.toml"), "default_pack = \"spine\"\n").unwrap();
+    std::fs::write(config_dir.join("config.toml"), "default_pack = \"spine\"\n").unwrap();
     let switched = talk(dir.path(), &["--from-text", "spine words", "--date", "2026-06-10", "--time", "10:00"]);
     assert!(switched.status.success(), "stderr: {}", String::from_utf8_lossy(&switched.stderr));
     assert!(
@@ -176,7 +186,7 @@ fn pack_switch_pauses_the_held_run_and_restarts_fresh() {
         .count();
     assert_eq!(spine_files, 1, "the switch must serve a spine question");
 
-    std::fs::write(talk_dir.join("config.toml"), "default_pack = \"held\"\n").unwrap();
+    std::fs::write(config_dir.join("config.toml"), "default_pack = \"held\"\n").unwrap();
     let fresh = talk(dir.path(), &["--from-text", "held again", "--date", "2026-06-11", "--time", "10:00"]);
     assert!(fresh.status.success(), "stderr: {}", String::from_utf8_lossy(&fresh.stderr));
     assert!(
@@ -208,7 +218,9 @@ fn raw_sidecar_config_routes_raw_out_of_the_main_file() {
     let dir = tempfile::tempdir().unwrap();
     let talk_dir = dir.path().join("talk");
     std::fs::create_dir_all(&talk_dir).unwrap();
-    std::fs::write(talk_dir.join("config.toml"), "raw_sidecar = true\n").unwrap();
+    let config_dir = dir.path().join(".config/talk");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("config.toml"), "raw_sidecar = true\n").unwrap();
     let out = talk(dir.path(), &["journal", "--from-text", "um the verbatim words", "--date", "2026-06-09", "--time", "08:14"]);
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
 
@@ -336,7 +348,9 @@ fn held_seven_serves_one_question_across_days() {
     let dir = tempfile::tempdir().unwrap();
     let talk_dir = dir.path().join("talk");
     std::fs::create_dir_all(&talk_dir).unwrap();
-    std::fs::write(talk_dir.join("config.toml"), "default_pack = \"held\"\n").unwrap();
+    let config_dir = dir.path().join(".config/talk");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("config.toml"), "default_pack = \"held\"\n").unwrap();
 
     let mut out7 = String::new();
     for day in 1..=7 {
