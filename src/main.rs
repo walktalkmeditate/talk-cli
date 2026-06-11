@@ -353,8 +353,10 @@ fn run_live_session(
         }
     };
     let palette = talk_core::palette::palette(theme);
+    let live_lexicon = lexicon::Lexicon::load(&paths::lexicon_path());
     let live_cfg = live::LiveConfig {
         mode: rmode, question, held_label: held_label.as_deref(), cleanup, ephemeral, palette,
+        lexicon: &live_lexicon,
     };
     let mut result = live::run_loop(&mut source, finish_flag, pause, speaking, &live_cfg)?;
 
