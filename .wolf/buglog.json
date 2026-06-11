@@ -435,6 +435,22 @@
       "related_bugs": [],
       "occurrences": 1,
       "last_seen": "2026-06-10T23:24:53.034Z"
+    },
+    {
+      "id": "bug-027",
+      "timestamp": "2026-06-11T00:33:16.149Z",
+      "error_message": "Incorrect value in code",
+      "file": "../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/talk-cli-build-state.md",
+      "root_cause": "Had `v0.1.0`",
+      "fix": "Changed to `exclude`",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "md"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-11T00:33:16.149Z"
     }
   ]
 }

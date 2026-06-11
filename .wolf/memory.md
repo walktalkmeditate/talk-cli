@@ -164,3 +164,5 @@
 | 19:23 | Session end: 123 writes across 33 files (statusline.sh, pass_probe.rs, cleanup.rs, session.rs, format.rs) | 34 reads | ~152252 tok |
 | 19:26 | Session end: 123 writes across 33 files (statusline.sh, pass_probe.rs, cleanup.rs, session.rs, format.rs) | 34 reads | ~152252 tok |
 | 19:29 | Edited Cargo.toml | 1→6 lines | ~67 |
+| 19:30 | Session end: 124 writes across 33 files (statusline.sh, pass_probe.rs, cleanup.rs, session.rs, format.rs) | 34 reads | ~152324 tok |
+| 19:33 | Edited ../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/talk-cli-build-state.md | "v0.1.0" → "exclude" | ~282 |
