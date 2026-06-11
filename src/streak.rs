@@ -83,9 +83,9 @@ pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 /// Record one saved entry under an exclusive file lock (read-modify-write, not
-/// last-writer-wins), creating the file 0600.
+/// last-writer-wins), creating the dir 0700 and the file 0600.
 pub fn record_entry(dir: &Path, today: i64) -> std::io::Result<Streak> {
-    std::fs::create_dir_all(dir)?;
+    crate::paths::ensure_base_dir(dir)?; // 0700 — the private-state perm guarantee is the writer's, not the caller's
     let mut opts = OpenOptions::new();
     opts.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]

@@ -48,6 +48,32 @@ fn ephemeral_leaves_zero_bytes_in_the_base_dir() {
     );
 }
 
+/// A kept session writes state + streak to the XDG data dir, private (dir 0700,
+/// files 0600) — and `~/talk` carries only the reflection markdown, no dotfiles.
+#[cfg(unix)]
+#[test]
+fn state_and_streak_land_private_in_the_data_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let out = talk(
+        dir.path(),
+        &["journal", "--from-text", "a kept note", "--date", "2026-06-11", "--time", "08:00"],
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+    let data = dir.path().join(".local/share/talk");
+    let state = data.join("state.json");
+    let streak = data.join("streak.toml");
+    assert!(state.exists() && streak.exists(), "state/streak not written to the data dir");
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&data), 0o700, "data dir not 0700");
+    assert_eq!(mode(&state), 0o600, "state.json not 0600");
+    assert_eq!(mode(&streak), 0o600, "streak.toml not 0600");
+    // ~/talk is purely reflections — no machine-state dotfiles leaked back in.
+    assert!(!dir.path().join("talk/.state.json").exists());
+    assert!(!dir.path().join("talk/.streak.toml").exists());
+}
+
 /// A tampered cached model must refuse to run (verify-before-load, spec §11/§14).
 /// Runs only in listen builds: the gate lives in the live-session path. The
 /// process runs non-TTY (Command::output), so T9's first-run fetch offer is
@@ -192,6 +218,8 @@ fn run_reflect(home: &Path, models: &Path) -> Output {
         .args(["reflect"]) // no --from-text → live path → verify gate fires pre-mic
         .env("HOME", home)
         .env("TALK_MODELS_DIR", models)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME")
         .output()
         .unwrap()
 }
@@ -219,6 +247,8 @@ fn text_pipeline_makes_no_network_calls_under_sandbox() {
             "08:14",
         ])
         .env("HOME", home.path())
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME")
         .output()
         .unwrap();
     assert!(
