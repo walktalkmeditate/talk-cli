@@ -2,6 +2,7 @@
 
 pub mod cleanup;
 pub mod clock;
+pub mod lexicon;
 pub mod entry;
 pub mod eval;
 pub mod format;
