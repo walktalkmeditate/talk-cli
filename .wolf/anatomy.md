@@ -1,11 +1,16 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-06-11T01:36:13.501Z
-> Files: 73 tracked | Anatomy hits: 0 | Misses: 0
+> Auto-maintained by OpenWolf. Last scanned: 2026-06-11T02:11:38.081Z
+> Files: 76 tracked | Anatomy hits: 0 | Misses: 0
 
 ## ../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/
 
-- `talk-cli-build-state.md` (~3540 tok)
+- `MEMORY.md` — Memory index (~111 tok)
+- `talk-cli-build-state.md` (~3803 tok)
+
+## ../../../talk/
+
+- `.streak.toml` (~18 tok)
 
 ## ./
 
@@ -16,7 +21,7 @@
 - `install.ps1` — talk installer (Windows). Downloads the latest release, verifies its checksum, (~595 tok)
 - `install.sh` — talk installer (macOS / Linux). Downloads the latest release binary, verifies its (~675 tok)
 - `LICENSE` — Project license (~285 tok)
-- `README.md` — Project documentation (~564 tok)
+- `README.md` — Project documentation (~1448 tok)
 
 ## .claude/
 
@@ -63,6 +68,10 @@
 - `settle.rs` — Raw is retained so `u` (raw⇄clean toggle) and recovery work. (~1908 tok)
 - `slug.rs` — Deterministic kebab slug for a bring-your-own question. (~931 tok)
 - `test_support.rs` — Shared test-only formatter mocks, so format.rs and eval.rs can't drift apart. (~246 tok)
+
+## demo/
+
+- `record.py` — Record a real `talk` session to an asciinema .cast for the README demo. (~1288 tok)
 
 ## docs/superpowers/plans/
 

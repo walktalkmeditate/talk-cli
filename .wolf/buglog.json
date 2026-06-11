@@ -46,8 +46,8 @@
       "timestamp": "2026-06-10T14:58:39.357Z",
       "error_message": "Incorrect value in code",
       "file": "../../../.claude/statusline.sh",
-      "root_cause": "Had \" ${DIM}\u27f2$(countdown $((FIVE_RESET - NOW)))${RESET",
-      "fix": "Changed to \" ${DIM}\u27f2 $(countdown $((FIVE_RESET - NOW)))${RESE",
+      "root_cause": "Had \" ${DIM}⟲$(countdown $((FIVE_RESET - NOW)))${RESET",
+      "fix": "Changed to \" ${DIM}⟲ $(countdown $((FIVE_RESET - NOW)))${RESE",
       "tags": [
         "auto-detected",
         "wrong-value",
@@ -60,10 +60,10 @@
     {
       "id": "bug-003",
       "timestamp": "2026-06-10T15:01:38Z",
-      "error_message": "user: refresh icon (\u27f2) overlaps the hour digit in the rate-limit countdown",
+      "error_message": "user: refresh icon (⟲) overlaps the hour digit in the rate-limit countdown",
       "file": "~/.claude/statusline.sh",
-      "root_cause": "the \u27f2 glyph (U+27F2) has a near-zero advance width in the user terminal font, so the following digit renders on top of it",
-      "fix": "added a space after \u27f2 (\u27f2 2h5m) so the next char starts a full cell clear of the glyph; also collapsed to a single line and stripped the verbose ((1M context)) suffix from the model name",
+      "root_cause": "the ⟲ glyph (U+27F2) has a near-zero advance width in the user terminal font, so the following digit renders on top of it",
+      "fix": "added a space after ⟲ (⟲ 2h5m) so the next char starts a full cell clear of the glyph; also collapsed to a single line and stripped the verbose ((1M context)) suffix from the model name",
       "tags": [
         "statusline",
         "unicode",
@@ -80,7 +80,7 @@
       "error_message": "Significant refactor of ",
       "file": "crates/talk-core/src/cleanup.rs",
       "root_cause": "7 lines replaced/restructured",
-      "fix": "Rewrote 12\u219218 lines (7 removed) | Also: let lw = first.to_lowercase();; if FILLERS.contains(&lw.as_str()) { words.remove(0",
+      "fix": "Rewrote 12→18 lines (7 removed) | Also: let lw = first.to_lowercase();; if FILLERS.contains(&lw.as_str()) { words.remove(0",
       "tags": [
         "auto-detected",
         "refactor",
@@ -109,9 +109,9 @@
     {
       "id": "bug-007",
       "timestamp": "2026-06-10T17:40:00Z",
-      "error_message": "user: 'sometimes it's cleaning up too much' \u2014 e.g. spoken 'I sometimes...' written as 'Sometimes...' (leading 'I' dropped); separately saw 'sometimes' become 'times'",
+      "error_message": "user: 'sometimes it's cleaning up too much' — e.g. spoken 'I sometimes...' written as 'Sometimes...' (leading 'I' dropped); separately saw 'sometimes' become 'times'",
       "file": "crates/talk-core/src/cleanup.rs",
-      "root_cause": "TWO distinct causes. (1) Post-processing: strip_leading_fillers used the broad FILLERS set (incl. i/you/so/well/like/know/mean), so a LEADING subject pronoun or discourse opener was dropped as if a disfluency ('I sometimes forget'->'Sometimes forget'). The FILLERS set is meant for the content-word GUARD's both-sides comparison, NOT as a strip list. (2) 'sometimes'->'times' is NOT post-processing \u2014 proven: cleanup keeps 'some' in every case (static + dynamic). It is pass-2 Moonshine base occasionally mishearing the word on real voice; the live edge shows pass-1 (zipformer) correct, then the pass-2 revise swaps in the worse word.",
+      "root_cause": "TWO distinct causes. (1) Post-processing: strip_leading_fillers used the broad FILLERS set (incl. i/you/so/well/like/know/mean), so a LEADING subject pronoun or discourse opener was dropped as if a disfluency ('I sometimes forget'->'Sometimes forget'). The FILLERS set is meant for the content-word GUARD's both-sides comparison, NOT as a strip list. (2) 'sometimes'->'times' is NOT post-processing — proven: cleanup keeps 'some' in every case (static + dynamic). It is pass-2 Moonshine base occasionally mishearing the word on real voice; the live edge shows pass-1 (zipformer) correct, then the pass-2 revise swaps in the worse word.",
       "fix": "Added LEADING_DISFLUENCIES = [um,uh,er,ah,mm,hmm,uhm,erm,hm] (non-lexical only); strip_leading_fillers now strips ONLY that set (with leading-punct trim), never FILLERS. FILLERS retained unchanged for guard_accepts. Updated 2 tests that encoded the old over-strip (session.rs, format.rs) to the corrected 'So I keep...' output. 'times' case left as a model property, surfaced to user (no blind pass-2 change).",
       "tags": [
         "cleanup",
@@ -133,7 +133,7 @@
       "error_message": "Significant refactor of ",
       "file": "src/main.rs",
       "root_cause": "3 lines replaced/restructured",
-      "fix": "Rewrote 25\u219230 lines (3 removed)",
+      "fix": "Rewrote 25→30 lines (3 removed)",
       "tags": [
         "auto-detected",
         "refactor",
@@ -148,8 +148,8 @@
       "timestamp": "2026-06-10T18:20:00Z",
       "error_message": "user: 'when the cli is starting it doesn't seem to be working in the beginning - ~5s delay'",
       "file": "src/main.rs",
-      "root_cause": "Startup hashed 417MB every launch: models_ready() verified the .tar.bz2 ARCHIVES (239MB) AND the extracted weights (178MB). Only the extracted files are loaded; archives are needed only for healing. Plus there was NO loading indicator, so the ~1-2s warm / ~5s cold (cold disk read of 417MB) gap before the alternate-screen UI looked hung, and the mic isn't open yet so the user's first words were lost. Model LOAD itself is only ~0.6s (zipformer 245ms + moonshine 343ms) \u2014 not the bottleneck.",
-      "fix": "models_ready() now verifies EXTRACTED-first and returns early on the happy path; archives are hashed only when healing is needed (178MB hashed per launch, not 417MB). Added a TTY-gated 'preparing\u2026' line before the gate so a cold start shows feedback. Warm reflect startup 1.86s->1.13s; cold-cache savings larger (178 vs 417MB disk read). Tamper/heal privacy tests unchanged-green.",
+      "root_cause": "Startup hashed 417MB every launch: models_ready() verified the .tar.bz2 ARCHIVES (239MB) AND the extracted weights (178MB). Only the extracted files are loaded; archives are needed only for healing. Plus there was NO loading indicator, so the ~1-2s warm / ~5s cold (cold disk read of 417MB) gap before the alternate-screen UI looked hung, and the mic isn't open yet so the user's first words were lost. Model LOAD itself is only ~0.6s (zipformer 245ms + moonshine 343ms) — not the bottleneck.",
+      "fix": "models_ready() now verifies EXTRACTED-first and returns early on the happy path; archives are hashed only when healing is needed (178MB hashed per launch, not 417MB). Added a TTY-gated 'preparing…' line before the gate so a cold start shows feedback. Warm reflect startup 1.86s->1.13s; cold-cache savings larger (178 vs 417MB disk read). Tamper/heal privacy tests unchanged-green.",
       "tags": [
         "startup",
         "performance",
@@ -170,7 +170,7 @@
       "error_message": "Significant refactor of ",
       "file": "src/listen/mod.rs",
       "root_cause": "28 lines replaced/restructured",
-      "fix": "Rewrote 34\u21925 lines (28 removed)",
+      "fix": "Rewrote 34→5 lines (28 removed)",
       "tags": [
         "auto-detected",
         "refactor",
@@ -186,7 +186,7 @@
       "error_message": "Significant refactor of ",
       "file": "src/listen/resample.rs",
       "root_cause": "4 lines replaced/restructured",
-      "fix": "Rewrote 20\u219223 lines (4 removed) | Also: fn reset_clears_pending_state() {; let _ = r.process(&tone(1_000.0, 48_000, 0.1));",
+      "fix": "Rewrote 20→23 lines (4 removed) | Also: fn reset_clears_pending_state() {; let _ = r.process(&tone(1_000.0, 48_000, 0.1));",
       "tags": [
         "auto-detected",
         "refactor",
@@ -218,7 +218,7 @@
       "error_message": "Significant refactor of ",
       "file": "src/main.rs",
       "root_cause": "2 lines replaced/restructured",
-      "fix": "Rewrote 7\u219210 lines (2 removed)",
+      "fix": "Rewrote 7→10 lines (2 removed)",
       "tags": [
         "auto-detected",
         "refactor",
@@ -234,7 +234,7 @@
       "error_message": "Significant refactor of ",
       "file": "docs/superpowers/plans/2026-06-10-talk-cli-whisper-base-pass2.md",
       "root_cause": "3 lines replaced/restructured",
-      "fix": "Rewrote 11\u219233 lines (3 removed)",
+      "fix": "Rewrote 11→33 lines (3 removed)",
       "tags": [
         "auto-detected",
         "refactor",
@@ -249,7 +249,7 @@
       "timestamp": "2026-06-10T20:12:14.489Z",
       "error_message": "Missing error handling in unknown",
       "file": "tests/privacy.rs",
-      "root_cause": "Code path had no error handling \u2014 exceptions would propagate uncaught",
+      "root_cause": "Code path had no error handling — exceptions would propagate uncaught",
       "fix": "Added try/catch block",
       "tags": [
         "auto-detected",
@@ -266,7 +266,7 @@
       "error_message": "Wrong reference: 239 should be 330",
       "file": "src/main.rs",
       "root_cause": "Used \"239\" instead of \"330\"",
-      "fix": "Changed 239 \u2192 330",
+      "fix": "Changed 239 → 330",
       "tags": [
         "auto-detected",
         "wrong-reference",
@@ -314,7 +314,7 @@
       "error_message": "Significant refactor of ",
       "file": "tests/privacy.rs",
       "root_cause": "3 lines replaced/restructured",
-      "fix": "Rewrote 6\u21923 lines (3 removed)",
+      "fix": "Rewrote 6→3 lines (3 removed)",
       "tags": [
         "auto-detected",
         "refactor",
@@ -330,7 +330,7 @@
       "error_message": "Significant refactor of ",
       "file": "crates/talk-core/src/cleanup.rs",
       "root_cause": "2 lines replaced/restructured",
-      "fix": "Rewrote 6\u219210 lines (2 removed)",
+      "fix": "Rewrote 6→10 lines (2 removed)",
       "tags": [
         "auto-detected",
         "refactor",
@@ -345,7 +345,7 @@
       "timestamp": "2026-06-10T20:50:42.794Z",
       "error_message": "Missing error handling in unknown",
       "file": "src/listen/stt.rs",
-      "root_cause": "Code path had no error handling \u2014 exceptions would propagate uncaught",
+      "root_cause": "Code path had no error handling — exceptions would propagate uncaught",
       "fix": "Added try/catch block",
       "tags": [
         "auto-detected",
@@ -362,7 +362,7 @@
       "error_message": "Wrong reference: 239 should be 330",
       "file": "tests/privacy.rs",
       "root_cause": "Used \"239\" instead of \"330\"",
-      "fix": "Changed 239 \u2192 330",
+      "fix": "Changed 239 → 330",
       "tags": [
         "auto-detected",
         "wrong-reference",
@@ -378,7 +378,7 @@
       "error_message": "Wrong reference: Moonshine should be Whisper",
       "file": "src/listen/mod.rs",
       "root_cause": "Used \"Moonshine\" instead of \"Whisper\"",
-      "fix": "Changed Moonshine \u2192 Whisper",
+      "fix": "Changed Moonshine → Whisper",
       "tags": [
         "auto-detected",
         "wrong-reference",
@@ -458,7 +458,7 @@
       "error_message": "Significant refactor of ",
       "file": ".github/workflows/release.yml",
       "root_cause": "3 lines replaced/restructured",
-      "fix": "Rewrote 7\u21924 lines (3 removed)",
+      "fix": "Rewrote 7→4 lines (3 removed)",
       "tags": [
         "auto-detected",
         "refactor",
@@ -487,7 +487,7 @@
     {
       "id": "bug-030",
       "timestamp": "2026-06-11T01:15:00Z",
-      "error_message": "release.yml: '\"toolchain\" is a required input' \u2014 all 4 build legs + crates failed at exit 1 before any cargo build (run 27317194432)",
+      "error_message": "release.yml: '\"toolchain\" is a required input' — all 4 build legs + crates failed at exit 1 before any cargo build (run 27317194432)",
       "file": ".github/workflows/release.yml",
       "root_cause": "dtolnay/rust-toolchain is pinned by commit SHA (3c5f7ea...), not @stable. When SHA-pinned the toolchain is no longer inferred from the ref and becomes a required input. ci.yml passed it (1.96.0/stable); release.yml omitted it.",
       "fix": "Added 'toolchain: stable' to the dtolnay step in both the build job and the crates job in release.yml.",
@@ -521,6 +521,38 @@
       "related_bugs": [],
       "occurrences": 1,
       "last_seen": "2026-06-11T01:25:00Z"
+    },
+    {
+      "id": "bug-032",
+      "timestamp": "2026-06-11T01:43:28.123Z",
+      "error_message": "Incorrect value in code",
+      "file": "../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/talk-cli-build-state.md",
+      "root_cause": "Had `v0.1.0`",
+      "fix": "Changed to `dtolnay/rust-toolchain`",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "md"
+      ],
+      "related_bugs": [],
+      "occurrences": 2,
+      "last_seen": "2026-06-11T01:43:44.682Z"
+    },
+    {
+      "id": "bug-033",
+      "timestamp": "2026-06-11T02:11:30.739Z",
+      "error_message": "Significant refactor of ",
+      "file": "README.md",
+      "root_cause": "13 lines replaced/restructured",
+      "fix": "Rewrote 25→12 lines (13 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "md"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-11T02:11:30.739Z"
     }
   ]
 }

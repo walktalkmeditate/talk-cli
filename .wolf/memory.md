@@ -181,3 +181,14 @@
 | 20:36 | Edited .github/workflows/release.yml | 2→2 lines | ~44 |
 | 20:36 | Edited .github/workflows/release.yml | 4→4 lines | ~78 |
 | 01:30 | release: dropped Windows from matrix (libc/std::os::unix Unix-only); ship macOS+Linux | .github/workflows/release.yml | 3-target v0.1.0 | ~3k |
+| 20:43 | Edited ../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/talk-cli-build-state.md | "v0.1.0" → "dtolnay/rust-toolchain" | ~450 |
+| 20:43 | Edited ../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/talk-cli-build-state.md | "talk-cli build progress (" → "talk-cli build progress (" | ~70 |
+| 20:43 | Edited ../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/MEMORY.md | inline fix | ~67 |
+| 20:44 | Session end: 9 writes across 3 files (release.yml, talk-cli-build-state.md, MEMORY.md) | 2 reads | ~940 tok |
+| 20:54 | Created README.md | — | ~1571 |
+| 16:50 | rewrote README for v0.1.0 (was stale "Dreaming"); mirrors meditate-cli, accurate CLI/keys/frame, no Windows/web-live | README.md | done | ~4k |
+| 21:02 | Created demo/record.py | — | ~1288 |
+| 21:08 | Edited ../../../talk/.streak.toml | 4 → 3 | ~3 |
+| 21:11 | Edited README.md | reduced (-13 lines) | ~164 |
+| 21:11 | Edited README.md | 7→12 lines | ~157 |
+| 21:12 | produced real-session demo GIF (pty loopback capture -> agg); wired into README | demo/talk.gif, demo/talk.cast, demo/record.py, README.md | hero demo done | ~6k |
