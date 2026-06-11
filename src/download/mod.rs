@@ -29,21 +29,41 @@ fn redirect_target(location: Option<&str>) -> Result<String, String> {
     }
 }
 
-/// Read at most `cap` bytes from `r`; a longer body errors before the bytes ever
-/// reach the hash gate (memory defense, not integrity — that's the SHA-256).
-fn read_capped(r: impl Read, cap: u64, name: &str) -> Result<Vec<u8>, String> {
+/// Read at most `cap` bytes from `r`, reporting bytes-so-far to `progress` as they
+/// arrive; a longer body errors before the bytes ever reach the hash gate (memory
+/// defense, not integrity — that's the SHA-256). Reads in chunks so the caller can
+/// render download progress, never accumulating past `cap`.
+fn read_capped(
+    mut r: impl Read,
+    cap: u64,
+    name: &str,
+    progress: &mut dyn FnMut(u64),
+) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
-    r.take(cap + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    if bytes.len() as u64 > cap {
-        return Err(format!("response for {name} exceeds the {cap}-byte cap"));
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = r.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        if bytes.len() as u64 + n as u64 > cap {
+            return Err(format!("response for {name} exceeds the {cap}-byte cap"));
+        }
+        bytes.extend_from_slice(&buf[..n]);
+        progress(bytes.len() as u64);
     }
     Ok(bytes)
 }
 
 /// Fetch `art` to `dir` over HTTPS, verifying its pinned SHA-256 before keeping it.
 /// A mismatch errors with the fetched bytes still in memory — nothing unverified
-/// ever touches disk, so there is no bad file to clean up.
-pub fn fetch(art: &Artifact, dir: &Path) -> Result<(), String> {
+/// ever touches disk, so there is no bad file to clean up. `progress(done, total)`
+/// is called as bytes arrive (`total` from Content-Length, `None` if absent).
+pub fn fetch(
+    art: &Artifact,
+    dir: &Path,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<(), String> {
     if art.sha256.starts_with("FILL") {
         return Err(format!("{} hash not pinned — run the pin step", art.name));
     }
@@ -80,7 +100,10 @@ pub fn fetch(art: &Artifact, dir: &Path) -> Result<(), String> {
         url = redirect_target(resp.header("location"))?;
         resp = get(&url)?;
     }
-    let bytes = read_capped(resp.into_reader(), MAX_DOWNLOAD_BYTES, art.name)?;
+    let total = resp.header("Content-Length").and_then(|s| s.parse::<u64>().ok());
+    let bytes = read_capped(resp.into_reader(), MAX_DOWNLOAD_BYTES, art.name, &mut |done| {
+        progress(done, total)
+    })?;
     let got = hex(Sha256::digest(&bytes));
     if got != art.sha256 {
         return Err(format!("checksum mismatch for {}: got {got}, want {}", art.name, art.sha256));
@@ -143,8 +166,19 @@ mod tests {
     #[test]
     fn read_capped_rejects_oversized_bodies() {
         use std::io::Cursor;
-        assert_eq!(read_capped(Cursor::new(b"0123456789"), 10, "x").unwrap(), b"0123456789");
-        assert!(read_capped(Cursor::new(b"0123456789!"), 10, "x").is_err());
+        assert_eq!(read_capped(Cursor::new(b"0123456789"), 10, "x", &mut |_| {}).unwrap(), b"0123456789");
+        assert!(read_capped(Cursor::new(b"0123456789!"), 10, "x", &mut |_| {}).is_err());
+    }
+
+    #[test]
+    fn read_capped_reports_progress_monotonically_to_the_full_length() {
+        use std::io::Cursor;
+        let body = vec![7u8; 200_000]; // larger than one 64 KiB chunk → multiple reports
+        let mut seen = Vec::new();
+        let out = read_capped(Cursor::new(&body), 1_000_000, "x", &mut |done| seen.push(done)).unwrap();
+        assert_eq!(out.len(), body.len());
+        assert!(!seen.is_empty() && seen.windows(2).all(|w| w[0] < w[1]), "{seen:?}");
+        assert_eq!(*seen.last().unwrap(), body.len() as u64);
     }
 
     #[test]
