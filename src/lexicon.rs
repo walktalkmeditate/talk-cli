@@ -17,7 +17,7 @@ impl Lexicon {
     /// Build from already-parsed corrections (pure; used by `load` and tests).
     pub fn from_map(map: BTreeMap<String, String>) -> Lexicon {
         let mut pairs: Vec<(String, String)> = map.into_iter().collect();
-        pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        pairs.sort_by_key(|p| std::cmp::Reverse(p.0.len())); // longest key first
         Lexicon { pairs }
     }
 
