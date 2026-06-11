@@ -48,6 +48,7 @@ pub fn paint(view: &View) -> io::Result<()> {
     for (line, kind) in compose(view) {
         let tone = match kind {
             LineKind::Settled => p.core,
+            LineKind::Question => p.dim,
             LineKind::Edge => p.dim,
             LineKind::Chrome => p.edge,
         };
