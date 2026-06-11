@@ -20,6 +20,38 @@ pub fn models_dir() -> PathBuf {
         .unwrap_or_else(|| base_dir(None).join("models"))
 }
 
+/// Where `config.toml` lives: `$XDG_CONFIG_HOME/talk`, else `~/.config/talk`.
+pub fn config_dir() -> PathBuf {
+    xdg_dir("XDG_CONFIG_HOME", ".config")
+}
+
+/// Where `state.json` and `streak.toml` live: `$XDG_DATA_HOME/talk`, else
+/// `~/.local/share/talk`.
+pub fn data_dir() -> PathBuf {
+    xdg_dir("XDG_DATA_HOME", ".local/share")
+}
+
+/// `$<env_var>/talk` when the env var is a valid absolute path (reusing
+/// `safe_env_dir`'s absolute + no-`..` check, which also ignores a relative
+/// `$XDG_*_HOME` per the XDG spec), else `~/<home_subdir>/talk`.
+fn xdg_dir(env_var: &str, home_subdir: &str) -> PathBuf {
+    xdg_dir_from(safe_env_dir(env_var), home_subdir)
+}
+
+/// The path math behind `xdg_dir`, split out so it is unit-testable without
+/// mutating the process environment (env mutation races other parallel tests).
+fn xdg_dir_from(env_override: Option<PathBuf>, home_subdir: &str) -> PathBuf {
+    if let Some(base) = env_override {
+        return base.join("talk");
+    }
+    let mut dir = directories::UserDirs::new()
+        .map(|d| d.home_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    dir.push(home_subdir);
+    dir.push("talk");
+    dir
+}
+
 /// Read an env-supplied dir, accepting it only if absolute and free of `..`
 /// components (reject traversal / relative paths). Warns + returns None otherwise.
 fn safe_env_dir(var: &str) -> Option<PathBuf> {
@@ -143,6 +175,18 @@ mod tests {
         assert!(resolve_base(Some("/etc")).is_err());           // outside home
         assert!(resolve_base(Some("/tmp/../etc")).is_err());    // '..' traversal
         assert!(resolve_base(None).is_ok());                    // default ok
+    }
+
+    #[test]
+    fn xdg_dir_uses_the_env_override_else_the_home_subdir() {
+        // Override wins (safe_env_dir has already validated it absolute):
+        assert_eq!(
+            xdg_dir_from(Some(PathBuf::from("/tmp/xdg-test")), ".config"),
+            PathBuf::from("/tmp/xdg-test/talk")
+        );
+        // Else fall back under the home dir — no env mutation, so no parallel-test race.
+        assert!(xdg_dir_from(None, ".config").ends_with(".config/talk"));
+        assert!(xdg_dir_from(None, ".local/share").ends_with(".local/share/talk"));
     }
 
     #[cfg(unix)]

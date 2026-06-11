@@ -104,7 +104,9 @@ bright. Light cleanup trims filler ("um", "uh") without rewriting your words —
 
 Reflections land in **`~/talk/`** as plain markdown — reflect questions accumulate
 into per-question files, journal entries into dated files. Every file is yours, in a
-directory only you can read.
+directory only you can read. Config lives in `~/.config/talk` (`talk config path`
+prints it); your streak and state sit in `~/.local/share/talk` — so `~/talk` stays
+purely your reflections. (Both honor `$XDG_CONFIG_HOME` / `$XDG_DATA_HOME`.)
 
 ## Privacy
 

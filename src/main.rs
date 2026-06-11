@@ -30,6 +30,7 @@ fn main() -> std::io::Result<()> {
     let cfg = load_config()?;
     let base = paths::resolve_base(cfg.base_dir.as_deref())?;
     paths::ensure_base_dir(&base)?;
+    paths::ensure_base_dir(&paths::data_dir())?;
 
     let date = args.date.clone().unwrap_or_else(system_date);
     let time = args.time.clone().unwrap_or_else(system_time_hm);
@@ -47,7 +48,7 @@ fn main() -> std::io::Result<()> {
     match args.command {
         Some(Command::Journal) => {
             let text = require_text(&args.from_text);
-            disclose_once(&base)?;
+            disclose_once()?;
             run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: false, level: cfg.cleanup_for("journal"), held_day: None })?;
         }
         Some(Command::Unburden) | Some(Command::Vent) => {
@@ -58,7 +59,7 @@ fn main() -> std::io::Result<()> {
         Some(Command::Config { action }) => return handle_config(action.as_deref()),
         Some(Command::Thread { question }) => print_thread(&base, question.as_deref()),
         Some(Command::Streak) => {
-            let s = streak::Streak::load_from(&base);
+            let s = streak::Streak::load_from(&paths::data_dir());
             if s.entries == 0 {
                 println!("No reflections yet — run `talk` to start.");
             } else {
@@ -75,7 +76,7 @@ fn main() -> std::io::Result<()> {
         _ => {
             if args.question.is_none() && cfg.default_mode == "journal" {
                 let text = require_text(&args.from_text);
-                disclose_once(&base)?;
+                disclose_once()?;
                 run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: false, level: cfg.cleanup_for("journal"), held_day: None })?;
             } else {
                 reflect(&base, &args.question, &date, &time, &require_text(&args.from_text), &cfg)?;
@@ -103,7 +104,7 @@ struct ReflectChoice {
 /// Select a reflect question: a BYO question if one was given, else from the
 /// configured pack (recording the serving in the returned `State`).
 fn reflect_choice(base: &Path, byo: &Option<String>, time: &str, default_pack: &str) -> std::io::Result<ReflectChoice> {
-    let mut st = state::State::load(&std::fs::read_to_string(state_path(base)).unwrap_or_default());
+    let mut st = state::State::load(&std::fs::read_to_string(state_path()).unwrap_or_default());
 
     let (id, question, slug, pack, addressee, held_day) = match byo {
         Some(q) => {
@@ -147,12 +148,12 @@ fn reflect_choice(base: &Path, byo: &Option<String>, time: &str, default_pack: &
 
 /// Reflect: a BYO question if one was given, else select from the spine pack.
 fn reflect(base: &Path, byo: &Option<String>, date: &str, time: &str, text: &str, cfg: &config::Config) -> std::io::Result<()> {
-    disclose_once(base)?;
+    disclose_once()?;
     let c = reflect_choice(base, byo, time, &cfg.default_pack)?;
 
     let target = Target::Reflect { id: &c.id, question: &c.question, slug: &c.slug, pack: &c.pack, addressee: &c.addressee };
     run_and_report(Report { base, target, date, time, text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: false, level: cfg.cleanup_for("reflect"), held_day: c.held_day })?;
-    paths::write_private(&state_path(base), &c.state.save())?;
+    paths::write_private(&state_path(), &c.state.save())?;
     Ok(())
 }
 
@@ -185,7 +186,7 @@ fn run_and_report(r: Report) -> std::io::Result<()> {
         // reaches here with a path — gated anyway). Streak failure never blocks a save.
         if !r.ephemeral {
             if let Some(day) = streak::civil_day(r.date) {
-                let _ = streak::record_entry(r.base, day);
+                let _ = streak::record_entry(&paths::data_dir(), day);
             }
         }
     }
@@ -235,7 +236,7 @@ fn run_live_session(
     // bytes (it falls through to the models gate's clean non-zero exit).
     let interactive = unsafe { libc::isatty(0) } == 1;
     if interactive && !matches!(shape, Shape::Ephemeral) {
-        disclose_once(base)?;
+        disclose_once()?;
     }
 
     // Verifying the model hashes and loading the nets takes ~1–2s warm (more on a
@@ -414,7 +415,7 @@ fn run_live_session(
 
     // Persist the reflect rotation only after the write succeeded.
     if let Some(c) = &choice {
-        paths::write_private(&state_path(base), &c.state.save())?;
+        paths::write_private(&state_path(), &c.state.save())?;
     }
 
     // A saved live entry credits the streak — BEFORE the close dwell, so Ctrl-C
@@ -422,7 +423,7 @@ fn run_live_session(
     // so this path is never ephemeral. Streak failure never blocks the save.
     if written.is_some() {
         if let Some(day) = streak::civil_day(date) {
-            let _ = streak::record_entry(base, day);
+            let _ = streak::record_entry(&paths::data_dir(), day);
         }
     }
 
@@ -548,8 +549,7 @@ fn written_entry_count(path: &Path) -> usize {
     text.lines().filter(|l| l.starts_with("## ")).count().max(1)
 }
 
-// config.toml always lives at the default ~/talk; base_dir only relocates where entries land.
-fn config_path() -> PathBuf { paths::base_dir(None).join("config.toml") }
+fn config_path() -> PathBuf { paths::config_dir().join("config.toml") }
 
 fn handle_config(action: Option<&str>) -> std::io::Result<()> {
     let p = config_path();
@@ -713,8 +713,8 @@ fn load_config() -> std::io::Result<config::Config> {
     Ok(config::Config::load(&text).unwrap_or_default())
 }
 
-fn state_path(base: &Path) -> PathBuf {
-    base.join(".state.json") // dot-prefixed so vault sync / indexing skip it
+fn state_path() -> PathBuf {
+    paths::data_dir().join("state.json")
 }
 
 /// The first-run privacy note (spec §8) — printed to STDOUT once, since it's a
@@ -730,12 +730,12 @@ system clipboard. scrollback and OS swap are beyond any app's reach.";
 /// only when a non-ephemeral session actually proceeds, and BEFORE any other
 /// `State` load (reflect_choice's included), so reflect's later save doesn't
 /// clobber the flag with a pre-disclosure copy. Ephemeral never discloses.
-fn disclose_once(base: &Path) -> std::io::Result<()> {
-    let mut st = state::State::load(&std::fs::read_to_string(state_path(base)).unwrap_or_default());
+fn disclose_once() -> std::io::Result<()> {
+    let mut st = state::State::load(&std::fs::read_to_string(state_path()).unwrap_or_default());
     if !st.disclosed {
         println!("{DISCLOSURE}");
         st.disclosed = true;
-        paths::write_private(&state_path(base), &st.save())?;
+        paths::write_private(&state_path(), &st.save())?;
     }
     Ok(())
 }
