@@ -13,7 +13,12 @@ description = "A terminal listening companion — speak a reflection, and it set
 repository = "https://github.com/walktalkmeditate/talk-cli"
 keywords = ["journaling", "voice", "reflection", "cli", "wellness"]
 categories = ["command-line-utilities"]
-exclude = ["/crates", "/web", "/demo", "/docs", "/tests", "/.github"]
+exclude = [
+    "/crates", "/web", "/demo", "/docs", "/tests", "/.github",
+    # Dev / agent / release infra — not part of the published crate.
+    "/.wolf", "/.claude", "/CLAUDE.md", "/DREAMING.md",
+    "/install.sh", "/install.ps1", "/.gitignore",
+]
 
 [[bin]]
 name = "talk"

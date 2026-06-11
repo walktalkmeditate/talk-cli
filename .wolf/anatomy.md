@@ -1,6 +1,6 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-06-10T23:26:25.117Z
+> Auto-maintained by OpenWolf. Last scanned: 2026-06-11T00:29:34.139Z
 > Files: 73 tracked | Anatomy hits: 0 | Misses: 0
 
 ## ../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/
@@ -10,7 +10,7 @@
 ## ./
 
 - `.gitignore` — Git ignore rules (~112 tok)
-- `Cargo.toml` — Rust package manifest (~546 tok)
+- `Cargo.toml` — Rust package manifest (~594 tok)
 - `CLAUDE.md` — OpenWolf (~57 tok)
 - `DREAMING.md` — talk-cli — Dreaming Notes (~4818 tok)
 - `install.ps1` — talk installer (Windows). Downloads the latest release, verifies its checksum, (~595 tok)
