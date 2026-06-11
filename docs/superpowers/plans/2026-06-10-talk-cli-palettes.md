@@ -142,6 +142,7 @@ impl Theme {
     pub const NAMES: [&'static str; 3] = ["rust", "high-contrast", "mono"];
 
     /// Parse a config string (trimmed, case-insensitive). `None` for unknown names.
+    #[allow(clippy::should_implement_trait)] // inherent parser returns Option, not FromStr's Result
     pub fn from_str(s: &str) -> Option<Theme> {
         match s.trim().to_ascii_lowercase().as_str() {
             "rust" => Some(Theme::Rust),
@@ -469,13 +470,20 @@ Add it to `Default`:
             palette: None,
 ```
 
-Add a commented line to `commented_template` (append inside the format string, after the `journal_cleanup` line):
+Add a commented line to `commented_template`. The current last line of the format string ends the literal:
 
 ```rust
+             journal_cleanup = \"{jc}\"       # medium/high: deterministic-only in v1 (LLM enhances light); full LLM rewrite is future work\n",
+```
+
+Change its trailing `\n",` to a `\n\` line-continuation and append the palette line (which carries the new closing `\n",`):
+
+```rust
+             journal_cleanup = \"{jc}\"       # medium/high: deterministic-only in v1 (LLM enhances light); full LLM rewrite is future work\n\
              # palette = \"rust\"             # rust (default) · high-contrast · mono — pin mono on light terminals\n",
 ```
 
-(That `\n",` replaces the closing `\n",` of the current last template line; keep the `format!` args unchanged — the palette line has no interpolation.)
+Keep the `format!` named args unchanged — the palette line has no `{}` interpolation.
 
 - [ ] **Step 4: Run tests to verify pass**
 
@@ -619,4 +627,4 @@ Expected: runs cleanly (resolution forces `mono` regardless of `--palette rust`;
 
 **2. Placeholder scan** — no TBD/TODO; every code step shows complete code; every run step shows the exact command and expected result. ✓
 
-**3. Type consistency** — `Tone`/`Theme`/`Palette` defined in Task 1 are used verbatim in Tasks 2–5; `palette(theme)`, `Theme::from_str`, `Theme::NAMES`, `Theme::default()`, `PaletteArg`, `From<PaletteArg> for Theme`, `resolve_theme(no_color, flag, config)`, `style_for(tone)`, `paint(&View, Palette)`, and `LiveConfig.palette` match across tasks. The contrast triples in Task 1 are the values the Task 1 tests assert against (verified to clear core ≥ 4.5:1, dim/edge ≥ 3:1 vs `rgb(40,44,52)` with margin, preserving `core ≥ dim ≥ edge`). ✓
+**3. Type consistency** — `Tone`/`Theme`/`Palette` defined in Task 1 are used verbatim in Tasks 2–5; `palette(theme)`, `Theme::from_str`, `Theme::NAMES`, `Theme::default()`, `PaletteArg`, `From<PaletteArg> for Theme`, `resolve_theme(no_color, flag, config)`, `style_for(tone)`, and `LiveConfig.palette` match across tasks. `paint` is `paint(&View)` in Tasks 1–4 (internal `palette(Theme::default())`) and becomes `paint(&View, Palette)` only in Task 5, which updates its sole call site in the same commit. The contrast triples in Task 1 are the values the Task 1 tests assert against (verified to clear core ≥ 4.5:1, dim/edge ≥ 3:1 vs `rgb(40,44,52)` with margin, preserving `core ≥ dim ≥ edge`). ✓
