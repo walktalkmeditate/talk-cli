@@ -2,7 +2,7 @@
 
 use std::io::{self, Write};
 use crossterm::{cursor, execute, queue, style, terminal};
-use talk_core::palette::{palette, Rgb, Theme, Tone};
+use talk_core::palette::{Palette, Rgb, Tone};
 use talk_core::render_model::{compose, LineKind, View};
 
 /// RAII terminal guard — restores the terminal on drop (incl. on panic), exactly
@@ -41,16 +41,15 @@ fn apply_tone(out: &mut impl Write, tone: Tone) -> io::Result<()> {
 }
 
 /// Paint a full frame. Clears, then writes each composed line in its tone.
-pub fn paint(view: &View) -> io::Result<()> {
-    let p = palette(Theme::default());
+pub fn paint(view: &View, palette: Palette) -> io::Result<()> {
     let mut out = io::stdout();
     queue!(out, terminal::Clear(terminal::ClearType::All), cursor::MoveTo(0, 0))?;
     for (line, kind) in compose(view) {
         let tone = match kind {
-            LineKind::Settled => p.core,
-            LineKind::Question => p.dim,
-            LineKind::Edge => p.dim,
-            LineKind::Chrome => p.edge,
+            LineKind::Settled => palette.core,
+            LineKind::Question => palette.dim,
+            LineKind::Edge => palette.dim,
+            LineKind::Chrome => palette.edge,
         };
         apply_tone(&mut out, tone)?;
         queue!(out, style::Print(line), cursor::MoveToNextLine(1))?;
