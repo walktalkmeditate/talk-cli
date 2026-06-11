@@ -25,6 +25,11 @@ pub fn config_dir() -> PathBuf {
     xdg_dir("XDG_CONFIG_HOME", ".config")
 }
 
+/// Where the personal lexicon lives: `<config_dir>/lexicon.toml`.
+pub fn lexicon_path() -> PathBuf {
+    config_dir().join("lexicon.toml")
+}
+
 /// Where `state.json` and `streak.toml` live: `$XDG_DATA_HOME/talk`, else
 /// `~/.local/share/talk`.
 pub fn data_dir() -> PathBuf {
@@ -187,6 +192,11 @@ mod tests {
         // Else fall back under the home dir — no env mutation, so no parallel-test race.
         assert!(xdg_dir_from(None, ".config").ends_with(".config/talk"));
         assert!(xdg_dir_from(None, ".local/share").ends_with(".local/share/talk"));
+    }
+
+    #[test]
+    fn lexicon_path_is_config_dir_lexicon_toml() {
+        assert!(lexicon_path().ends_with("talk/lexicon.toml"));
     }
 
     #[cfg(unix)]
