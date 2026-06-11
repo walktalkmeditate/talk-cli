@@ -478,7 +478,29 @@ kept on your machine. Get them now? [Y/n] "
     std::io::stdout().flush()?;
     let mut line = String::new();
     let n = std::io::stdin().read_line(&mut line)?;
-    Ok(n > 0 && !matches!(line.trim(), "n" | "N"))
+    Ok(accept_fetch(n, &line))
+}
+
+/// First-run consent decision (pure, for testability): Enter/whitespace accepts; an
+/// explicit `n`/`N`, or EOF (`bytes_read == 0`), declines — so a 330 MB fetch never
+/// starts unasked.
+#[cfg(feature = "listen")]
+fn accept_fetch(bytes_read: usize, line: &str) -> bool {
+    bytes_read > 0 && !matches!(line.trim(), "n" | "N")
+}
+
+#[cfg(all(test, feature = "listen"))]
+mod first_run_consent_tests {
+    use super::accept_fetch;
+    #[test]
+    fn defaults_to_yes_but_n_or_eof_declines() {
+        assert!(accept_fetch(1, "\n"), "Enter accepts");
+        assert!(accept_fetch(2, "y\n"), "y accepts");
+        assert!(accept_fetch(3, "  \n"), "whitespace accepts");
+        assert!(!accept_fetch(2, "n\n"), "n declines");
+        assert!(!accept_fetch(2, "N\n"), "N declines");
+        assert!(!accept_fetch(0, ""), "EOF declines");
+    }
 }
 
 /// Fetch every model artifact — shared by `talk download models` and the live

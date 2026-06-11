@@ -182,6 +182,15 @@ mod tests {
     }
 
     #[test]
+    fn read_capped_enforces_the_cap_across_multiple_chunks() {
+        use std::io::Cursor;
+        // The cap spans more than one 64 KiB read, so the over-cap error must fire on
+        // a LATER chunk — proving the memory bound holds beyond the first read.
+        let body = vec![0u8; 200_000];
+        assert!(read_capped(Cursor::new(&body), 100_000, "x", &mut |_| {}).is_err());
+    }
+
+    #[test]
     fn verify_matches_known_hash() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("x.bin");
