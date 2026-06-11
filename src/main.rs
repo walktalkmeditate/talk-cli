@@ -3,6 +3,7 @@ mod config;
 #[cfg(feature = "download")]
 mod download;
 mod keymap;
+mod lexicon;
 #[cfg(feature = "listen")]
 mod live;
 #[cfg(feature = "listen")]
@@ -172,10 +173,12 @@ struct Report<'a> {
 }
 
 fn run_and_report(r: Report) -> std::io::Result<()> {
+    let lexicon = lexicon::Lexicon::load(&paths::lexicon_path());
     let path = run(&mut FakeTranscript::from_text(r.text), r.target,
         &RunConfig {
             base: r.base, date: r.date, time: r.time, keep_raw: r.keep_raw, raw_sidecar: r.raw_sidecar, ephemeral: r.ephemeral,
             formatter: &talk_core::format::DeterministicFormatter, level: r.level,
+            lexicon: &lexicon,
         })?;
     if let Some(p) = path {
         match r.held_day {
@@ -352,8 +355,10 @@ fn run_live_session(
         }
     };
     let palette = talk_core::palette::palette(theme);
+    let live_lexicon = lexicon::Lexicon::load(&paths::lexicon_path());
     let live_cfg = live::LiveConfig {
         mode: rmode, question, held_label: held_label.as_deref(), cleanup, ephemeral, palette,
+        lexicon: &live_lexicon,
     };
     let mut result = live::run_loop(&mut source, finish_flag, pause, speaking, &live_cfg)?;
 
@@ -596,7 +601,13 @@ fn handle_config(action: Option<&str>) -> std::io::Result<()> {
         Some("init") => {
             if let Some(dir) = p.parent() { paths::ensure_base_dir(dir)?; }
             paths::write_private(&p, &config::Config::commented_template())?;
-            println!("wrote {}", p.display());
+            let lp = paths::lexicon_path();
+            if lp.exists() {
+                println!("wrote {} (kept existing {})", p.display(), lp.display());
+            } else {
+                paths::write_private(&lp, lexicon::template())?;
+                println!("wrote {} and {}", p.display(), lp.display());
+            }
         }
         Some("path") => println!("{}", p.display()),
         _ => print!("{}", config::Config::commented_template()),

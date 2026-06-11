@@ -29,6 +29,7 @@ pub struct LiveConfig<'a> {
     pub cleanup: &'a str,
     pub ephemeral: bool,
     pub palette: talk_core::palette::Palette,
+    pub lexicon: &'a crate::lexicon::Lexicon,
 }
 
 /// Outcome the caller uses to persist (or not) and print the close screen.
@@ -57,20 +58,22 @@ struct EventGuards {
 /// straddling Revise (Commit accepted on-record, pass-2 landing during a pause)
 /// must still upgrade its block, while a Commit arriving during pause must be
 /// dropped AND disarm its own in-flight Revise.
-fn apply_event(ev: Event, g: &mut EventGuards, settle: &mut Settle) -> bool {
+fn apply_event(ev: Event, g: &mut EventGuards, settle: &mut Settle, lexicon: &crate::lexicon::Lexicon) -> bool {
     match ev {
         Event::Done => return true,
         Event::Revise(raw2) if !g.commit_dropped => {
             let prev = settle.settled().last().map(|b| b.clean.clone());
-            let clean = talk_core::cleanup::format_revise(&raw2, prev.as_deref());
+            let corrected = crate::lexicon::correct(&raw2, lexicon);
+            let clean = talk_core::cleanup::format_revise(&corrected, prev.as_deref());
             settle.revise_committing(&raw2, &clean);
         }
         Event::Revise(_) => {} // paired Commit was dropped (off-record) → drop its pass-2 too
         Event::Commit(_) if g.paused => { g.commit_dropped = true; }
         _ if g.paused => {} // drain-and-discard while paused: don't record, don't grow the channel
         Event::Commit(raw) => {
+            let corrected = crate::lexicon::correct(&raw, lexicon);
             let pre = talk_core::cleanup::apply_backtrack(
-                &talk_core::cleanup::apply_spoken_commands(&raw));
+                &talk_core::cleanup::apply_spoken_commands(&corrected));
             settle.commit(&raw, &talk_core::cleanup::deterministic_light(&pre));
             g.commit_dropped = false;
         }
@@ -107,7 +110,7 @@ pub fn run_loop(
         // 1. drain transcript events (ALWAYS drain to keep the channel from growing;
         // discard them while paused)
         while let Some(ev) = source.next() {
-            if apply_event(ev, &mut guards, &mut settle) { finished = true; break; }
+            if apply_event(ev, &mut guards, &mut settle, cfg.lexicon) { finished = true; break; }
         }
         if !guards.paused && speaking.load(Ordering::Relaxed) { last_speech = Instant::now(); }
 
@@ -143,7 +146,7 @@ pub fn run_loop(
                     match action_for(k) {
                         Action::Finish => {
                             finish_flag.store(true, Ordering::Relaxed);
-                            drain_until_done(source, &mut settle, &mut guards)?;
+                            drain_until_done(source, &mut settle, &mut guards, cfg.lexicon)?;
                             break;
                         }
                         Action::Cancel => {
@@ -205,6 +208,7 @@ fn drain_until_done(
     source: &mut dyn TranscriptSource,
     settle: &mut Settle,
     guards: &mut EventGuards,
+    lexicon: &crate::lexicon::Lexicon,
 ) -> std::io::Result<()> {
     paint_plain(&["  settling…".to_string()])?;
     guards.paused = false;
@@ -213,7 +217,7 @@ fn drain_until_done(
     loop {
         match source.next() {
             Some(ev) => {
-                if apply_event(ev, guards, settle) { break; }
+                if apply_event(ev, guards, settle, lexicon) { break; }
                 last_event = Instant::now();
             }
             None => {
@@ -336,16 +340,20 @@ mod tests {
         EventGuards { paused, commit_dropped }
     }
 
+    fn empty_lex() -> crate::lexicon::Lexicon {
+        crate::lexicon::Lexicon::from_map(std::collections::BTreeMap::new())
+    }
+
     #[test]
     fn revise_of_a_pause_dropped_commit_is_dropped_even_after_resume() {
         let mut settle = Settle::new();
         let mut g = guards(false, false);
-        apply_event(Event::Commit("kept phrase".into()), &mut g, &mut settle);
+        apply_event(Event::Commit("kept phrase".into()), &mut g, &mut settle, &empty_lex());
         g.paused = true;
-        apply_event(Event::Commit("OFF RECORD".into()), &mut g, &mut settle);
+        apply_event(Event::Commit("OFF RECORD".into()), &mut g, &mut settle, &empty_lex());
         assert!(g.commit_dropped, "paused Commit must disarm its Revise");
         g.paused = false; // resume does NOT re-arm — the off-record Revise is still in flight
-        apply_event(Event::Revise("off record, transcribed better".into()), &mut g, &mut settle);
+        apply_event(Event::Revise("off record, transcribed better".into()), &mut g, &mut settle, &empty_lex());
         assert_eq!(settle.committing().unwrap().raw, "kept phrase");
     }
 
@@ -354,9 +362,9 @@ mod tests {
         // Commit accepted on-record; pass-2 lands during a pause → still upgrades.
         let mut settle = Settle::new();
         let mut g = guards(false, false);
-        apply_event(Event::Commit("rough streaming text".into()), &mut g, &mut settle);
+        apply_event(Event::Commit("rough streaming text".into()), &mut g, &mut settle, &empty_lex());
         g.paused = true;
-        apply_event(Event::Revise("Rough streaming text, corrected.".into()), &mut g, &mut settle);
+        apply_event(Event::Revise("Rough streaming text, corrected.".into()), &mut g, &mut settle, &empty_lex());
         assert_eq!(settle.committing().unwrap().raw, "Rough streaming text, corrected.");
     }
 
@@ -364,9 +372,9 @@ mod tests {
     fn an_accepted_commit_rearms_the_pairing_guard() {
         let mut settle = Settle::new();
         let mut g = guards(false, true); // a prior paused Commit left the guard disarmed
-        apply_event(Event::Commit("next on-record phrase".into()), &mut g, &mut settle);
+        apply_event(Event::Commit("next on-record phrase".into()), &mut g, &mut settle, &empty_lex());
         assert!(!g.commit_dropped);
-        apply_event(Event::Revise("next on-record phrase, revised".into()), &mut g, &mut settle);
+        apply_event(Event::Revise("next on-record phrase, revised".into()), &mut g, &mut settle, &empty_lex());
         assert_eq!(settle.committing().unwrap().raw, "next on-record phrase, revised");
     }
 
@@ -378,11 +386,42 @@ mod tests {
         // `paused` (the leak the review's P0/P1 cluster named).
         let mut settle = Settle::new();
         let mut g = guards(true, false);
-        apply_event(Event::Commit("OFF RECORD".into()), &mut g, &mut settle);
+        apply_event(Event::Commit("OFF RECORD".into()), &mut g, &mut settle, &empty_lex());
         g.paused = false; // drain_until_done lifts paused but carries commit_dropped
-        apply_event(Event::Revise("off record revised".into()), &mut g, &mut settle);
+        apply_event(Event::Revise("off record revised".into()), &mut g, &mut settle, &empty_lex());
         assert!(settle.committing().is_none(), "nothing may land from the paused pair");
-        assert!(apply_event(Event::Done, &mut g, &mut settle));
+        assert!(apply_event(Event::Done, &mut g, &mut settle, &empty_lex()));
+    }
+
+    #[test]
+    fn commit_applies_lexicon_and_strips_tags_to_clean_only() {
+        let lex = crate::lexicon::Lexicon::from_map(
+            [("TOC".to_string(), "talk".to_string())].into_iter().collect(),
+        );
+        let mut settle = Settle::new();
+        let mut g = guards(false, false);
+        apply_event(Event::Commit("open TOC (buzzer)".into()), &mut g, &mut settle, &lex);
+        settle.finalize();
+        let block = settle.settled().last().unwrap();
+        assert!(block.clean.contains("Open talk")); // corrected + sentence-start capped
+        assert!(!block.clean.contains("buzzer"));
+        assert_eq!(block.raw, "open TOC (buzzer)"); // raw is verbatim
+    }
+
+    #[test]
+    fn revise_applies_lexicon_and_strips_tags_to_clean_only() {
+        let lex = crate::lexicon::Lexicon::from_map(
+            [("TOC".to_string(), "talk".to_string())].into_iter().collect(),
+        );
+        let mut settle = Settle::new();
+        let mut g = guards(false, false);
+        apply_event(Event::Commit("rough".into()), &mut g, &mut settle, &empty_lex());
+        apply_event(Event::Revise("the TOC (applause) shipped".into()), &mut g, &mut settle, &lex);
+        settle.finalize();
+        let block = settle.settled().last().unwrap();
+        assert!(block.clean.contains("the talk shipped")); // format_revise trusts Whisper casing
+        assert!(!block.clean.contains("applause"));
+        assert_eq!(block.raw, "the TOC (applause) shipped"); // verbatim pass-2 raw
     }
 
     /// On macOS dev machines `pbcopy` exists — copied text must read back via

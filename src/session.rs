@@ -14,6 +14,7 @@ pub struct RunConfig<'a> {
     pub ephemeral: bool,
     pub formatter: &'a dyn Formatter,
     pub level: Level,
+    pub lexicon: &'a crate::lexicon::Lexicon,
 }
 
 /// Consume the whole source, cleaning each committed phrase through
@@ -37,14 +38,15 @@ pub fn run(
         match ev {
             Event::Partial(p) => settle.on_partial(&p),
             Event::Commit(raw) => {
-                let clean = guarded_format(cfg.formatter, cfg.level, &raw);
+                let clean = guarded_format(cfg.formatter, cfg.level, &crate::lexicon::correct(&raw, cfg.lexicon));
                 settle.commit(&raw, &clean);
             }
             Event::Revise(raw2) => {
                 // Pass-2 (Whisper) text is self-cased/punctuated — thin format only
                 // (spoken commands + backtrack + continuation de-cap), no re-cap.
                 let prev = settle.settled().last().map(|b| b.clean.clone());
-                let clean2 = talk_core::cleanup::format_revise(&raw2, prev.as_deref());
+                let clean2 = talk_core::cleanup::format_revise(
+                    &crate::lexicon::correct(&raw2, cfg.lexicon), prev.as_deref());
                 settle.revise_committing(&raw2, &clean2);
             }
             Event::Done => break,
@@ -74,9 +76,11 @@ mod tests {
     use crate::source::FakeTranscript;
 
     fn cfg(base: &Path, ephemeral: bool) -> RunConfig<'_> {
+        let lex: &'static crate::lexicon::Lexicon = Box::leak(Box::new(
+            crate::lexicon::Lexicon::from_map(std::collections::BTreeMap::new())));
         RunConfig {
             base, date: "2026-06-08", time: "08:14", keep_raw: true, raw_sidecar: false, ephemeral,
-            formatter: &talk_core::format::DeterministicFormatter, level: Level::Light,
+            formatter: &talk_core::format::DeterministicFormatter, level: Level::Light, lexicon: lex,
         }
     }
 
@@ -119,6 +123,7 @@ mod tests {
         let p = run(&mut src, Target::Journal, &RunConfig {
             base: dir.path(), date: "2026-06-08", time: "08:14", keep_raw: false, raw_sidecar: false, ephemeral: false,
             formatter: &talk_core::format::DeterministicFormatter, level: Level::Light,
+            lexicon: &crate::lexicon::Lexicon::from_map(std::collections::BTreeMap::new()),
         }).unwrap().unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(!text.contains("new line"));
@@ -204,6 +209,57 @@ mod tests {
     }
 
     #[test]
+    fn run_applies_lexicon_to_clean_keeps_raw_verbatim() {
+        let lex = crate::lexicon::Lexicon::from_map(
+            [("TOC".to_string(), "talk".to_string())].into_iter().collect(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let mut src = FakeTranscript::new(vec![
+            Event::Commit("open TOC (buzzer)".into()),
+            Event::Done,
+        ]);
+        let cfg = RunConfig {
+            base: dir.path(), date: "2026-06-08", time: "08:14", keep_raw: true,
+            raw_sidecar: false, ephemeral: false,
+            formatter: &talk_core::format::DeterministicFormatter, level: Level::Light,
+            lexicon: &lex,
+        };
+        let p = run(&mut src, Target::Journal, &cfg).unwrap().unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("Open talk."));
+        // "buzzer" must not appear in the clean text; it IS preserved in the raw comment.
+        let clean_lines: String = text.lines()
+            .filter(|l| !l.trim_start().starts_with("<!--"))
+            .collect::<Vec<_>>().join("\n");
+        assert!(!clean_lines.contains("buzzer"), "buzzer leaked into clean: {clean_lines}");
+        assert!(text.contains("<!-- raw: open TOC (buzzer) -->"));
+    }
+
+    #[test]
+    fn run_applies_lexicon_on_the_revise_arm_keeps_raw_verbatim() {
+        let lex = crate::lexicon::Lexicon::from_map(
+            [("TOC".to_string(), "talk".to_string())].into_iter().collect());
+        let dir = tempfile::tempdir().unwrap();
+        let mut src = FakeTranscript::new(vec![
+            Event::Commit("rough".into()),
+            Event::Revise("the TOC (applause) shipped".into()),
+            Event::Done,
+        ]);
+        let cfg = RunConfig {
+            base: dir.path(), date: "2026-06-08", time: "08:14", keep_raw: true,
+            raw_sidecar: false, ephemeral: false,
+            formatter: &talk_core::format::DeterministicFormatter, level: Level::Light,
+            lexicon: &lex,
+        };
+        let p = run(&mut src, Target::Journal, &cfg).unwrap().unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        let clean: String = text.lines().filter(|l| !l.trim_start().starts_with("<!--")).collect::<Vec<_>>().join("\n");
+        assert!(clean.contains("the talk shipped"));
+        assert!(!clean.contains("applause"));
+        assert!(text.contains("<!-- raw: the TOC (applause) shipped -->"));
+    }
+
+    #[test]
     fn an_over_editing_formatter_cannot_corrupt_the_file() {
         struct Flip;
         impl talk_core::format::Formatter for Flip {
@@ -216,9 +272,10 @@ mod tests {
             Event::Commit("i love this".into()),
             Event::Done,
         ]);
+        let lex = crate::lexicon::Lexicon::from_map(std::collections::BTreeMap::new());
         let cfg = RunConfig {
             base: dir.path(), date: "2026-06-08", time: "08:14", keep_raw: true, raw_sidecar: false, ephemeral: false,
-            formatter: &Flip, level: Level::Light,
+            formatter: &Flip, level: Level::Light, lexicon: &lex,
         };
         let p = run(&mut src, Target::Journal, &cfg).unwrap().unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
