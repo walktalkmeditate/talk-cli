@@ -2,11 +2,11 @@
 
 pub mod cleanup;
 pub mod clock;
-pub mod lexicon;
 pub mod entry;
 pub mod eval;
 pub mod format;
 pub mod frontmatter;
+pub mod lexicon;
 pub mod matchq;
 pub mod palette;
 pub mod questions;

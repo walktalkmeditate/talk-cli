@@ -514,4 +514,14 @@ mod tests {
         assert_eq!(strip_sound_tags("the buzzer rang"), "the buzzer rang"); // bare word kept
         assert_eq!(strip_sound_tags("it works (I think) well"), "it works (I think) well");
     }
+
+    #[test]
+    fn strip_sound_tags_keeps_an_unmatched_bracket() {
+        assert_eq!(strip_sound_tags("hello (world"), "hello (world"); // unmatched open → kept
+    }
+
+    #[test]
+    fn strip_sound_tags_removes_consecutive_tags() {
+        assert_eq!(strip_sound_tags("(cough) (laughs) okay"), "okay");
+    }
 }

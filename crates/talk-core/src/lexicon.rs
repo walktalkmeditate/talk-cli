@@ -3,10 +3,12 @@
 //! left-to-right pass over the original input: substituted output is never
 //! re-scanned, so cyclic and value-contains-key maps terminate.
 
-/// Apply word-bounded, case-insensitive substitutions. `corrections` MUST be
-/// sorted by descending key length (longest-first), so the longest matching key
-/// wins at each position. The value is emitted as written (later sentence-start
-/// capitalization by `deterministic_light` may still re-case it — that is accepted).
+/// Apply word-bounded substitutions, case-insensitive for ASCII letters only
+/// (non-ASCII casing such as é vs É is not folded — use lowercase non-ASCII keys).
+/// `corrections` MUST be sorted by descending key length (longest-first), so the
+/// longest matching key wins at each position. The value is emitted as written
+/// (later sentence-start capitalization by `deterministic_light` may still re-case
+/// it — that is accepted).
 pub fn apply_lexicon(text: &str, corrections: &[(String, String)]) -> String {
     if corrections.is_empty() {
         return text.to_string();
@@ -88,5 +90,11 @@ mod tests {
     #[test]
     fn empty_corrections_is_identity() {
         assert_eq!(apply_lexicon("nothing changes", &[]), "nothing changes");
+    }
+
+    #[test]
+    fn matches_key_at_end_of_input() {
+        let c = pairs(&[("toc", "talk")]);
+        assert_eq!(apply_lexicon("open toc", &c), "open talk"); // exercises end == b.len()
     }
 }
