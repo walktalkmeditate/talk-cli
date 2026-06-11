@@ -54,6 +54,9 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
+          # Required because the action is SHA-pinned (the toolchain is normally
+          # inferred from the @stable ref).
+          toolchain: stable
           targets: ${{ matrix.target }}
       - name: Install Linux audio deps (cpal/ALSA)
         if: runner.os == 'Linux'
@@ -101,6 +104,8 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable # required: the action is SHA-pinned
       - name: Install Linux audio deps (cpal/ALSA)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: Fail if the tag and crate version disagree
