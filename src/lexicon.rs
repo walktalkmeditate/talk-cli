@@ -42,10 +42,11 @@ impl Lexicon {
     }
 }
 
-/// The one transform both transcript paths apply to the CLEAN text: user lexicon
-/// first (so a corrected word is never mistaken for a sound tag), then sound-tags.
-pub fn correct(raw: &str, lexicon: &Lexicon) -> String {
-    talk_core::cleanup::strip_sound_tags(&lexicon.correct(raw))
+/// Produce the corrected text that feeds the CLEAN path from a raw transcript
+/// phrase: user lexicon first (so a corrected word is never mistaken for a sound
+/// tag), then sound-tags. The original raw phrase is stored separately, untouched.
+pub fn correct(text: &str, lexicon: &Lexicon) -> String {
+    talk_core::cleanup::strip_sound_tags(&lexicon.correct(text))
 }
 
 /// The fully-commented `lexicon.toml` written by `talk config init`.
