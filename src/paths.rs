@@ -25,6 +25,12 @@ pub fn config_dir() -> PathBuf {
     xdg_dir("XDG_CONFIG_HOME", ".config")
 }
 
+/// Where `state.json` and `streak.toml` live: `$XDG_DATA_HOME/talk`, else
+/// `~/.local/share/talk`.
+pub fn data_dir() -> PathBuf {
+    xdg_dir("XDG_DATA_HOME", ".local/share")
+}
+
 /// `$<env_var>/talk` when the env var is a valid absolute path (reusing
 /// `safe_env_dir`'s absolute + no-`..` check, which also ignores a relative
 /// `$XDG_*_HOME` per the XDG spec), else `~/<home_subdir>/talk`.
@@ -175,6 +181,14 @@ mod tests {
         assert!(config_dir().ends_with(".config/talk"), "{:?}", config_dir());
         std::env::remove_var("XDG_CONFIG_HOME");
         assert!(config_dir().ends_with(".config/talk"), "{:?}", config_dir());
+    }
+
+    #[test]
+    fn data_dir_honors_xdg_then_falls_back() {
+        std::env::set_var("XDG_DATA_HOME", "/tmp/xdg-data-test");
+        assert_eq!(data_dir(), PathBuf::from("/tmp/xdg-data-test/talk"));
+        std::env::remove_var("XDG_DATA_HOME");
+        assert!(data_dir().ends_with(".local/share/talk"), "{:?}", data_dir());
     }
 
     #[cfg(unix)]

@@ -5,6 +5,8 @@ fn talk(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_talk"))
         .args(args)
         .env("HOME", home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME")
         .output()
         .unwrap()
 }
@@ -34,9 +36,9 @@ fn ephemeral_leaves_zero_bytes_in_the_base_dir() {
     assert!(entries.is_empty(), "ephemeral persisted: {entries:?}");
     // Scope: base-dir bytes only. The models cache and OS swap are explicitly out
     // of scope (covered by the disclosure, not this test).
-    for name in [".state.json", ".streak.toml"] {
+    for name in ["state.json", "streak.toml"] {
         assert!(
-            !dir.path().join("talk").join(name).exists(),
+            !dir.path().join(".local/share/talk").join(name).exists(),
             "{name} written by ephemeral"
         );
     }

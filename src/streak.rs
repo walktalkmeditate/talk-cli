@@ -4,7 +4,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-pub const STREAK_FILE: &str = ".streak.toml";
+pub const STREAK_FILE: &str = "streak.toml";
 
 /// Local, account-free reflection record. A day is credited when an entry is
 /// saved that civil day (ported from meditate-cli; talk credits entries, not
@@ -117,6 +117,12 @@ pub fn record_entry(dir: &Path, today: i64) -> std::io::Result<Streak> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streak_file_is_not_dot_prefixed() {
+        assert_eq!(STREAK_FILE, "streak.toml");
+        assert!(Streak::path_in(Path::new("/x")).ends_with("streak.toml"));
+    }
 
     #[test]
     fn consecutive_days_grow_the_streak() {
