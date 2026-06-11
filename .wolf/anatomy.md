@@ -1,6 +1,6 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-06-11T01:18:38.045Z
+> Auto-maintained by OpenWolf. Last scanned: 2026-06-11T01:36:13.501Z
 > Files: 73 tracked | Anatomy hits: 0 | Misses: 0
 
 ## ../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/
@@ -40,7 +40,7 @@
 ## .github/workflows/
 
 - `ci.yml` — talk-cli CI. (~754 tok)
-- `release.yml` — /*.tar.gz (~2322 tok)
+- `release.yml` — /*.tar.gz (~2139 tok)
 
 ## crates/talk-core/
 

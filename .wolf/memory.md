@@ -169,3 +169,15 @@
 | 19:33 | Session end: 125 writes across 33 files (statusline.sh, pass_probe.rs, cleanup.rs, session.rs, format.rs) | 34 reads | ~152626 tok |
 | 20:18 | Edited .github/workflows/release.yml | 7→10 lines | ~156 |
 | 20:18 | Edited .github/workflows/release.yml | 5→7 lines | ~122 |
+
+## Session: 2026-06-11 20:33
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+| 20:35 | Edited .github/workflows/release.yml | 4→5 lines | ~104 |
+| 20:35 | Edited .github/workflows/release.yml | 7→4 lines | ~38 |
+| 20:35 | Edited .github/workflows/release.yml | removed 13 lines | ~24 |
+| 20:35 | Edited .github/workflows/release.yml | 4→3 lines | ~23 |
+| 20:36 | Edited .github/workflows/release.yml | 2→2 lines | ~44 |
+| 20:36 | Edited .github/workflows/release.yml | 4→4 lines | ~78 |
+| 01:30 | release: dropped Windows from matrix (libc/std::os::unix Unix-only); ship macOS+Linux | .github/workflows/release.yml | 3-target v0.1.0 | ~3k |
