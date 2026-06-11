@@ -183,9 +183,12 @@ pub fn apply_lexicon(text: &str, corrections: &[(String, String)]) -> String {
             corrections.iter().find_map(|(key, val)| {
                 let kb = key.as_bytes();
                 let end = i + kb.len();
-                let bounded_after = end == b.len() || !b[end].is_ascii_alphanumeric();
+                // `end <= b.len()` MUST gate the `b[end]` access below: inline the
+                // boundary check as the final `&&` clause so short-circuit prevents
+                // an out-of-bounds panic when a key is longer than the remaining input.
                 if !kb.is_empty() && end <= b.len()
-                    && b[i..end].eq_ignore_ascii_case(kb) && bounded_after
+                    && b[i..end].eq_ignore_ascii_case(kb)
+                    && (end == b.len() || !b[end].is_ascii_alphanumeric())
                 {
                     Some((kb.len(), val.as_str()))
                 } else {
