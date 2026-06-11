@@ -1,7 +1,11 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-06-10T23:24:54.183Z
-> Files: 72 tracked | Anatomy hits: 0 | Misses: 0
+> Auto-maintained by OpenWolf. Last scanned: 2026-06-10T23:26:25.117Z
+> Files: 73 tracked | Anatomy hits: 0 | Misses: 0
+
+## ../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/
+
+- `talk-cli-build-state.md` (~3370 tok)
 
 ## ./
 
