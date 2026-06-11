@@ -2,6 +2,7 @@ mod cli;
 mod config;
 #[cfg(feature = "download")]
 mod download;
+mod lexicon;
 mod keymap;
 #[cfg(feature = "listen")]
 mod live;
