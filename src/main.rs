@@ -464,32 +464,71 @@ fn byo_continue_or(base: &Path, q: &str) -> std::io::Result<Option<String>> {
     Ok(Some(if continue_it { existing_q.clone() } else { q.to_string() }))
 }
 
-/// First-run prompt: offer to fetch the models now (~330 MB is the stated
-/// total — whisper base.en + streaming zipformer). The returning-user copy explains
-/// why the download grew and that the old caches are now dead weight. Reads one
-/// stdin line; only `y`/`Y` accepts.
+/// First-run prompt: offer to fetch the on-device speech models (~330 MB, one time —
+/// whisper base.en + streaming zipformer). TTY-only; defaults to yes (Enter accepts),
+/// since someone running a voice CLI wants voice — but an explicit `n`, or EOF on a
+/// closed stdin, declines, so a 330 MB fetch never starts unasked.
 #[cfg(feature = "listen")]
 fn offer_first_run_fetch() -> std::io::Result<bool> {
     use std::io::Write;
     print!(
-        "talk's transcription engine changed (live streaming + a better model). \
-new models: ~330 MB, one time. your old models are no longer used (left in place, \
-~30 MB — harmless). download now? [y/N] "
+        "talk needs its on-device speech models — about 330 MB, downloaded once and \
+kept on your machine. Get them now? [Y/n] "
     );
     std::io::stdout().flush()?;
     let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    Ok(matches!(line.trim(), "y" | "Y"))
+    let n = std::io::stdin().read_line(&mut line)?;
+    Ok(accept_fetch(n, &line))
+}
+
+/// First-run consent decision (pure, for testability): Enter/whitespace accepts; an
+/// explicit `n`/`N`, or EOF (`bytes_read == 0`), declines — so a 330 MB fetch never
+/// starts unasked.
+#[cfg(feature = "listen")]
+fn accept_fetch(bytes_read: usize, line: &str) -> bool {
+    bytes_read > 0 && !matches!(line.trim(), "n" | "N")
+}
+
+#[cfg(all(test, feature = "listen"))]
+mod first_run_consent_tests {
+    use super::accept_fetch;
+    #[test]
+    fn defaults_to_yes_but_n_or_eof_declines() {
+        assert!(accept_fetch(1, "\n"), "Enter accepts");
+        assert!(accept_fetch(2, "y\n"), "y accepts");
+        assert!(accept_fetch(3, "  \n"), "whitespace accepts");
+        assert!(!accept_fetch(2, "n\n"), "n declines");
+        assert!(!accept_fetch(2, "N\n"), "N declines");
+        assert!(!accept_fetch(0, ""), "EOF declines");
+    }
 }
 
 /// Fetch every model artifact — shared by `talk download models` and the live
 /// session's first-run fetch offer (one implementation, one behavior).
 #[cfg(feature = "download")]
 fn fetch_all_models() -> std::io::Result<()> {
+    use std::io::{IsTerminal, Write};
+    let tty = std::io::stderr().is_terminal();
     for art in download::models::MODELS {
-        println!("fetching {} …", art.name);
-        download::fetch(art, &paths::models_dir()).map_err(std::io::Error::other)?;
-        println!("  ✓ {}", art.name);
+        if !tty {
+            println!("fetching {} …", art.name);
+        }
+        download::fetch(art, &paths::models_dir(), &mut |done, total| {
+            if !tty {
+                return;
+            }
+            match total {
+                Some(t) => eprint!("\r  ↓ {}  {:.0}/{:.0} MB ", art.name, done as f64 / 1e6, t as f64 / 1e6),
+                None => eprint!("\r  ↓ {}  {:.0} MB ", art.name, done as f64 / 1e6),
+            }
+            let _ = std::io::stderr().flush();
+        })
+        .map_err(std::io::Error::other)?;
+        if tty {
+            eprintln!("\r  ✓ {}                                        ", art.name);
+        } else {
+            println!("  ✓ {}", art.name);
+        }
     }
     Ok(())
 }

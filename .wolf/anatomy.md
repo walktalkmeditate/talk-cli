@@ -1,6 +1,6 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-06-11T17:51:49.135Z
+> Auto-maintained by OpenWolf. Last scanned: 2026-06-11T18:35:51.898Z
 > Files: 81 tracked | Anatomy hits: 0 | Misses: 0
 
 ## ../../../../../tmp/
@@ -9,8 +9,8 @@
 
 ## ../../../.claude/projects/-Users-rubberduck-GitHub-momentmaker-talk-cli/memory/
 
-- `MEMORY.md` — Memory index (~136 tok)
-- `talk-cli-build-state.md` (~4943 tok)
+- `MEMORY.md` — Memory index (~158 tok)
+- `talk-cli-build-state.md` (~5351 tok)
 
 ## ./
 
@@ -110,7 +110,7 @@
 - `config.rs` — [derive(Clone, Debug, Serialize, Deserialize)] (~1157 tok)
 - `keymap.rs` — [derive(Clone, Copy, Debug, PartialEq, Eq)] (~465 tok)
 - `live.rs` — Curated close phrases (spec §7) — rotated by entry count so a returning user (~4995 tok)
-- `main.rs` — Declares Shape (~9506 tok)
+- `main.rs` — Declares Shape (~9890 tok)
 - `packs.rs` — Every pack compiled into the binary, in display order. (~583 tok)
 - `paths.rs` — Resolve the base dir: explicit override, else `TALK_BASE_DIR`, else `~/talk`. (~2124 tok)
 - `session.rs` — Consume the whole source, cleaning each committed phrase through (~2787 tok)
@@ -121,7 +121,7 @@
 
 ## src/download/
 
-- `mod.rs` — Redirect hops to tolerate (GitHub release assets 302 once to their CDN). (~1894 tok)
+- `mod.rs` — Redirect hops to tolerate (GitHub release assets 302 once to their CDN). (~2214 tok)
 - `models.rs` — One downloadable artifact with a pinned hash. Fill `sha256` from the actual (~1364 tok)
 
 ## src/listen/
