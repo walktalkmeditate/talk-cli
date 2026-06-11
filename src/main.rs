@@ -173,10 +173,12 @@ struct Report<'a> {
 }
 
 fn run_and_report(r: Report) -> std::io::Result<()> {
+    let lexicon = lexicon::Lexicon::load(&paths::lexicon_path());
     let path = run(&mut FakeTranscript::from_text(r.text), r.target,
         &RunConfig {
             base: r.base, date: r.date, time: r.time, keep_raw: r.keep_raw, raw_sidecar: r.raw_sidecar, ephemeral: r.ephemeral,
             formatter: &talk_core::format::DeterministicFormatter, level: r.level,
+            lexicon: &lexicon,
         })?;
     if let Some(p) = path {
         match r.held_day {
@@ -599,7 +601,9 @@ fn handle_config(action: Option<&str>) -> std::io::Result<()> {
         Some("init") => {
             if let Some(dir) = p.parent() { paths::ensure_base_dir(dir)?; }
             paths::write_private(&p, &config::Config::commented_template())?;
-            println!("wrote {}", p.display());
+            let lp = paths::lexicon_path();
+            paths::write_private(&lp, lexicon::template())?;
+            println!("wrote {} and {}", p.display(), lp.display());
         }
         Some("path") => println!("{}", p.display()),
         _ => print!("{}", config::Config::commented_template()),
