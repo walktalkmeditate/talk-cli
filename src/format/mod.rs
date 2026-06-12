@@ -58,7 +58,8 @@ impl SmolFormatter {
         let ct = gguf_file::Content::read(&mut file).map_err(|e| e.to_string())?;
         let model = ModelWeights::from_gguf(ct, &mut file, &device).map_err(|e| e.to_string())?;
         let tokenizer = Tokenizer::from_file(tokenizer_path).map_err(|e| e.to_string())?;
-        let eos = tokenizer.get_vocab(true).get("<|im_end|>").copied().unwrap_or(2);
+        let eos = tokenizer.get_vocab(true).get("<|im_end|>").copied()
+            .ok_or("tokenizer has no <|im_end|> token")?;
         Ok(SmolFormatter { model: RefCell::new(model), tokenizer, device, eos, abandoned })
     }
 
@@ -77,6 +78,9 @@ impl SmolFormatter {
         let text_len = self.tokenizer.encode(text, false)
             .map(|e| e.get_ids().len()).unwrap_or(prompt_tokens.len());
         let budget = cap_new_tokens(text_len);
+        if prompt_tokens.len() + budget > MAX_SEQ_LEN {
+            return Err("prompt + budget exceeds the context window".into());
+        }
 
         // Fresh model per call, forward from index_pos=0 → KV cache is empty; there
         // is no clear_kv_cache on quantized_llama::ModelWeights and none is needed.
@@ -124,7 +128,7 @@ mod tests {
     #[test]
     fn chatml_wraps_system_and_user_turns() {
         let p = build_chatml("SYS", "USR");
-        assert!(p.starts_with("<|im_start|>system\nSYS<|im_end|>\n<|im_start|>user\nUSR<|im_end|>\n<|im_start|>assistant\n"));
+        assert_eq!(p, "<|im_start|>system\nSYS<|im_end|>\n<|im_start|>user\nUSR<|im_end|>\n<|im_start|>assistant\n");
     }
 
     #[test]
