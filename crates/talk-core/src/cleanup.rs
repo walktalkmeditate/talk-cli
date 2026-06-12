@@ -38,6 +38,46 @@ pub fn guard_accepts(input: &str, output: &str) -> bool {
     content_words(input) == content_words(output)
 }
 
+/// Words/contractions whose deletion inverts meaning — never droppable by the
+/// Medium/High guard.
+const PINNED_NEGATIONS: &[&str] = &[
+    "not", "never", "no", "none", "nor", "cannot", "neither", "nobody",
+    "nothing", "nowhere", "without",
+];
+
+/// Count negations in `text`. Scans raw whitespace tokens (NOT `content_words`,
+/// which splits on the apostrophe and so can never see "n't"): a token in
+/// `PINNED_NEGATIONS` or ending in "n't" (can't, won't, isn't, …) counts.
+fn negation_count(text: &str) -> usize {
+    text.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'').to_lowercase())
+        .filter(|w| PINNED_NEGATIONS.contains(&w.as_str()) || w.ends_with("n't"))
+        .count()
+}
+
+fn is_subsequence(needle: &[String], hay: &[String]) -> bool {
+    let mut it = hay.iter();
+    needle.iter().all(|w| it.any(|h| h == w))
+}
+
+/// The Medium/High moat: accept a rewrite that only DELETES content words (filler /
+/// false starts) and reflows whitespace. The output's content words must be a
+/// subsequence of the input's; no negation may be dropped (incl. contractions); and
+/// at least 60% of content words must survive (a wholesale clause collapse fails
+/// closed). KNOWN LIMIT: like `guard_accepts`, deleting a non-negation content word
+/// such as a concessive "but" is permitted — the 60% budget backstops gross loss.
+pub fn guard_accepts_deletions(input: &str, output: &str) -> bool {
+    let inp = content_words(input);
+    let out = content_words(output);
+    if out.len() * 5 < inp.len() * 3 {
+        return false; // out/inp < 0.6
+    }
+    if negation_count(output) < negation_count(input) {
+        return false;
+    }
+    is_subsequence(&out, &inp)
+}
+
 /// Apply spoken formatting commands deterministically. Padding the input with
 /// spaces lets a command at the phrase start or end match too (the replacements
 /// are space-delimited). Note: back-to-back identical commands ("new line new
@@ -305,7 +345,7 @@ pub fn rewrite_prompt(level: Level, text: &str) -> RewritePrompt {
         Level::None => "Return the text exactly as given.",
         Level::Light => "Fix only capitalization and punctuation, and drop leading non-lexical filler (um, uh, er, ah). Remove no other words.",
         Level::Medium => "Also remove disfluencies and false starts and join fragments into sentences. Keep every meaning-bearing word.",
-        Level::High => "Also break into paragraphs at topic shifts and turn spoken lists into bullets. Keep every meaning-bearing word.",
+        Level::High => "Also break into paragraphs at topic shifts. Keep every meaning-bearing word, in its original order, adding nothing.",
     };
     RewritePrompt {
         system: format!("{restraint} {rule}"),
@@ -534,5 +574,31 @@ mod tests {
     #[test]
     fn strip_sound_tags_removes_consecutive_tags() {
         assert_eq!(strip_sound_tags("(cough) (laughs) okay"), "okay");
+    }
+
+    #[test]
+    fn deletions_guard_accepts_filler_removal_and_reflow() {
+        assert!(guard_accepts_deletions("um so i mean the thing", "the thing"));
+        assert!(guard_accepts_deletions("a b c", "a b\n\nc"));
+    }
+
+    #[test]
+    fn deletions_guard_rejects_substitution_addition_reorder() {
+        assert!(!guard_accepts_deletions("i love her", "i hate her"));
+        assert!(!guard_accepts_deletions("i am tired", "i am very tired"));
+        assert!(!guard_accepts_deletions("the cat sat", "sat the cat"));
+    }
+
+    #[test]
+    fn deletions_guard_rejects_dropped_negations_including_contractions() {
+        assert!(!guard_accepts_deletions("i am not sure", "i am sure"));
+        assert!(!guard_accepts_deletions("i can't go", "i can go"));
+        assert!(!guard_accepts_deletions("i won't do it", "i will do it"));
+        assert!(!guard_accepts_deletions("there is no way", "there is way"));
+    }
+
+    #[test]
+    fn deletions_guard_rejects_wholesale_clause_collapse() {
+        assert!(!guard_accepts_deletions("the quick brown fox jumps over", "fox"));
     }
 }
