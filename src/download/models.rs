@@ -88,3 +88,31 @@ pub const EXTRACTED: &[(&str, &str)] = &[
         "49e3c2646595fd907228b3c6787069658f67b17377c60aeb8619c4551b2316fb",
     ),
 ];
+
+/// The on-device formatter model (Medium/High cleanup): SmolLM2-360M-Instruct
+/// Q4_K_M GGUF + its tokenizer. Fetched LAZILY on first Medium/High use — NOT part
+/// of the first-run speech-model offer (`MODELS`). Raw files: `download::fetch`
+/// skips extraction for non-`.tar.bz2` names, and `download::verify` hashes the file
+/// directly, so no `EXTRACTED` entries are needed.
+#[cfg(feature = "format")]
+pub const FORMATTER_MODELS: &[Artifact] = &[
+    Artifact {
+        name: "SmolLM2-360M-Instruct-Q4_K_M.gguf",
+        url: "https://huggingface.co/bartowski/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct-Q4_K_M.gguf",
+        sha256: "2fa3f013dcdd7b99f9b237717fa0b12d75bbb89984cc1274be1471a465bac9c2",
+    },
+    Artifact {
+        name: "SmolLM2-360M-Instruct-tokenizer.json",
+        url: "https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct/resolve/main/tokenizer.json",
+        sha256: "9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c",
+    },
+];
+
+/// True when both formatter files exist on disk and pass their pinned hashes.
+#[cfg(feature = "format")]
+pub fn formatter_ready(dir: &std::path::Path) -> bool {
+    FORMATTER_MODELS.iter().all(|a| {
+        let p = dir.join(a.name);
+        p.exists() && crate::download::verify(&p, a.sha256).unwrap_or(false)
+    })
+}
