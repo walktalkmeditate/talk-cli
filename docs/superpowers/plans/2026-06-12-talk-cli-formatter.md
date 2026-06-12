@@ -12,7 +12,7 @@ Spec: `docs/superpowers/specs/2026-06-11-talk-cli-formatter-design.md`. Verified
 - Loader: `candle_transformers::models::quantized_llama::ModelWeights::from_gguf` — correct for SmolLM2 (llama arch, interleaved RoPE; **no** Qwen2 problem).
 - Model: `bartowski/SmolLM2-360M-Instruct-GGUF` → `SmolLM2-360M-Instruct-Q4_K_M.gguf` (271 MB). Tokenizer: separate `tokenizer.json` (~3 MB) from `HuggingFaceTB/SmolLM2-360M-Instruct`.
 - **EOS = `<|im_end|>` (id 2)**, NOT `<|endoftext|>` — wrong EOS = generates forever.
-- `forward(x, index_pos)`: `index_pos=0` for prefill, +1 per decode step; `clear_kv_cache()` before each new prompt.
+- `forward(x, index_pos)`: `index_pos=0` for prefill, +1 per decode step. NOTE: `quantized_llama::ModelWeights` has **no** `clear_kv_cache` method (other candle models do; this one doesn't) — none is needed because we load a fresh model per call and `forward` from `index_pos=0`.
 - ChatML prompt: `<|im_start|>system\n…<|im_end|>\n<|im_start|>user\n…<|im_end|>\n<|im_start|>assistant\n`.
 - MSRV 1.82 safe; GPU deps opt-in. Metal on macOS via the `metal` feature.
 
@@ -114,11 +114,13 @@ pub fn guard_accepts_deletions(input: &str, output: &str) -> bool {
 
 - [ ] **Step 4: Run to verify pass** — `cargo test -p talk-core deletions_guard` → PASS (4 tests).
 
+- [ ] **Step 4b: Align the High prompt with the guard.** The guard rejects reordering and additions, but the existing `rewrite_prompt` High rule asks the model to "turn spoken lists into bullets" — which reorders items / adds lead-ins → the output isn't a subsequence → guard rejects → silent Light fallback. Narrow High to the deletion + paragraph-reflow the guard can accept. In `rewrite_prompt`, change the `Level::High` arm from `"Also break into paragraphs at topic shifts and turn spoken lists into bullets. Keep every meaning-bearing word."` to `"Also break into paragraphs at topic shifts. Keep every meaning-bearing word, in its original order, adding nothing."`. The existing `rewrite_prompt_widens_by_level_and_carries_the_text` test still passes (the rule still contains "paragraph"). Run `cargo test -p talk-core rewrite_prompt` → PASS.
+
 - [ ] **Step 5: Commit**
 
 ```bash
 git add crates/talk-core/src/cleanup.rs
-git commit -m "feat(core): guard_accepts_deletions — subsequence + pinned-negation + budget"
+git commit -m "feat(core): guard_accepts_deletions — subsequence + pinned-negation + budget; align High prompt"
 ```
 
 ---
@@ -404,9 +406,9 @@ mod tests {
 
     #[test]
     fn cap_new_tokens_is_bounded_and_proportional() {
-        assert_eq!(cap_new_tokens(100), 132);          // input + 32 margin
-        assert!(cap_new_tokens(10_000) <= 4096);        // never exceeds MAX_SEQ_LEN headroom
-        assert!(cap_new_tokens(0) >= 16);               // always allows a little
+        assert_eq!(cap_new_tokens(100), 132);
+        assert!(cap_new_tokens(10_000) < MAX_SEQ_LEN); // clamped under the context window
+        assert!(cap_new_tokens(0) >= 16);
     }
 }
 ```
@@ -458,22 +460,30 @@ pub struct SmolFormatter {
     tokenizer: Tokenizer,
     device: Device,
     eos: u32,
+    /// Set by the caller on a deadline timeout so the decode loop bails within one
+    /// token instead of orphaning a full-budget inference on the GPU/CPU.
+    abandoned: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SmolFormatter {
     /// Load the GGUF weights + tokenizer. Returns an error (so the caller falls back
     /// to Light) on any I/O or format problem.
-    pub fn load(gguf_path: &Path, tokenizer_path: &Path) -> Result<SmolFormatter, String> {
+    pub fn load(
+        gguf_path: &Path,
+        tokenizer_path: &Path,
+        abandoned: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<SmolFormatter, String> {
         let device = best_device();
         let mut file = std::fs::File::open(gguf_path).map_err(|e| e.to_string())?;
         let ct = gguf_file::Content::read(&mut file).map_err(|e| e.to_string())?;
         let model = ModelWeights::from_gguf(ct, &mut file, &device).map_err(|e| e.to_string())?;
         let tokenizer = Tokenizer::from_file(tokenizer_path).map_err(|e| e.to_string())?;
         let eos = tokenizer.get_vocab(true).get("<|im_end|>").copied().unwrap_or(2);
-        Ok(SmolFormatter { model: RefCell::new(model), tokenizer, device, eos })
+        Ok(SmolFormatter { model: RefCell::new(model), tokenizer, device, eos, abandoned })
     }
 
     fn generate(&self, level: Level, text: &str) -> Result<String, String> {
+        use std::sync::atomic::Ordering;
         let p = rewrite_prompt(level, text);
         let prompt = build_chatml(&p.system, &p.user);
         let encoded = self.tokenizer.encode(prompt.as_str(), false).map_err(|e| e.to_string())?;
@@ -481,11 +491,16 @@ impl SmolFormatter {
         if prompt_tokens.is_empty() || prompt_tokens.len() >= MAX_SEQ_LEN {
             return Err("prompt empty or too long".into());
         }
-        let budget = cap_new_tokens(prompt_tokens.len());
+        // Bound on the RAW TEXT length (cleanup output ≈ input), not the prompt
+        // wrapper — the ~60-word system restraint shouldn't inflate the budget. EOS
+        // (<|im_end|>) is the primary stop; this cap is the backstop.
+        let text_len = self.tokenizer.encode(text, false)
+            .map(|e| e.get_ids().len()).unwrap_or(prompt_tokens.len());
+        let budget = cap_new_tokens(text_len);
 
+        // Fresh model per call, forward from index_pos=0 → KV cache is empty; there
+        // is no clear_kv_cache on quantized_llama::ModelWeights and none is needed.
         let mut model = self.model.borrow_mut();
-        model.clear_kv_cache();
-
         let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
             .and_then(|t| t.unsqueeze(0)).map_err(|e| e.to_string())?;
         let logits = model.forward(&input, 0).map_err(|e| e.to_string())?;
@@ -494,7 +509,7 @@ impl SmolFormatter {
         let mut index_pos = prompt_tokens.len();
 
         for _ in 0..budget {
-            if next == self.eos { break; }
+            if next == self.eos || self.abandoned.load(Ordering::Relaxed) { break; }
             out.push(next);
             let input = Tensor::new(&[next], &self.device)
                 .and_then(|t| t.unsqueeze(0)).map_err(|e| e.to_string())?;
@@ -540,7 +555,8 @@ Add `#[cfg(feature = "format")] mod format;` to `src/main.rs` near the other `mo
         let gguf = dir.join("SmolLM2-360M-Instruct-Q4_K_M.gguf");
         let tok = dir.join("SmolLM2-360M-Instruct-tokenizer.json");
         if !gguf.exists() { eprintln!("skip: model not downloaded"); return; }
-        let f = SmolFormatter::load(&gguf, &tok).unwrap();
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let f = SmolFormatter::load(&gguf, &tok, flag).unwrap();
         let raw = "um so i guess i was you know thinking about the the thing and anyway it went well";
         let out = <SmolFormatter as talk_core::format::Formatter>::format(&f, Level::Medium, raw);
         assert!(talk_core::cleanup::guard_accepts_deletions(raw, &out),
@@ -576,24 +592,37 @@ fn document_format(level: talk_core::cleanup::Level, light_join: &str) -> String
     if matches!(level, Level::None | Level::Light) || light_join.trim().is_empty() {
         return light_join.to_string();
     }
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     let dir = paths::models_dir();
     if !download::models::formatter_ready(&dir) && !offer_formatter_fetch(&dir) {
+        // Non-interactive runs never block on the 271 MB download, so the formatter
+        // is silently skipped — say so once so a piped/cron `talk journal` (High by
+        // config) doesn't look like it's reshaping when it isn't.
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            eprintln!("note: formatter model not present — saved at Light. Run `talk download models` to enable paragraphs.");
+        }
         return light_join.to_string();
     }
     let gguf = dir.join("SmolLM2-360M-Instruct-Q4_K_M.gguf");
     let tok = dir.join("SmolLM2-360M-Instruct-tokenizer.json");
     let text = light_join.to_string();
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let worker_flag = abandoned.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let out = match format::SmolFormatter::load(&gguf, &tok) {
+        let out = match format::SmolFormatter::load(&gguf, &tok, worker_flag) {
             Ok(f) => talk_core::format::guarded_document(level, &text, &f),
             Err(_) => text,
         };
         let _ = tx.send(out);
     });
     let _spin = Spinner::start("  polishing…");
-    rx.recv_timeout(std::time::Duration::from_secs(120))
-        .unwrap_or_else(|_| light_join.to_string())
+    match rx.recv_timeout(std::time::Duration::from_secs(120)) {
+        Ok(out) => out,
+        // Hung-worker backstop: signal the orphan to bail within one token, take Light.
+        Err(_) => { abandoned.store(true, Ordering::Relaxed); light_join.to_string() }
+    }
 }
 
 #[cfg(not(feature = "format"))]
@@ -753,13 +782,21 @@ impl From<CleanArg> for talk_core::cleanup::Level {
 }
 ```
 
-- [ ] **Step 4: Apply the override.** Where each path computes its `Level`, let `--clean` win. On the live path (`run_live_session`, Step 4 of Task 7), wrap:
-```rust
-    let level = args.clean.map(Into::into).unwrap_or_else(|| {
-        if matches!(shape, Shape::Journal) { cfg.cleanup_for("journal") } else { cfg.cleanup_for("reflect") }
-    });
-```
-On the `--from-text` path, apply it where `Report.level` is set in `main.rs` (the `run_and_report` callers): `level: args.clean.map(Into::into).unwrap_or(cfg.cleanup_for("journal"))` for journal, etc. (Thread `args.clean` to those call sites; it's already on `args`.)
+- [ ] **Step 4: Apply the override.** `args.clean` (an `Option<CleanArg>`) is in scope in `main()` and `run_live_session` (both receive `args`). Let it win wherever a `Level` is chosen:
+
+  **(a) Live path** — replace the `let level = …` you added in Task 7 Step 4 of `run_live_session` with:
+  ```rust
+      let level = args.clean.map(Into::into).unwrap_or_else(|| {
+          if matches!(shape, Shape::Journal) { cfg.cleanup_for("journal") } else { cfg.cleanup_for("reflect") }
+      });
+  ```
+
+  **(b) `--from-text` journal arms** — in `main()`, the two journal `run_and_report` call sites (the `Some(Command::Journal)` arm and the bare-`talk` journal branch in the `_ =>` arm) set `level: cfg.cleanup_for("journal")`. Change both to:
+  ```rust
+      level: args.clean.map(Into::into).unwrap_or_else(|| cfg.cleanup_for("journal")),
+  ```
+
+  (The `unburden`/`vent` arm stays `Level::None` — ephemeral is never formatted. The `reflect` path runs at Light and routes through `reflect()`, which doesn't take `args`; `--clean` on reflect is out of scope for v1 — note it as a follow-up rather than threading `clean` through `reflect`/`reflect_choice`.)
 
 - [ ] **Step 5: Build + test + smoke**
 
@@ -781,4 +818,7 @@ git commit -m "feat: journal defaults to High; --clean override; fix config temp
 - **First build is slow.** Candle compiles a lot the first time (3–6 min). Subsequent builds are incremental.
 - **Latency is real.** A long journal at High is ~7–12 s on macOS (Metal), ~20–40 s on Linux CPU. The spinner covers it; the 120 s deadline is a hung-worker backstop, not a latency budget (the token cap bounds normal runs).
 - **Do NOT load the model on the reflect/Light path.** `document_format` short-circuits on `Level::Light`/`None` before any model touch — keep it that way so reflect stays instant and reflect-only users never trigger the 271 MB download.
-- **SHA pinning is mandatory.** `download::fetch` refuses any artifact whose hash still starts with `FILL`. Pin to a specific HF commit revision, not `main`.
+- **SHA pinning is mandatory + blocking.** `download::fetch` refuses any artifact whose hash still starts with `FILL`, so the feature is non-functional (and the smoke + manual tests can't pass) until a human runs Task 5 Step 2. Pin to a specific HF commit revision, not `main`.
+- **Task 7 is add-everything-then-build.** Steps 1–5 only add code (`document_format`, `offer_formatter_fetch`, `Spinner`, and the two call sites); the first `cargo build`/`cargo test` is Step 6. Rust resolves module items regardless of definition order, so the helpers and their caller can be added in any order within `main.rs` — there is no intermediate compile.
+- **The 60% deletion budget is provisional.** `content_words` already excludes the FILLERS set, so um/uh/you-know removal doesn't count against it — but heavy false-start/repetition removal might. Before trusting the default, run the `#[ignore]` `smol_smoke` test (Task 6 Step 5) over a few real disfluent-journal samples and check the guard acceptance rate; if healthy filler-heavy input rejects to Light too often, lower the floor (e.g. 50%) and record the measured rate next to the constant.
+- **The timed-out worker is signalled, not joined.** On the 120 s backstop, `document_format` sets the `abandoned` flag so the orphan's decode loop bails within one token, then the model drops and frees as the thread exits. The main thread never blocks on the worker.
