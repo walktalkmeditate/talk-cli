@@ -78,6 +78,35 @@ pub fn guard_accepts_deletions(input: &str, output: &str) -> bool {
     is_subsequence(&out, &inp)
 }
 
+/// Strip a chat model's conversational wrapper from a cleanup reply — a leading
+/// "Sure, here…:"/"Here is…:" preface line, surrounding ``` fences, and one pair of
+/// wrapping quotes — so a well-formed-but-prefixed reply isn't needlessly rejected
+/// by the guard. Best-effort; the guard + Light fallback are the real safety net.
+pub fn strip_model_preamble(text: &str) -> String {
+    let mut s = text.trim();
+    if let Some(rest) = s.strip_prefix("```") {
+        s = rest.split_once('\n').map(|(_, r)| r).unwrap_or("").trim();
+    }
+    if let Some(rest) = s.strip_suffix("```") {
+        s = rest.trim();
+    }
+    if let Some((first, rest)) = s.split_once('\n') {
+        let lower = first.trim().to_lowercase();
+        let prefaced = ["sure", "here is", "here's", "here are", "certainly", "okay", "ok"]
+            .iter().any(|p| lower.starts_with(p));
+        if prefaced && lower.ends_with(':') {
+            s = rest.trim();
+        }
+    }
+    for (open, close) in [('"', '"'), ('\'', '\''), ('\u{201c}', '\u{201d}')] {
+        if s.starts_with(open) && s.ends_with(close) && s.chars().count() >= 2 {
+            s = s[open.len_utf8()..s.len() - close.len_utf8()].trim();
+            break;
+        }
+    }
+    s.to_string()
+}
+
 /// Apply spoken formatting commands deterministically. Padding the input with
 /// spaces lets a command at the phrase start or end match too (the replacements
 /// are space-delimited). Note: back-to-back identical commands ("new line new
@@ -574,6 +603,14 @@ mod tests {
     #[test]
     fn strip_sound_tags_removes_consecutive_tags() {
         assert_eq!(strip_sound_tags("(cough) (laughs) okay"), "okay");
+    }
+
+    #[test]
+    fn strip_model_preamble_removes_preface_fences_quotes() {
+        assert_eq!(strip_model_preamble("Sure, here is the cleaned text:\n\nThe real thing."), "The real thing.");
+        assert_eq!(strip_model_preamble("```\nThe real thing.\n```"), "The real thing.");
+        assert_eq!(strip_model_preamble("\"The real thing.\""), "The real thing.");
+        assert_eq!(strip_model_preamble("Already clean."), "Already clean.");
     }
 
     #[test]
