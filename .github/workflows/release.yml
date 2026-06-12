@@ -59,7 +59,7 @@ jobs:
       - name: Install Linux audio deps (cpal/ALSA)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-      - run: cargo build --release --locked --features listen --target ${{ matrix.target }}
+      - run: cargo build --release --locked --features listen,format --target ${{ matrix.target }}
 
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'

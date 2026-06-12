@@ -9,6 +9,8 @@ use crate::cleanup::{apply_backtrack, apply_spoken_commands, deterministic_light
 /// transform — the deterministic pre-layer and the diff-guard are applied by
 /// `guarded_format`, never here. (So a formatter receives already-pre-processed
 /// text and must not re-apply spoken commands / backtrack.)
+///
+/// May receive a single phrase (guarded_format) or a whole document (guarded_document); implementors must be whole-text-safe.
 pub trait Formatter {
     fn format(&self, level: Level, text: &str) -> String;
 }
@@ -40,6 +42,73 @@ pub fn guarded_format(f: &dyn Formatter, level: Level, raw: &str) -> String {
         candidate
     } else {
         deterministic_light(&pre)
+    }
+}
+
+/// The whole-document moat (Medium/High). `full_text` is the caller's already-computed
+/// Light join; it is returned unchanged on every non-accept path (Light/None level,
+/// empty input, or guard rejection) — so the worst case is byte-identical to today's
+/// Light output. Only invoked with a model-backed formatter; `DeterministicFormatter`
+/// never flows through here (the caller skips the pass when no model is present).
+pub fn guarded_document(level: Level, full_text: &str, f: &dyn Formatter) -> String {
+    let fallback = full_text.to_string();
+    if matches!(level, Level::None | Level::Light) || full_text.trim().is_empty() {
+        return fallback;
+    }
+    let candidate = crate::cleanup::strip_model_preamble(&f.format(level, full_text));
+    if crate::cleanup::guard_accepts_deletions(full_text, &candidate) {
+        candidate
+    } else {
+        fallback
+    }
+}
+
+#[cfg(test)]
+mod doc_tests {
+    use super::*;
+
+    struct Paragrapher;
+    impl Formatter for Paragrapher {
+        fn format(&self, _l: Level, text: &str) -> String { text.replace(". ", ".\n\n") }
+    }
+    struct Substitutor;
+    impl Formatter for Substitutor {
+        fn format(&self, _l: Level, text: &str) -> String { text.replace("love", "hate") }
+    }
+    struct NegationDropper;
+    impl Formatter for NegationDropper {
+        fn format(&self, _l: Level, text: &str) -> String { text.replace(" not", "") }
+    }
+    struct Prefacer;
+    impl Formatter for Prefacer {
+        fn format(&self, _l: Level, text: &str) -> String { format!("Sure, here:\n{text}") }
+    }
+
+    #[test]
+    fn paragraph_reflow_accepted_at_high() {
+        let out = guarded_document(Level::High, "One thing. Two thing.", &Paragrapher);
+        assert!(out.contains("\n\n") && out.contains("One thing") && out.contains("Two thing"));
+    }
+    #[test]
+    fn substitution_falls_back_to_light_join() {
+        assert_eq!(guarded_document(Level::Medium, "i love her", &Substitutor), "i love her");
+    }
+    #[test]
+    fn negation_drop_falls_back() {
+        assert_eq!(guarded_document(Level::Medium, "i am not sure", &NegationDropper), "i am not sure");
+    }
+    #[test]
+    fn empty_input_short_circuits() {
+        assert_eq!(guarded_document(Level::High, "   ", &Substitutor), "   ");
+    }
+    #[test]
+    fn light_and_none_never_invoke_the_formatter() {
+        assert_eq!(guarded_document(Level::Light, "i love her", &Substitutor), "i love her");
+        assert_eq!(guarded_document(Level::None, "i love her", &Substitutor), "i love her");
+    }
+    #[test]
+    fn preface_is_stripped_then_accepted() {
+        assert_eq!(guarded_document(Level::Medium, "the real thing", &Prefacer), "the real thing");
     }
 }
 

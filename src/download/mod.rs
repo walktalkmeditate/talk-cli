@@ -85,7 +85,11 @@ pub fn fetch(
     // refused; the pinned SHA-256 is the integrity guarantee either way).
     // `identity` asks the server not to compress, so the hash is computed over
     // wire bytes and a gzip bomb can't amplify; the read cap bounds either way.
-    let agent = ureq::AgentBuilder::new().redirects(0).build();
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout_read(std::time::Duration::from_secs(600))
+        .timeout_write(std::time::Duration::from_secs(30))
+        .build();
     let get = |u: &str| {
         agent.get(u).set("Accept-Encoding", "identity").call().map_err(|e| e.to_string())
     };

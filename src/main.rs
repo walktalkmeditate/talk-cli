@@ -8,6 +8,8 @@ mod lexicon;
 mod live;
 #[cfg(feature = "listen")]
 mod listen;
+#[cfg(feature = "format")]
+mod format;
 mod packs;
 mod paths;
 mod render;
@@ -50,7 +52,7 @@ fn main() -> std::io::Result<()> {
         Some(Command::Journal) => {
             let text = require_text(&args.from_text);
             disclose_once()?;
-            run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: false, level: cfg.cleanup_for("journal"), held_day: None })?;
+            run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: false, level: resolve_level(args.clean, &cfg, "journal"), held_day: None })?;
         }
         Some(Command::Unburden) | Some(Command::Vent) => {
             let text = require_text(&args.from_text);
@@ -78,7 +80,7 @@ fn main() -> std::io::Result<()> {
             if args.question.is_none() && cfg.default_mode == "journal" {
                 let text = require_text(&args.from_text);
                 disclose_once()?;
-                run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: false, level: cfg.cleanup_for("journal"), held_day: None })?;
+                run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: false, level: resolve_level(args.clean, &cfg, "journal"), held_day: None })?;
             } else {
                 reflect(&base, &args.question, &date, &time, &require_text(&args.from_text), &cfg)?;
             }
@@ -378,6 +380,9 @@ fn run_live_session(
         render::paint_plain(&["  nothing captured.".to_string()])?;
         return Ok(Some(Ok(())));
     }
+
+    let level = resolve_level(args.clean, cfg, if matches!(shape, Shape::Journal) { "journal" } else { "reflect" });
+    result.clean = document_format(level, &result.clean);
 
     // Write with in-session recovery (spec §13): on failure offer retry /
     // clipboard / discard so the spoken words are never silently lost. Clipboard
@@ -814,6 +819,127 @@ fn is_journal_date_slug(slug: &str) -> bool {
         && b[5..7].iter().all(u8::is_ascii_digit)
         && b[7] == b'-'
         && b[8..10].iter().all(u8::is_ascii_digit)
+}
+
+/// Run the whole-document LLM pass on the final clean text, when the level warrants
+/// it and the model is present. Runs on a worker thread with a hung-worker deadline;
+/// any failure (declined download, load/inference error, timeout) returns the Light
+/// join unchanged. Called by run_live_session (live) and session::run (--from-text).
+#[cfg(feature = "format")]
+fn document_format(level: talk_core::cleanup::Level, light_join: &str) -> String {
+    use talk_core::cleanup::Level;
+    if matches!(level, Level::None | Level::Light) || light_join.trim().is_empty() {
+        return light_join.to_string();
+    }
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let dir = paths::models_dir();
+    if !download::models::formatter_ready(&dir) && !offer_formatter_fetch(&dir) {
+        // Non-interactive runs never block on the 271 MB download, so the formatter
+        // is silently skipped — say so once so a piped/cron `talk journal` (High by
+        // config) doesn't look like it's reshaping when it isn't.
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            eprintln!("note: formatter model not present — saved at Light. Run `talk download models` to enable paragraphs.");
+        }
+        return light_join.to_string();
+    }
+    let gguf = dir.join("SmolLM2-360M-Instruct-Q4_K_M.gguf");
+    let tok = dir.join("SmolLM2-360M-Instruct-tokenizer.json");
+    let text = light_join.to_string();
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let worker_flag = abandoned.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = match format::SmolFormatter::load(&gguf, &tok, worker_flag) {
+            Ok(f) => talk_core::format::guarded_document(level, &text, &f),
+            Err(_) => text,
+        };
+        let _ = tx.send(out);
+    });
+    let _spin = Spinner::start("  polishing…");
+    match rx.recv_timeout(std::time::Duration::from_secs(120)) {
+        Ok(out) => out,
+        // Hung-worker backstop: signal the orphan to bail within one token, take Light.
+        Err(_) => {
+            abandoned.store(true, Ordering::Relaxed);
+            eprintln!("note: formatting timed out — saved at Light.");
+            light_join.to_string()
+        }
+    }
+}
+
+#[cfg(not(feature = "format"))]
+fn document_format(_level: talk_core::cleanup::Level, light_join: &str) -> String {
+    light_join.to_string()
+}
+
+/// Offer the one-time formatter-model download (≈ 271 MB). TTY-gated, default-yes;
+/// `n`/EOF declines. Returns true only after a successful verified fetch.
+#[cfg(feature = "format")]
+fn offer_formatter_fetch(dir: &std::path::Path) -> bool {
+    use std::io::Write;
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return false; // never block a non-interactive run on a download
+    }
+    print!("talk's paragraph formatter needs a one-time model — about 271 MB, downloaded \
+            once and kept on your machine. Get it now? [Y/n] ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    let n = std::io::stdin().read_line(&mut line).unwrap_or(0);
+    if n == 0 || matches!(line.trim(), "n" | "N") {
+        return false;
+    }
+    for art in download::models::FORMATTER_MODELS {
+        eprint!("  ↓ {}…", art.name);
+        if let Err(e) = download::fetch(art, dir, &mut |_, _| {}) {
+            eprintln!(" failed: {e}");
+            return false;
+        }
+        eprintln!(" ✓");
+    }
+    download::models::formatter_ready(dir)
+}
+
+#[cfg(feature = "format")]
+struct Spinner(std::sync::Arc<std::sync::atomic::AtomicBool>, Option<std::thread::JoinHandle<()>>);
+
+#[cfg(feature = "format")]
+impl Spinner {
+    fn start(label: &'static str) -> Spinner {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let stop = Arc::new(AtomicBool::new(false));
+        if !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+            return Spinner(stop, None);
+        }
+        let s = stop.clone();
+        let h = std::thread::spawn(move || {
+            let frames = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+            let mut i = 0;
+            while !s.load(Ordering::Relaxed) {
+                eprint!("\r{} {}", frames[i % frames.len()], label);
+                let _ = std::io::Write::flush(&mut std::io::stderr());
+                std::thread::sleep(std::time::Duration::from_millis(90));
+                i += 1;
+            }
+            eprint!("\r\x1b[2K");
+            let _ = std::io::Write::flush(&mut std::io::stderr());
+        });
+        Spinner(stop, Some(h))
+    }
+}
+
+#[cfg(feature = "format")]
+impl Drop for Spinner {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.1.take() { let _ = h.join(); }
+    }
+}
+
+/// Resolve the cleanup level for a mode, with `--clean` overriding config.
+fn resolve_level(clean: Option<cli::CleanArg>, cfg: &config::Config, mode: &str) -> talk_core::cleanup::Level {
+    clean.map(Into::into).unwrap_or_else(|| cfg.cleanup_for(mode))
 }
 
 fn require_text(from: &Option<String>) -> String {

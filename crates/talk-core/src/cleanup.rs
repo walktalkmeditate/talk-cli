@@ -38,6 +38,78 @@ pub fn guard_accepts(input: &str, output: &str) -> bool {
     content_words(input) == content_words(output)
 }
 
+/// Words/contractions whose deletion inverts meaning — never droppable by the
+/// Medium/High guard.
+const PINNED_NEGATIONS: &[&str] = &[
+    "not", "never", "no", "none", "nor", "cannot", "neither", "nobody",
+    "nothing", "nowhere", "without",
+    "hardly", "barely", "scarcely", "rarely", "seldom",
+];
+
+/// Count negations in `text`. Uses raw whitespace tokens, not `content_words`,
+/// which splits on the apostrophe and so can never see "n't".
+fn negation_count(text: &str) -> usize {
+    text.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '\u{2019}').to_lowercase())
+        .filter(|w| PINNED_NEGATIONS.contains(&w.as_str()) || w.ends_with("n't") || w.ends_with("n\u{2019}t"))
+        .count()
+}
+
+fn is_subsequence(needle: &[String], hay: &[String]) -> bool {
+    let mut it = hay.iter();
+    needle.iter().all(|w| it.any(|h| h == w))
+}
+
+/// The Medium/High moat: accept a rewrite that only DELETES content words (filler /
+/// false starts) and reflows whitespace. The output's content words must be a
+/// subsequence of the input's; no negation may be dropped (incl. contractions); and
+/// at least 60% of content words must survive (a wholesale clause collapse fails
+/// closed). KNOWN LIMIT: like `guard_accepts`, deleting a non-negation content word
+/// such as a concessive "but" is permitted — the 60% budget backstops gross loss.
+pub fn guard_accepts_deletions(input: &str, output: &str) -> bool {
+    let inp = content_words(input);
+    let out = content_words(output);
+    if out.len() * 5 < inp.len() * 3 {
+        return false; // out/inp < 0.6
+    }
+    if negation_count(output) < negation_count(input) {
+        return false;
+    }
+    is_subsequence(&out, &inp)
+}
+
+/// Strip a chat model's conversational wrapper from a cleanup reply — a leading
+/// "Sure, here…:"/"Here is…:" preface line, surrounding ``` fences, and one pair of
+/// wrapping quotes — so a well-formed-but-prefixed reply isn't needlessly rejected
+/// by the guard. Best-effort; the guard + Light fallback are the real safety net.
+pub fn strip_model_preamble(text: &str) -> String {
+    let mut s = text.trim();
+    if let Some(rest) = s.strip_prefix("```") {
+        s = rest.split_once('\n').map(|(_, r)| r).unwrap_or("").trim();
+    }
+    if let Some(rest) = s.strip_suffix("```") {
+        s = rest.trim();
+    }
+    if let Some((first, rest)) = s.split_once('\n') {
+        let lower = first.trim().to_lowercase();
+        let prefaced = ["sure", "here is", "here's", "here are", "certainly", "okay", "ok"]
+            .iter().any(|p| lower.starts_with(p));
+        if prefaced && lower.ends_with(':') {
+            s = rest.trim();
+            if let Some(after) = s.strip_prefix("```") {
+                s = after.split_once('\n').map(|(_, r)| r).unwrap_or("").trim();
+            }
+        }
+    }
+    for (open, close) in [('"', '"'), ('\'', '\''), ('\u{201c}', '\u{201d}')] {
+        if s.starts_with(open) && s.ends_with(close) && s.chars().count() >= 2 {
+            s = s[open.len_utf8()..s.len() - close.len_utf8()].trim();
+            break;
+        }
+    }
+    s.to_string()
+}
+
 /// Apply spoken formatting commands deterministically. Padding the input with
 /// spaces lets a command at the phrase start or end match too (the replacements
 /// are space-delimited). Note: back-to-back identical commands ("new line new
@@ -305,7 +377,7 @@ pub fn rewrite_prompt(level: Level, text: &str) -> RewritePrompt {
         Level::None => "Return the text exactly as given.",
         Level::Light => "Fix only capitalization and punctuation, and drop leading non-lexical filler (um, uh, er, ah). Remove no other words.",
         Level::Medium => "Also remove disfluencies and false starts and join fragments into sentences. Keep every meaning-bearing word.",
-        Level::High => "Also break into paragraphs at topic shifts and turn spoken lists into bullets. Keep every meaning-bearing word.",
+        Level::High => "Also break into paragraphs at topic shifts. Keep every meaning-bearing word, in its original order, adding nothing.",
     };
     RewritePrompt {
         system: format!("{restraint} {rule}"),
@@ -534,5 +606,54 @@ mod tests {
     #[test]
     fn strip_sound_tags_removes_consecutive_tags() {
         assert_eq!(strip_sound_tags("(cough) (laughs) okay"), "okay");
+    }
+
+    #[test]
+    fn strip_model_preamble_removes_preface_fences_quotes() {
+        assert_eq!(strip_model_preamble("Sure, here is the cleaned text:\n\nThe real thing."), "The real thing.");
+        assert_eq!(strip_model_preamble("```\nThe real thing.\n```"), "The real thing.");
+        assert_eq!(strip_model_preamble("Sure, here is the cleaned text:\n```\nThe real thing.\n```"), "The real thing.");
+        assert_eq!(strip_model_preamble("\"The real thing.\""), "The real thing.");
+        assert_eq!(strip_model_preamble("```"), "");
+        assert_eq!(strip_model_preamble("Already clean."), "Already clean.");
+    }
+
+    #[test]
+    fn deletions_guard_accepts_filler_removal_and_reflow() {
+        assert!(guard_accepts_deletions("um so i mean the thing", "the thing"));
+        assert!(guard_accepts_deletions("a b c", "a b\n\nc"));
+    }
+
+    #[test]
+    fn deletions_guard_rejects_substitution_addition_reorder() {
+        assert!(!guard_accepts_deletions("i love her", "i hate her"));
+        assert!(!guard_accepts_deletions("i am tired", "i am very tired"));
+        assert!(!guard_accepts_deletions("the cat sat", "sat the cat"));
+    }
+
+    #[test]
+    fn deletions_guard_rejects_dropped_negations_including_contractions() {
+        assert!(!guard_accepts_deletions("i am not sure", "i am sure"));
+        assert!(!guard_accepts_deletions("i can't go", "i can go"));
+        assert!(!guard_accepts_deletions("i won't do it", "i will do it"));
+        assert!(!guard_accepts_deletions("there is no way", "there is way"));
+    }
+
+    #[test]
+    fn deletions_guard_rejects_wholesale_clause_collapse() {
+        assert!(!guard_accepts_deletions("the quick brown fox jumps over", "fox"));
+    }
+
+    #[test]
+    fn deletions_guard_rejects_dropped_semantic_negators() {
+        assert!(!guard_accepts_deletions("i hardly slept at all", "i slept at all"));
+        assert!(!guard_accepts_deletions("i barely made it", "i made it"));
+        assert!(!guard_accepts_deletions("i can\u{2019}t go", "i can go")); // curly apostrophe
+    }
+
+    #[test]
+    fn deletions_guard_budget_boundary() {
+        assert!(guard_accepts_deletions("a b c d e", "a b c"));   // 3/5 = 60% accept
+        assert!(!guard_accepts_deletions("a b c d e", "a b"));    // 2/5 = 40% reject
     }
 }
