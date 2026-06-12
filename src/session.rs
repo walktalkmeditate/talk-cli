@@ -56,6 +56,7 @@ pub fn run(
 
     let raw_joined = settle.settled().iter().map(|b| b.raw.as_str()).collect::<Vec<_>>().join(" ");
     let clean_joined = settle.settled().iter().map(|b| b.clean.as_str()).collect::<Vec<_>>().join(" ");
+    let clean_joined = crate::document_format(cfg.level, &clean_joined);
 
     write_entry(&WriteRequest {
         base: cfg.base,
