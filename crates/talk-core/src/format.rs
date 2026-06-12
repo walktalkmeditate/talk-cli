@@ -9,6 +9,7 @@ use crate::cleanup::{apply_backtrack, apply_spoken_commands, deterministic_light
 /// transform — the deterministic pre-layer and the diff-guard are applied by
 /// `guarded_format`, never here. (So a formatter receives already-pre-processed
 /// text and must not re-apply spoken commands / backtrack.)
+///
 /// May receive a single phrase (guarded_format) or a whole document (guarded_document); implementors must be whole-text-safe.
 pub trait Formatter {
     fn format(&self, level: Level, text: &str) -> String;

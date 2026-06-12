@@ -108,11 +108,10 @@ pub const FORMATTER_MODELS: &[Artifact] = &[
     },
 ];
 
-/// True when both formatter files exist on disk and pass their pinned hashes.
+/// True when both formatter files are present. (Integrity is enforced at download
+/// time by `download::fetch`; re-hashing the 271 MB GGUF on every journal save would
+/// be wasteful, so the per-session check is presence-only.)
 #[cfg(feature = "format")]
 pub fn formatter_ready(dir: &std::path::Path) -> bool {
-    FORMATTER_MODELS.iter().all(|a| {
-        let p = dir.join(a.name);
-        p.exists() && crate::download::verify(&p, a.sha256).unwrap_or(false)
-    })
+    FORMATTER_MODELS.iter().all(|a| dir.join(a.name).exists())
 }

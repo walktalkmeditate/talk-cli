@@ -52,7 +52,7 @@ fn main() -> std::io::Result<()> {
         Some(Command::Journal) => {
             let text = require_text(&args.from_text);
             disclose_once()?;
-            run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: false, level: args.clean.map(Into::into).unwrap_or_else(|| cfg.cleanup_for("journal")), held_day: None })?;
+            run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: false, level: resolve_level(args.clean, &cfg, "journal"), held_day: None })?;
         }
         Some(Command::Unburden) | Some(Command::Vent) => {
             let text = require_text(&args.from_text);
@@ -80,7 +80,7 @@ fn main() -> std::io::Result<()> {
             if args.question.is_none() && cfg.default_mode == "journal" {
                 let text = require_text(&args.from_text);
                 disclose_once()?;
-                run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: false, level: args.clean.map(Into::into).unwrap_or_else(|| cfg.cleanup_for("journal")), held_day: None })?;
+                run_and_report(Report { base: &base, target: Target::Journal, date: &date, time: &time, text: &text, keep_raw: cfg.keep_raw, raw_sidecar: cfg.raw_sidecar, ephemeral: false, level: resolve_level(args.clean, &cfg, "journal"), held_day: None })?;
             } else {
                 reflect(&base, &args.question, &date, &time, &require_text(&args.from_text), &cfg)?;
             }
@@ -381,9 +381,7 @@ fn run_live_session(
         return Ok(Some(Ok(())));
     }
 
-    let level = args.clean.map(Into::into).unwrap_or_else(|| {
-        if matches!(shape, Shape::Journal) { cfg.cleanup_for("journal") } else { cfg.cleanup_for("reflect") }
-    });
+    let level = resolve_level(args.clean, cfg, if matches!(shape, Shape::Journal) { "journal" } else { "reflect" });
     result.clean = document_format(level, &result.clean);
 
     // Write with in-session recovery (spec §13): on failure offer retry /
@@ -862,7 +860,11 @@ fn document_format(level: talk_core::cleanup::Level, light_join: &str) -> String
     match rx.recv_timeout(std::time::Duration::from_secs(120)) {
         Ok(out) => out,
         // Hung-worker backstop: signal the orphan to bail within one token, take Light.
-        Err(_) => { abandoned.store(true, Ordering::Relaxed); light_join.to_string() }
+        Err(_) => {
+            abandoned.store(true, Ordering::Relaxed);
+            eprintln!("note: formatting timed out — saved at Light.");
+            light_join.to_string()
+        }
     }
 }
 
@@ -920,7 +922,7 @@ impl Spinner {
                 std::thread::sleep(std::time::Duration::from_millis(90));
                 i += 1;
             }
-            eprint!("\r\x1b[2K"); // clear the line
+            eprint!("\r\x1b[2K");
             let _ = std::io::Write::flush(&mut std::io::stderr());
         });
         Spinner(stop, Some(h))
@@ -933,6 +935,11 @@ impl Drop for Spinner {
         self.0.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(h) = self.1.take() { let _ = h.join(); }
     }
+}
+
+/// Resolve the cleanup level for a mode, with `--clean` overriding config.
+fn resolve_level(clean: Option<cli::CleanArg>, cfg: &config::Config, mode: &str) -> talk_core::cleanup::Level {
+    clean.map(Into::into).unwrap_or_else(|| cfg.cleanup_for(mode))
 }
 
 fn require_text(from: &Option<String>) -> String {

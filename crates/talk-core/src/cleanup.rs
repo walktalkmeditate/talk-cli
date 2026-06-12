@@ -43,14 +43,15 @@ pub fn guard_accepts(input: &str, output: &str) -> bool {
 const PINNED_NEGATIONS: &[&str] = &[
     "not", "never", "no", "none", "nor", "cannot", "neither", "nobody",
     "nothing", "nowhere", "without",
+    "hardly", "barely", "scarcely", "rarely", "seldom",
 ];
 
 /// Count negations in `text`. Uses raw whitespace tokens, not `content_words`,
 /// which splits on the apostrophe and so can never see "n't".
 fn negation_count(text: &str) -> usize {
     text.split_whitespace()
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'').to_lowercase())
-        .filter(|w| PINNED_NEGATIONS.contains(&w.as_str()) || w.ends_with("n't"))
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '\u{2019}').to_lowercase())
+        .filter(|w| PINNED_NEGATIONS.contains(&w.as_str()) || w.ends_with("n't") || w.ends_with("n\u{2019}t"))
         .count()
 }
 
@@ -641,5 +642,18 @@ mod tests {
     #[test]
     fn deletions_guard_rejects_wholesale_clause_collapse() {
         assert!(!guard_accepts_deletions("the quick brown fox jumps over", "fox"));
+    }
+
+    #[test]
+    fn deletions_guard_rejects_dropped_semantic_negators() {
+        assert!(!guard_accepts_deletions("i hardly slept at all", "i slept at all"));
+        assert!(!guard_accepts_deletions("i barely made it", "i made it"));
+        assert!(!guard_accepts_deletions("i can\u{2019}t go", "i can go")); // curly apostrophe
+    }
+
+    #[test]
+    fn deletions_guard_budget_boundary() {
+        assert!(guard_accepts_deletions("a b c d e", "a b c"));   // 3/5 = 60% accept
+        assert!(!guard_accepts_deletions("a b c d e", "a b"));    // 2/5 = 40% reject
     }
 }
