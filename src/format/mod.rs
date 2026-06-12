@@ -90,16 +90,16 @@ impl SmolFormatter {
         let logits = model.forward(&input, 0).map_err(|e| e.to_string())?;
         let mut next = argmax(&logits)?;
         let mut out: Vec<u32> = Vec::new();
-        let mut index_pos = prompt_tokens.len();
 
-        for _ in 0..budget {
+        // index_pos = KV-cache length so far: starts past the prefilled prompt and
+        // advances one per decoded token.
+        for index_pos in (prompt_tokens.len()..).take(budget) {
             if next == self.eos || self.abandoned.load(Ordering::Relaxed) { break; }
             out.push(next);
             let input = Tensor::new(&[next], &self.device)
                 .and_then(|t| t.unsqueeze(0)).map_err(|e| e.to_string())?;
             let logits = model.forward(&input, index_pos).map_err(|e| e.to_string())?;
             next = argmax(&logits)?;
-            index_pos += 1;
         }
         self.tokenizer.decode(&out, true).map_err(|e| e.to_string())
     }
