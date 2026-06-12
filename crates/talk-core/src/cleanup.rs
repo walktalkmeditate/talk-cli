@@ -45,9 +45,8 @@ const PINNED_NEGATIONS: &[&str] = &[
     "nothing", "nowhere", "without",
 ];
 
-/// Count negations in `text`. Scans raw whitespace tokens (NOT `content_words`,
-/// which splits on the apostrophe and so can never see "n't"): a token in
-/// `PINNED_NEGATIONS` or ending in "n't" (can't, won't, isn't, …) counts.
+/// Count negations in `text`. Uses raw whitespace tokens, not `content_words`,
+/// which splits on the apostrophe and so can never see "n't".
 fn negation_count(text: &str) -> usize {
     text.split_whitespace()
         .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'').to_lowercase())
@@ -96,6 +95,9 @@ pub fn strip_model_preamble(text: &str) -> String {
             .iter().any(|p| lower.starts_with(p));
         if prefaced && lower.ends_with(':') {
             s = rest.trim();
+            if let Some(after) = s.strip_prefix("```") {
+                s = after.split_once('\n').map(|(_, r)| r).unwrap_or("").trim();
+            }
         }
     }
     for (open, close) in [('"', '"'), ('\'', '\''), ('\u{201c}', '\u{201d}')] {
@@ -609,7 +611,9 @@ mod tests {
     fn strip_model_preamble_removes_preface_fences_quotes() {
         assert_eq!(strip_model_preamble("Sure, here is the cleaned text:\n\nThe real thing."), "The real thing.");
         assert_eq!(strip_model_preamble("```\nThe real thing.\n```"), "The real thing.");
+        assert_eq!(strip_model_preamble("Sure, here is the cleaned text:\n```\nThe real thing.\n```"), "The real thing.");
         assert_eq!(strip_model_preamble("\"The real thing.\""), "The real thing.");
+        assert_eq!(strip_model_preamble("```"), "");
         assert_eq!(strip_model_preamble("Already clean."), "Already clean.");
     }
 

@@ -44,9 +44,9 @@ pub fn guarded_format(f: &dyn Formatter, level: Level, raw: &str) -> String {
     }
 }
 
-/// The whole-document moat (Medium/High). The Light join is bound BEFORE the
-/// formatter runs and returned on every non-accept path (Light/None level, empty
-/// input, or guard rejection) — so the worst case is byte-identical to today's
+/// The whole-document moat (Medium/High). `full_text` is the caller's already-computed
+/// Light join; it is returned unchanged on every non-accept path (Light/None level,
+/// empty input, or guard rejection) — so the worst case is byte-identical to today's
 /// Light output. Only invoked with a model-backed formatter; `DeterministicFormatter`
 /// never flows through here (the caller skips the pass when no model is present).
 pub fn guarded_document(level: Level, full_text: &str, f: &dyn Formatter) -> String {
