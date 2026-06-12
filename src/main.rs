@@ -8,6 +8,8 @@ mod lexicon;
 mod live;
 #[cfg(feature = "listen")]
 mod listen;
+#[cfg(feature = "format")]
+mod format;
 mod packs;
 mod paths;
 mod render;
