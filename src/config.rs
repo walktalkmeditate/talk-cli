@@ -25,7 +25,7 @@ impl Default for Config {
             auto_end_silence_seconds: 0,
             default_pack: "spine".into(),
             reflect_cleanup: "light".into(),
-            journal_cleanup: "medium".into(),
+            journal_cleanup: "high".into(),
             palette: None,
         }
     }
@@ -55,7 +55,7 @@ impl Config {
              default_pack = \"{pack}\"\n\
              # cleanup levels: none · light · medium · high\n\
              reflect_cleanup = \"{rc}\"        # light: caps + punctuation + leading filler. \"um so i guess\" → \"I guess.\"\n\
-             journal_cleanup = \"{jc}\"       # medium/high: deterministic-only in v1 (LLM enhances light); full LLM rewrite is future work\n\
+             journal_cleanup = \"{jc}\"       # medium: LLM removes filler/joins fragments · high: + paragraphs; falls back to light if the model is absent\n\
              # palette = \"rust\"             # rust (default) · high-contrast · mono — pin mono on light terminals\n",
             mode = d.default_mode, keep = d.keep_raw, sidecar = d.raw_sidecar,
             silence = d.auto_end_silence_seconds, pack = d.default_pack,
@@ -74,7 +74,7 @@ mod tests {
         assert_eq!(c.default_mode, "reflect");
         assert!(c.keep_raw);
         assert_eq!(c.cleanup_for("reflect"), Level::Light);
-        assert_eq!(c.cleanup_for("journal"), Level::Medium);
+        assert_eq!(c.cleanup_for("journal"), Level::High);
     }
 
     #[test]

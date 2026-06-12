@@ -23,6 +23,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub palette: Option<PaletteArg>,
 
+    /// Override cleanup intensity for this run: none · light · medium · high.
+    #[arg(long, global = true)]
+    pub clean: Option<CleanArg>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -59,6 +63,22 @@ impl From<PaletteArg> for talk_core::palette::Theme {
             PaletteArg::Rust => Theme::Rust,
             PaletteArg::HighContrast => Theme::HighContrast,
             PaletteArg::Mono => Theme::Mono,
+        }
+    }
+}
+
+/// The `--clean` flag's accepted values: none · light · medium · high.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum CleanArg { None, Light, Medium, High }
+
+impl From<CleanArg> for talk_core::cleanup::Level {
+    fn from(a: CleanArg) -> Self {
+        use talk_core::cleanup::Level;
+        match a {
+            CleanArg::None => Level::None,
+            CleanArg::Light => Level::Light,
+            CleanArg::Medium => Level::Medium,
+            CleanArg::High => Level::High,
         }
     }
 }
