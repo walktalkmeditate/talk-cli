@@ -37,7 +37,9 @@ pub fn append(body: &str, entry: &Entry, mode: Mode) -> String {
 
 fn render_turn(entry: &Entry) -> String {
     match entry.raw {
-        Some(raw) => format!("<!-- raw: {} -->\n{}\n", sanitize_comment(raw), entry.clean),
+        // Blank line between the verbatim comment and the clean text, so the formatted
+        // entry reads as its own block (and isn't crowded against the raw in source view).
+        Some(raw) => format!("<!-- raw: {} -->\n\n{}\n", sanitize_comment(raw), entry.clean),
         None => format!("{}\n", entry.clean),
     }
 }
@@ -88,6 +90,12 @@ mod tests {
         // a `---` rule separates same-day entries, with the blank line above it that
         // markdown needs (else `---` underlines the line above into a heading).
         assert!(out2.contains("Morning.\n\n---\n\n## 21:30"), "{out2:?}");
+    }
+
+    #[test]
+    fn raw_comment_is_separated_from_clean_by_a_blank_line() {
+        let out = append("", &turn("2026-06-08", "08:14", Some("um the thing"), "The thing."), Mode::Journal);
+        assert!(out.contains("-->\n\nThe thing."), "{out:?}");
     }
 
     #[test]
