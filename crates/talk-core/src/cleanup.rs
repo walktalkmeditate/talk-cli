@@ -289,7 +289,7 @@ pub fn parse_level(s: &str) -> Level {
 /// Discourse openers that often begin a new train of thought in spoken monologue.
 const PARA_OPENERS: &[&str] = &[
     "anyway", "anyways", "so", "but", "now", "another", "also", "okay", "alright",
-    "well", "then", "actually", "honestly", "basically", "yeah",
+    "well", "then", "actually", "honestly", "basically",
 ];
 
 const MIN_SENTENCES_PER_PARA: usize = 3;
