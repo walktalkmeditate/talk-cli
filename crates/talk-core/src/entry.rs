@@ -14,11 +14,16 @@ pub enum Mode { Reflect, Journal }
 
 /// Append `entry` to `body` (the part after frontmatter), returning the new body.
 /// - Reflect: a new date appends `## DATE`; a repeat date nests `### HH:MM`.
-/// - Journal: every turn appends `## HH:MM` (the file is already one date).
+/// - Journal: every turn appends `## HH:MM` (the file is already one date); a `---`
+///   rule separates same-day entries. The blank line BEFORE the rule is required —
+///   `---` directly under text is a setext heading underline, not a divider.
 pub fn append(body: &str, entry: &Entry, mode: Mode) -> String {
     let block = render_turn(entry);
     match mode {
-        Mode::Journal => join(body, &format!("\n## {}\n{}", entry.time, block)),
+        Mode::Journal => {
+            let sep = if body.trim().is_empty() { "\n" } else { "\n\n---\n\n" };
+            format!("{}{}## {}\n{}", body.trim_end_matches('\n'), sep, entry.time, block)
+        }
         Mode::Reflect => {
             let date_header = format!("## {}", entry.date);
             if body.contains(&date_header) {
@@ -74,11 +79,15 @@ mod tests {
     }
 
     #[test]
-    fn journal_sections_are_time_keyed() {
+    fn journal_sections_are_time_keyed_with_a_divider() {
         let out = append("", &turn("2026-06-08", "08:14", None, "Morning."), Mode::Journal);
         assert!(out.contains("## 08:14") && !out.contains("## 2026-06-08"));
+        assert!(!out.contains("---"), "the first entry of the day has no leading divider");
         let out2 = append(&out, &turn("2026-06-08", "21:30", None, "Night."), Mode::Journal);
         assert!(out2.contains("## 08:14") && out2.contains("## 21:30"));
+        // a `---` rule separates same-day entries, with the blank line above it that
+        // markdown needs (else `---` underlines the line above into a heading).
+        assert!(out2.contains("Morning.\n\n---\n\n## 21:30"), "{out2:?}");
     }
 
     #[test]
