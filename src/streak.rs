@@ -68,6 +68,7 @@ pub fn civil_day(date: &str) -> Option<i64> {
 }
 
 /// Howard Hinnant's civil-from-days (UTC), dependency-free — `civil_day`'s inverse.
+#[allow(dead_code)]
 pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
