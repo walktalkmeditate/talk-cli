@@ -38,78 +38,6 @@ pub fn guard_accepts(input: &str, output: &str) -> bool {
     content_words(input) == content_words(output)
 }
 
-/// Words/contractions whose deletion inverts meaning — never droppable by the
-/// Medium/High guard.
-const PINNED_NEGATIONS: &[&str] = &[
-    "not", "never", "no", "none", "nor", "cannot", "neither", "nobody",
-    "nothing", "nowhere", "without",
-    "hardly", "barely", "scarcely", "rarely", "seldom",
-];
-
-/// Count negations in `text`. Uses raw whitespace tokens, not `content_words`,
-/// which splits on the apostrophe and so can never see "n't".
-fn negation_count(text: &str) -> usize {
-    text.split_whitespace()
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '\u{2019}').to_lowercase())
-        .filter(|w| PINNED_NEGATIONS.contains(&w.as_str()) || w.ends_with("n't") || w.ends_with("n\u{2019}t"))
-        .count()
-}
-
-fn is_subsequence(needle: &[String], hay: &[String]) -> bool {
-    let mut it = hay.iter();
-    needle.iter().all(|w| it.any(|h| h == w))
-}
-
-/// The Medium/High moat: accept a rewrite that only DELETES content words (filler /
-/// false starts) and reflows whitespace. The output's content words must be a
-/// subsequence of the input's; no negation may be dropped (incl. contractions); and
-/// at least 60% of content words must survive (a wholesale clause collapse fails
-/// closed). KNOWN LIMIT: like `guard_accepts`, deleting a non-negation content word
-/// such as a concessive "but" is permitted — the 60% budget backstops gross loss.
-pub fn guard_accepts_deletions(input: &str, output: &str) -> bool {
-    let inp = content_words(input);
-    let out = content_words(output);
-    if out.len() * 5 < inp.len() * 3 {
-        return false; // out/inp < 0.6
-    }
-    if negation_count(output) < negation_count(input) {
-        return false;
-    }
-    is_subsequence(&out, &inp)
-}
-
-/// Strip a chat model's conversational wrapper from a cleanup reply — a leading
-/// "Sure, here…:"/"Here is…:" preface line, surrounding ``` fences, and one pair of
-/// wrapping quotes — so a well-formed-but-prefixed reply isn't needlessly rejected
-/// by the guard. Best-effort; the guard + Light fallback are the real safety net.
-pub fn strip_model_preamble(text: &str) -> String {
-    let mut s = text.trim();
-    if let Some(rest) = s.strip_prefix("```") {
-        s = rest.split_once('\n').map(|(_, r)| r).unwrap_or("").trim();
-    }
-    if let Some(rest) = s.strip_suffix("```") {
-        s = rest.trim();
-    }
-    if let Some((first, rest)) = s.split_once('\n') {
-        let lower = first.trim().to_lowercase();
-        let prefaced = ["sure", "here is", "here's", "here are", "certainly", "okay", "ok"]
-            .iter().any(|p| lower.starts_with(p));
-        if prefaced && lower.ends_with(':') {
-            s = rest.trim();
-            if let Some(after) = s.strip_prefix("```") {
-                s = after.split_once('\n').map(|(_, r)| r).unwrap_or("").trim();
-            }
-        }
-    }
-    for (open, close) in [('"', '"'), ('\'', '\''), ('\u{201c}', '\u{201d}')] {
-        if s.starts_with(open) && s.ends_with(close) && s.chars().count() >= 2 {
-            s = s[open.len_utf8()..s.len() - close.len_utf8()].trim();
-            break;
-        }
-    }
-    s.to_string()
-}
-
 /// Apply spoken formatting commands deterministically. Padding the input with
 /// spaces lets a command at the phrase start or end match too (the replacements
 /// are space-delimited). Note: back-to-back identical commands ("new line new
@@ -355,6 +283,81 @@ pub fn parse_level(s: &str) -> Level {
         "medium" => Level::Medium,
         "high" => Level::High,
         _ => Level::Light,
+    }
+}
+
+/// Discourse openers that often begin a new train of thought in spoken monologue.
+const PARA_OPENERS: &[&str] = &[
+    "anyway", "anyways", "so", "but", "now", "another", "also", "okay", "alright",
+    "well", "then", "actually", "honestly", "basically",
+];
+
+const MIN_SENTENCES_PER_PARA: usize = 3;
+const MAX_SENTENCES_PER_PARA: usize = 6;
+
+/// Group a long monologue into readable paragraphs (the High level). Existing blank
+/// lines (a spoken "new paragraph") are preserved as hard breaks; within each run, a
+/// new paragraph starts at a sentence that opens with a discourse marker once the
+/// current paragraph already holds MIN_SENTENCES_PER_PARA sentences, or unconditionally
+/// once it reaches MAX_SENTENCES_PER_PARA — so breaks fall at thought shifts, never
+/// after every sentence, and no paragraph runs on forever.
+pub fn paragraphize(text: &str) -> String {
+    text.split("\n\n")
+        .map(|block| paragraphize_run(block.trim()))
+        .filter(|b| !b.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn paragraphize_run(run: &str) -> String {
+    let mut paras: Vec<Vec<String>> = vec![Vec::new()];
+    for s in split_sentences(run) {
+        let cur_len = paras.last().unwrap().len();
+        let opens = s.split_whitespace().next()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .is_some_and(|w| PARA_OPENERS.contains(&w.as_str()));
+        if (opens && cur_len >= MIN_SENTENCES_PER_PARA) || cur_len >= MAX_SENTENCES_PER_PARA {
+            paras.push(Vec::new());
+        }
+        paras.last_mut().unwrap().push(s);
+    }
+    paras.into_iter()
+        .filter(|p| !p.is_empty())
+        .map(|p| p.join(" "))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Split into sentences, keeping each sentence's terminal punctuation. A boundary is
+/// `.`/`!`/`?` (plus any trailing closing quotes) followed by whitespace or end.
+fn split_sentences(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        cur.push(c);
+        if matches!(c, '.' | '!' | '?') {
+            while matches!(chars.peek(), Some('"' | '\'' | '\u{201d}' | '\u{2019}' | ')')) {
+                cur.push(chars.next().unwrap());
+            }
+            if chars.peek().is_none_or(|n| n.is_whitespace()) {
+                out.push(cur.trim().to_string());
+                cur.clear();
+            }
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur.trim().to_string());
+    }
+    out
+}
+
+/// Apply whole-entry shaping for a level (called at session end on the joined clean
+/// text). High paragraphizes; lower levels pass through (per-phrase Light already ran).
+pub fn shape_entry(level: Level, text: &str) -> String {
+    match level {
+        Level::High => paragraphize(text),
+        _ => text.to_string(),
     }
 }
 
@@ -609,51 +612,51 @@ mod tests {
     }
 
     #[test]
-    fn strip_model_preamble_removes_preface_fences_quotes() {
-        assert_eq!(strip_model_preamble("Sure, here is the cleaned text:\n\nThe real thing."), "The real thing.");
-        assert_eq!(strip_model_preamble("```\nThe real thing.\n```"), "The real thing.");
-        assert_eq!(strip_model_preamble("Sure, here is the cleaned text:\n```\nThe real thing.\n```"), "The real thing.");
-        assert_eq!(strip_model_preamble("\"The real thing.\""), "The real thing.");
-        assert_eq!(strip_model_preamble("```"), "");
-        assert_eq!(strip_model_preamble("Already clean."), "Already clean.");
+    fn paragraphize_preserves_explicit_breaks() {
+        assert_eq!(paragraphize("First thought.\n\nSecond thought."), "First thought.\n\nSecond thought.");
+    }
+    #[test]
+    fn paragraphize_breaks_at_a_marker_after_enough_sentences() {
+        let t = "I woke up early. I made coffee. I read a book. Anyway, then I went for a walk. It was nice. The sun was out.";
+        let out = paragraphize(t);
+        assert!(out.contains("read a book.\n\nAnyway"), "{out}");
+    }
+    #[test]
+    fn paragraphize_leaves_short_text_in_one_paragraph() {
+        assert_eq!(paragraphize("Just one. And two."), "Just one. And two.");
+    }
+    #[test]
+    fn paragraphize_caps_a_long_marker_less_run() {
+        assert!(paragraphize("One. Two. Three. Four. Five. Six. Seven.").contains("\n\n"));
+    }
+    #[test]
+    fn shape_entry_only_paragraphizes_at_high() {
+        assert_eq!(shape_entry(Level::Medium, "A. B. C. D. E. F. G."), "A. B. C. D. E. F. G.");
+        assert!(shape_entry(Level::High, "A. B. C. D. E. F. G.").contains("\n\n"));
     }
 
     #[test]
-    fn deletions_guard_accepts_filler_removal_and_reflow() {
-        assert!(guard_accepts_deletions("um so i mean the thing", "the thing"));
-        assert!(guard_accepts_deletions("a b c", "a b\n\nc"));
+    fn paragraphize_never_alters_content_only_whitespace() {
+        // The safety property that replaces the removed LLM guard: paragraphize only
+        // moves whitespace; the non-whitespace character sequence is identical.
+        let strip = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        for inp in [
+            "Okay. So just testing. I asked Claude. And it works. Anyway that's all.",
+            "no punctuation here just a run on stream of words with no breaks",
+            "First.\n\nSecond. Third.",
+        ] {
+            assert_eq!(strip(&paragraphize(inp)), strip(inp), "content changed for {inp:?}");
+        }
     }
 
     #[test]
-    fn deletions_guard_rejects_substitution_addition_reorder() {
-        assert!(!guard_accepts_deletions("i love her", "i hate her"));
-        assert!(!guard_accepts_deletions("i am tired", "i am very tired"));
-        assert!(!guard_accepts_deletions("the cat sat", "sat the cat"));
+    fn paragraphize_handles_degenerate_inputs() {
+        assert_eq!(paragraphize(""), "");
+        assert_eq!(paragraphize("\n\n"), "");
+        assert_eq!(paragraphize("no terminal punctuation here at all"), "no terminal punctuation here at all");
+        // a marker as the very first sentence must not emit an empty leading paragraph
+        let out = paragraphize("So I started. Then I paused. And I thought. Anyway I went on. It was fine. The end came.");
+        assert!(!out.starts_with("\n\n") && !out.contains("\n\n\n"), "{out}");
     }
 
-    #[test]
-    fn deletions_guard_rejects_dropped_negations_including_contractions() {
-        assert!(!guard_accepts_deletions("i am not sure", "i am sure"));
-        assert!(!guard_accepts_deletions("i can't go", "i can go"));
-        assert!(!guard_accepts_deletions("i won't do it", "i will do it"));
-        assert!(!guard_accepts_deletions("there is no way", "there is way"));
-    }
-
-    #[test]
-    fn deletions_guard_rejects_wholesale_clause_collapse() {
-        assert!(!guard_accepts_deletions("the quick brown fox jumps over", "fox"));
-    }
-
-    #[test]
-    fn deletions_guard_rejects_dropped_semantic_negators() {
-        assert!(!guard_accepts_deletions("i hardly slept at all", "i slept at all"));
-        assert!(!guard_accepts_deletions("i barely made it", "i made it"));
-        assert!(!guard_accepts_deletions("i can\u{2019}t go", "i can go")); // curly apostrophe
-    }
-
-    #[test]
-    fn deletions_guard_budget_boundary() {
-        assert!(guard_accepts_deletions("a b c d e", "a b c"));   // 3/5 = 60% accept
-        assert!(!guard_accepts_deletions("a b c d e", "a b"));    // 2/5 = 40% reject
-    }
 }
