@@ -81,6 +81,7 @@ talk thread                # list your threads
 talk thread "what am I avoiding?"   # print one question's accumulated file
 talk streak                # your reflection streak
 talk config                # config helpers (config init · config path)
+talk journal --clean light  # override cleanup for one run (none · light · medium · high)
 ```
 
 **While it's listening:** `space` done · `p` pause (goes off-record — nothing said
@@ -103,11 +104,21 @@ while paused is kept) · `u` toggle raw ⇄ cleaned text · `esc` or `Ctrl-C` ca
 Two passes, both on-device. A streaming recognizer paints the live edge the instant
 you speak — that's the dim, jittering line. When you pause, that phrase commits and
 **Whisper base.en** refines it into final text: properly cased, punctuated, and locked
-bright. Light cleanup trims filler ("um", "uh") without rewriting your words — press
-`u` any time to see the verbatim transcript behind the cleaned one.
+bright. Cleanup is fully deterministic — no LLM, your words are never rewritten: it
+strips Whisper's non-speech tags (`(buzzer)`, `[BLANK_AUDIO]`) and groups long entries
+into paragraphs at natural thought-shifts. Levels are `none · light · medium · high`,
+set per run with `--clean` or pinned in config: **`journal` defaults to `high`**
+(paragraphs), reflect stays `light` (your exact words). Press `u` to see the verbatim
+transcript behind the cleaned text — it's always preserved.
+
+**Teach it your words.** Voice models mishear proper nouns — names, brands, jargon. A
+`~/.config/talk/lexicon.toml` (a commented template ships with `talk config init`) maps
+what talk hears to what you mean, so every entry is corrected — while the raw still
+records exactly what you said.
 
 Reflections land in **`~/talk/`** as plain markdown — reflect questions accumulate
-into per-question files, journal entries into dated files. Every file is yours, in a
+into per-question files, journal entries into one file per day — each timestamped
+(`## HH:MM`) and separated by a rule, so a day's reflections gather in one place. Every file is yours, in a
 directory only you can read. Config lives in `~/.config/talk` (`talk config path`
 prints it); your streak and state sit in `~/.local/share/talk` — so `~/talk` stays
 purely your reflections. (Both honor `$XDG_CONFIG_HOME` / `$XDG_DATA_HOME`.)

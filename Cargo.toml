@@ -5,7 +5,7 @@ members = ["crates/talk-core"]
 # unrelated crate); the installed command stays `talk` via the [[bin]] below.
 [package]
 name = "talk-cli"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.82"
 license = "MIT"
@@ -38,7 +38,7 @@ listen = ["download", "dep:cpal", "dep:sherpa-onnx", "dep:coreaudio-sys", "dep:z
 download = ["dep:ureq"]
 
 [dependencies]
-talk-core = { path = "crates/talk-core", version = "0.2.0" }
+talk-core = { path = "crates/talk-core", version = "0.3.0" }
 clap = { version = "=4.5.20", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
