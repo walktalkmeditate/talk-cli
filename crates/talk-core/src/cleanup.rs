@@ -635,4 +635,28 @@ mod tests {
         assert!(shape_entry(Level::High, "A. B. C. D. E. F. G.").contains("\n\n"));
     }
 
+    #[test]
+    fn paragraphize_never_alters_content_only_whitespace() {
+        // The safety property that replaces the removed LLM guard: paragraphize only
+        // moves whitespace; the non-whitespace character sequence is identical.
+        let strip = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        for inp in [
+            "Okay. So just testing. I asked Claude. And it works. Anyway that's all.",
+            "no punctuation here just a run on stream of words with no breaks",
+            "First.\n\nSecond. Third.",
+        ] {
+            assert_eq!(strip(&paragraphize(inp)), strip(inp), "content changed for {inp:?}");
+        }
+    }
+
+    #[test]
+    fn paragraphize_handles_degenerate_inputs() {
+        assert_eq!(paragraphize(""), "");
+        assert_eq!(paragraphize("\n\n"), "");
+        assert_eq!(paragraphize("no terminal punctuation here at all"), "no terminal punctuation here at all");
+        // a marker as the very first sentence must not emit an empty leading paragraph
+        let out = paragraphize("So I started. Then I paused. And I thought. Anyway I went on. It was fine. The end came.");
+        assert!(!out.starts_with("\n\n") && !out.contains("\n\n\n"), "{out}");
+    }
+
 }
