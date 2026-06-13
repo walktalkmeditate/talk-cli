@@ -3,9 +3,29 @@ import init, { Settle } from './wasm/talk_wasm.js';
 import { createTerminal } from './terminal';
 import { frameSequence } from './loop';
 import { Repl } from './repl';
-import { Theme, parseComposed } from './theme';
+import { Theme, parseComposed, themeTones, type Rgb } from './theme';
 
 const PROMPT = '❯ ';
+
+/**
+ * Push the loaded palette into CSS custom properties so the page chrome (touch
+ * chips, focus rings) derives from the same single-source-of-truth palette the
+ * terminal paints from, instead of a drifting hard-coded rust accent. The CSS
+ * uses `rgba(var(--accent-rgb), <a>)`; here we set just the `r,g,b` triple.
+ *
+ * Falls back to the `:root` default (set in style.css for the pre-JS paint) when
+ * the theme is Mono (null tones — no fixed RGB).
+ */
+function applyPaletteToCss(theme: string): void {
+  const tones = themeTones(theme);
+  const setRgb = (name: string, rgb: Rgb | null): void => {
+    if (rgb === null) return;
+    document.documentElement.style.setProperty(name, `${rgb[0]}, ${rgb[1]}, ${rgb[2]}`);
+  };
+  setRgb('--accent-rgb', tones.core);
+  setRgb('--dim-rgb', tones.dim);
+  setRgb('--edge-rgb', tones.edge);
+}
 
 /** Fade out and remove the zero-JS loading placeholder once the screen is live. */
 function dismissLoading(): void {
@@ -51,7 +71,9 @@ async function boot(): Promise<void> {
   const { term, fit } = createTerminal(screen);
   term.write('\x1b[?25l'); // hide the terminal cursor; the REPL renders its own
 
-  const theme = Theme.load('rust');
+  const themeName = 'rust';
+  applyPaletteToCss(themeName);
+  const theme = Theme.load(themeName);
 
   // Keyboard devices: grab focus so keystrokes land in the terminal without a
   // click, and re-focus on click and when the tab regains focus.

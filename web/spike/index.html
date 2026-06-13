@@ -141,6 +141,28 @@
     </header>
 
     <div class="layout">
+      <section class="card full" style="border-color: var(--warn); background: rgba(216, 184, 90, 0.08);">
+        <h2 style="opacity: 1; color: var(--warn);">⚠ Harness limitations — these bound what the numbers can prove</h2>
+        <ul style="margin: 0; padding-left: 1.1rem; font-size: 0.82rem; line-height: 1.6;">
+          <li><strong>Metrics 6 &amp; 7 are MAIN-THREAD ONLY.</strong> The fetch/XHR wrappers
+            patch only the page's fetch/XHR. A <strong>threaded</strong> sherpa build loads its
+            WASM + pthread workers via worker/pthread fetches the page <strong>cannot</strong>
+            intercept — those requests are invisible here. Verify module shape AND zero-egress
+            for a threaded build in the browser <strong>Network panel</strong> (or a proxy).</li>
+          <li><strong>crossOriginIsolated can't be enabled via meta-CSP.</strong> A
+            <code>&lt;meta&gt;</code> tag cannot set COOP/COEP, so the threading branch
+            (single-threaded OK vs threads needed) must be confirmed on a real
+            <strong>header-setting host</strong>, not from this spike.</li>
+          <li><strong>The chunked digest is I/O-only.</strong> It runs a full SHA-256 per slice
+            (placeholder), so its total ≈ the full-buffer cost. It is <strong>not</strong>
+            numerically comparable to the full-buffer hash — don't conclude "chunking isn't worth
+            it" from it. Wire a streaming SHA-256 for the real number.</li>
+          <li><strong>Footprint is baseline-subtracted but origin-wide.</strong> A pre-load
+            <code>storage.estimate()</code> baseline is subtracted so the delta ≈ the model cache,
+            but <code>estimate()</code> counts everything this origin has cached.</li>
+        </ul>
+      </section>
+
       <section class="card">
         <h2>1 · Mic &amp; recognition</h2>
         <div class="controls">
@@ -167,14 +189,14 @@
         <dl class="metrics">
           <dt>RTF — live edge</dt>          <dd id="m-rtf-live" class="val-pending">—</dd>
           <dt>RTF — finalize</dt>           <dd id="m-rtf-final" class="val-pending">—</dd>
-          <dt>Cached footprint</dt>         <dd id="m-storage" class="val-pending">—</dd>
+          <dt>Cached footprint Δ <span style="opacity:0.5">(baseline-subtracted, origin-wide)</span></dt>         <dd id="m-storage" class="val-pending">—</dd>
           <dt>digest (full buffer)</dt>     <dd id="m-digest-full" class="val-pending">—</dd>
-          <dt>digest (chunked)</dt>         <dd id="m-digest-chunk" class="val-pending">—</dd>
-          <dt>crossOriginIsolated</dt>      <dd id="m-coi" class="val-pending">—</dd>
+          <dt>digest (chunked) <span style="opacity:0.5">(I/O-only; not comparable)</span></dt>         <dd id="m-digest-chunk" class="val-pending">—</dd>
+          <dt>crossOriginIsolated <span style="opacity:0.5">(can't enable via meta-CSP)</span></dt>      <dd id="m-coi" class="val-pending">—</dd>
           <dt>SharedArrayBuffer</dt>        <dd id="m-sab" class="val-pending">—</dd>
-          <dt>threads requested</dt>        <dd id="m-threads" class="val-pending">—</dd>
+          <dt>threads requested <span style="opacity:0.5">(confirm on header host)</span></dt>        <dd id="m-threads" class="val-pending">—</dd>
           <dt>ran single-threaded</dt>      <dd id="m-singlethread" class="val-pending">—</dd>
-          <dt>modules fetched</dt>          <dd id="m-modcount" class="val-pending">—</dd>
+          <dt>modules fetched <span style="opacity:0.5">(main-thread only)</span></dt>          <dd id="m-modcount" class="val-pending">—</dd>
           <dt>asset consumption</dt>        <dd id="m-assetshape" class="val-pending">—</dd>
         </dl>
 

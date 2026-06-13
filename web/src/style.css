@@ -1,3 +1,10 @@
+/* The rust core RGB triple, single-source-of-truth from the WASM palette. main.ts
+   overwrites `--accent-rgb` from `themeTones(...)` once JS boots; this fallback is
+   the pre-JS paint value (rust core = 210,146,118). */
+:root {
+  --accent-rgb: 210, 146, 118;
+}
+
 .xterm {
   height: 100%;
   padding: 0;
@@ -29,18 +36,18 @@
   font-family: inherit;
   font-size: 0.85rem;
   color: #f0ddcf;
-  background: rgba(210, 146, 118, 0.16);
-  border: 1px solid rgba(210, 146, 118, 0.35);
+  background: rgba(var(--accent-rgb), 0.16);
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
   border-radius: 999px;
   padding: 0.45rem 0.95rem;
   cursor: pointer;
 }
 
 .chip:active {
-  background: rgba(210, 146, 118, 0.3);
+  background: rgba(var(--accent-rgb), 0.3);
 }
 
 .chip:focus-visible {
-  outline: 2px solid rgb(210, 146, 118);
+  outline: 2px solid rgba(var(--accent-rgb), 1);
   outline-offset: 2px;
 }

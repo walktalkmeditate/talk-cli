@@ -62,15 +62,22 @@ describe('LineKind → tone mapping', () => {
 describe('WCAG contrast against the page background', () => {
   it('gives core ≥4.5:1 and dim/edge ≥3:1', () => {
     const tones = themeTones('rust');
-    // Non-null for a color theme — asserted in the palette test above.
-    expect(contrast(tones.core as Rgb, PAGE_BG)).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(tones.dim as Rgb, PAGE_BG)).toBeGreaterThanOrEqual(3.0);
-    expect(contrast(tones.edge as Rgb, PAGE_BG)).toBeGreaterThanOrEqual(3.0);
+    // A color theme's tones are non-null; assert it so a future null fails the
+    // test instead of crashing on the `!`.
+    expect(tones.core).not.toBeNull();
+    expect(tones.dim).not.toBeNull();
+    expect(tones.edge).not.toBeNull();
+    expect(contrast(tones.core!, PAGE_BG)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(tones.dim!, PAGE_BG)).toBeGreaterThanOrEqual(3.0);
+    expect(contrast(tones.edge!, PAGE_BG)).toBeGreaterThanOrEqual(3.0);
   });
 
   it('keeps core brighter than dim, dim brighter than edge', () => {
     const tones = themeTones('rust');
-    expect(relLum(tones.core as Rgb)).toBeGreaterThanOrEqual(relLum(tones.dim as Rgb));
-    expect(relLum(tones.dim as Rgb)).toBeGreaterThanOrEqual(relLum(tones.edge as Rgb));
+    expect(tones.core).not.toBeNull();
+    expect(tones.dim).not.toBeNull();
+    expect(tones.edge).not.toBeNull();
+    expect(relLum(tones.core!)).toBeGreaterThanOrEqual(relLum(tones.dim!));
+    expect(relLum(tones.dim!)).toBeGreaterThanOrEqual(relLum(tones.edge!));
   });
 });

@@ -13,6 +13,32 @@ value that depends on the (unwired) recognizer reads `seam not wired` until you 
 
 ---
 
+## ⚠ Harness limitations — read before trusting any number
+
+These bound what the spike can prove. They are surfaced loudly in the results panel and the copied
+memo as well.
+
+- **Metrics 6 & 7 (module shape + zero-egress) are MAIN-THREAD ONLY.** The `fetch`/`XHR` wrappers
+  patch only the page's `fetch`/`XHR`. A **threaded** sherpa build loads its WASM + pthread workers
+  via worker/pthread fetches the page **cannot** intercept — those requests are invisible here.
+  **Confirm module shape AND egress for a threaded build in the browser Network panel** (or a logging
+  proxy), not from this harness.
+- **`crossOriginIsolated` can't be enabled via meta-CSP.** A `<meta>` tag cannot set COOP/COEP, so
+  the threading branch (*single-threaded OK* vs *threads needed*) must be confirmed on a real
+  **header-setting host**, not concluded from this spike.
+- **The chunked digest (metric 3) is I/O-only.** It runs a full SHA-256 per slice (placeholder), so
+  its total ≈ the full-buffer cost. It is **not** numerically comparable to the full-buffer hash —
+  do **not** conclude "chunking isn't worth it" from it. Wire a streaming SHA-256 (e.g. `hash-wasm`)
+  for the true chunked cost.
+- **Footprint (metric 2) is baseline-subtracted but origin-wide.** A pre-load `storage.estimate()`
+  baseline is subtracted so the reported delta ≈ the model cache, but `estimate()` counts everything
+  this origin has cached, not just the models.
+- **The capture buffer is capped at ~60 s.** To avoid OOM on the mid-range phone this harness
+  targets, the rolling mic buffer evicts the oldest frames past ~60 s (logged once). "Finalize now"
+  therefore finalizes only the last ~60 s of audio.
+
+---
+
 ## What it measures (one row per metric, all surfaced in the results panel)
 
 | # | Metric | How the harness gets it |
@@ -107,12 +133,12 @@ ones; you fill the `[HUMAN]` lines).
 | 1c | RTF finalize (Moonshine) | Re-wire the offline recognizer to Moonshine, repeat 1b on phone | RTF — is it acceptable where base.en isn't? |
 | 2 | Cached footprint | Load all models, click "Measure footprint" | bytes used; matches ~330 MB? |
 | 3a | digest full-buffer | "Time digest…", pick the ~199 MB file | ms; did it OOM/fail on phone? |
-| 3b | digest chunked | (same run reports both) | ms; needed on mobile? |
+| 3b | digest chunked **(I/O-only, NOT comparable to 3a)** | (same run reports both) | ms; I/O shape only — wire a streaming SHA for the real number |
 | 4 | CSP violations | Load the recognizer; read the violation rows in the log | exact directives/URIs blocked |
 | 5a | crossOriginIsolated / SAB | read on boot (top of metrics) | true/false |
 | 5b | threads / single-threaded | after a finalize, read `threads requested` / `ran single-threaded` | yes/no |
-| 6 | module/asset shape | "Mark models loaded" then read the module-count + names in the log | count, filenames, ArrayBuffer vs FS |
-| 7 | zero-egress | after "Mark models loaded", do a full recognition, scan the log for "EGRESS CANDIDATE" rows | clean? anything beyond `connect-src`? |
+| 6 | module/asset shape **(MAIN-THREAD ONLY)** | "Mark models loaded" then read the module-count + names in the log; **also check the Network panel for worker/pthread fetches** | count, filenames, ArrayBuffer vs FS |
+| 7 | zero-egress **(MAIN-THREAD ONLY)** | after "Mark models loaded", do a full recognition, scan the log for "EGRESS CANDIDATE" rows; **also check the Network panel for worker fetches** | clean? anything beyond `connect-src`? |
 
 Then click **"Copy results memo"** and paste the result into the plan's Open Questions.
 
@@ -131,14 +157,14 @@ the `[HUMAN]` lines from your desktop + phone runs. The decision-tree rows below
 - RTF live edge (streaming Zipformer):           ____
 - RTF finalize base.en  — desktop / phone:        ____ / ____
 - RTF finalize Moonshine — phone:                 ____
-- Cached footprint (storage.estimate):            ____ bytes  (matches ~330 MB? __)
-- digest full-buffer  / chunked (~199 MB file):   ____ ms / ____ ms  (mobile OOM? __)
-- crossOriginIsolated / SharedArrayBuffer:        ____ / ____
-- threads requested / ran single-threaded:        ____ / ____
-- modules fetched (count + names):                ____
+- Cached footprint Δ (storage.estimate, baseline-subtracted, origin-wide): ____ bytes  (matches ~330 MB? __)
+- digest full-buffer / chunked I/O-only (~199 MB file): ____ ms / ____ ms  (chunked NOT comparable; mobile OOM? __)
+- crossOriginIsolated (can't enable via meta-CSP) / SharedArrayBuffer: ____ / ____
+- threads requested / ran single-threaded (confirm on header host): ____ / ____
+- modules fetched (count + names, MAIN-THREAD ONLY):  ____
 - asset consumption (ArrayBuffer vs Emscripten FS): ____
 - CSP violations caught (exact directives):       ____
-- post-"models loaded" egress beyond connect-src: ____
+- post-"models loaded" egress beyond connect-src (MAIN-THREAD ONLY — check Network panel for workers): ____
 
 ### Decision-tree answers
 1. base.en fast enough on DESKTOP single-threaded?   [ yes / no ]

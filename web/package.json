@@ -9,6 +9,7 @@
     "dev": "vite",
     "build": "npm run build:wasm && tsc --noEmit && vite build",
     "preview": "vite preview",
+    "pretest": "npm run build:wasm",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

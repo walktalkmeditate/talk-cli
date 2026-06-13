@@ -74,6 +74,13 @@ pub fn append_entry(
 /// The `Mono` theme defers to the terminal's own foreground (it has no fixed RGB),
 /// so it returns an EMPTY vector — the JS treats empty as "use the terminal fg".
 /// Unknown theme strings fall back to Rust (the default).
+///
+/// Length contract — the only two lengths ever returned:
+///   * empty `Uint8Array` → Mono ("use the terminal foreground")
+///   * exactly 9 bytes    → core/dim/edge RGB triples
+/// No other length is possible: a color theme's three tones are all
+/// `Tone::Color`, and Mono's are all `Tone::Terminal*`, so the push closure
+/// emits either 9 bytes or 0. The TS side (`themeTones`) relies on this.
 #[wasm_bindgen(js_name = palette)]
 pub fn palette_bytes(theme: &str) -> Vec<u8> {
     let theme = Theme::from_str(theme).unwrap_or_default();
@@ -117,11 +124,13 @@ impl Settle {
 
     /// Endpoint boundary: the live edge becomes the committing block. Any prior
     /// committing block is finalized into settled first.
+    #[wasm_bindgen(js_name = "commit")]
     pub fn commit(&mut self, raw: &str, clean: &str) {
         self.inner.commit(raw, clean);
     }
 
     /// Promote the committing block to settled (its lag/swap window elapsed).
+    #[wasm_bindgen(js_name = "finalize")]
     pub fn finalize(&mut self) {
         self.inner.finalize();
     }
@@ -266,6 +275,12 @@ pub fn compose_released() -> String {
 /// `recent_ids` / `recent_ordinals` are parallel arrays (the per-id last-served
 /// ordinals, higher = more recent). `held_id`/`held_done` describe an in-progress
 /// held run (`held_id` empty = none). `hour` is clamped to 0..=23.
+///
+/// Precondition: each parallel pair must be the same length —
+/// `served_ids.len() == served_counts.len()` and
+/// `recent_ids.len() == recent_ordinals.len()`. A mismatch returns `None`
+/// (→ JS `null`) rather than zipping, which would silently truncate to the
+/// shorter array and corrupt the selection state.
 #[wasm_bindgen(js_name = selectQuestion)]
 #[allow(clippy::too_many_arguments)]
 pub fn select_question(
@@ -278,6 +293,9 @@ pub fn select_question(
     held_done: u32,
     hour: u32,
 ) -> Option<String> {
+    if served_ids.len() != served_counts.len() || recent_ids.len() != recent_ordinals.len() {
+        return None;
+    }
     let pack = Pack::from_toml(pack_toml).ok()?;
     let mut state = SelectionState::default();
     for (id, count) in served_ids.into_iter().zip(served_counts) {
@@ -553,6 +571,155 @@ mod tests {
         );
     }
 
+    /// Drive every `push_json_string` escape arm through `compose()`: the committing
+    /// block's clean text carries each special char, and the emitted JSON must
+    /// contain the RFC 8259 escape and still parse as valid JSON.
+    #[test]
+    fn push_json_string_escapes_every_special_char() {
+        let cases: &[(&str, &str)] = &[
+            ("a\"b", "a\\\"b"),       // quote → \"
+            ("a\\b", "a\\\\b"),       // backslash → \\
+            ("a\nb", "a\\nb"),        // newline → \n
+            ("a\rb", "a\\rb"),        // carriage return → \r
+            ("a\tb", "a\\tb"),        // tab → \t
+            ("a\u{01}b", "a\\u0001b"), // control char → 
+        ];
+        for (input, expected_escape) in cases {
+            let mut s = Settle::new();
+            s.commit("raw", input);
+            let json = s.compose(
+                "journal", "", "", false, "0:01", "Light", false, false, false,
+            );
+            assert!(
+                json.contains(expected_escape),
+                "compose output must contain the escape {expected_escape:?} for input {input:?}: {json}"
+            );
+        }
+    }
+
+    /// `push_json_string` is reachable directly from tests in the same crate; verify
+    /// each arm in isolation so a regression is localized to the escaper.
+    #[test]
+    fn push_json_string_escapes_in_isolation() {
+        let mut out = String::new();
+        push_json_string(&mut out, "\"\\\n\r\t\u{01}");
+        assert_eq!(out, "\"\\\"\\\\\\n\\r\\t\\u0001\"");
+    }
+
+    #[test]
+    fn upgrade_committing_swaps_clean_keeps_raw_and_marks_revised() {
+        let mut s = Settle::new();
+        s.commit("the original raw", "The original.");
+        assert!(!s.committing_revised());
+        assert!(s.upgrade_committing("The upgraded."));
+        assert_eq!(s.committing_text(), "The upgraded.");
+        assert_eq!(
+            s.committing_raw(),
+            "the original raw",
+            "upgrade swaps clean only — raw is preserved"
+        );
+        assert!(s.committing_revised());
+    }
+
+    #[test]
+    fn post_finalize_revise_and_upgrade_return_false_and_leave_settled_unchanged() {
+        let mut s = Settle::new();
+        s.commit("the raw", "The clean.");
+        s.finalize();
+        let settled_before = s.settled_text();
+        assert_eq!(settled_before, "The clean.");
+        // After finalize there is no committing block — both swaps are no-ops.
+        assert!(!s.upgrade_committing("ignored upgrade"));
+        assert!(!s.revise_committing("ignored raw", "ignored clean"));
+        assert_eq!(
+            s.settled_text(),
+            settled_before,
+            "a post-finalize swap must not mutate settled text"
+        );
+        assert!(!s.has_committing());
+    }
+
+    #[test]
+    fn palette_high_contrast_returns_the_expected_nine_bytes() {
+        // The high-contrast palette triple from palette::palette(Theme::HighContrast).
+        assert_eq!(
+            palette_bytes("high-contrast"),
+            vec![236, 205, 186, 198, 152, 124, 176, 142, 126]
+        );
+    }
+
+    /// Round-trip: both hand-built JSON emitters (`compose` and `select_question`)
+    /// must produce output that parses as valid JSON. Uses a permissive recursive
+    /// parser since the wasm crate carries no serde_json dependency.
+    #[test]
+    fn compose_and_select_question_emit_valid_json() {
+        let mut s = Settle::new();
+        s.commit("um the raw", "He said \"hi\".\nNew line.\tTabbed.");
+        s.finalize();
+        let compose_json = s.compose(
+            "reflect",
+            "What's \"true\" now?",
+            "held 2 days",
+            true,
+            "1:23",
+            "High",
+            false,
+            false,
+            false,
+        );
+        assert!(
+            is_valid_json(&compose_json),
+            "compose output must be valid JSON: {compose_json}"
+        );
+
+        let toml = r#"
+            name = "t"
+            [[questions]]
+            id = "a"
+            text = "A \"quoted\" question?"
+        "#;
+        let select_json =
+            select_question(toml, vec![], vec![], vec![], vec![], "", 0, 9).expect("a question");
+        assert!(
+            is_valid_json(&select_json),
+            "select_question output must be valid JSON: {select_json}"
+        );
+    }
+
+    #[test]
+    fn select_question_returns_none_on_mismatched_parallel_arrays() {
+        let toml = r#"
+            name = "t"
+            [[questions]]
+            id = "a"
+            text = "A?"
+        "#;
+        // served_ids longer than served_counts → None, never a truncated zip.
+        assert!(select_question(
+            toml,
+            vec!["a".to_string(), "b".to_string()],
+            vec![1],
+            vec![],
+            vec![],
+            "",
+            0,
+            9
+        )
+        .is_none());
+        // recent_ids shorter than recent_ordinals → None.
+        assert!(select_question(
+            toml,
+            vec![],
+            vec![],
+            vec!["a".to_string()],
+            vec![1.0, 2.0],
+            "",
+            0,
+            9
+        )
+        .is_none());
+    }
+
     #[test]
     fn select_question_returns_the_chosen_question_json() {
         let toml = r#"
@@ -632,5 +799,136 @@ mod tests {
         let close = compose_close("~/talk/x.md", "entry 3", "Let it settle.");
         assert!(close.contains("~/talk/x.md") && close.contains("Let it settle."));
         assert_eq!(compose_released(), "[\"Released. Nothing was written.\"]");
+    }
+
+    /// A tiny recursive-descent JSON validator — enough to prove the hand-built
+    /// emitters produce well-formed JSON without pulling serde_json into the wasm
+    /// crate's dependency surface.
+    fn is_valid_json(s: &str) -> bool {
+        let mut chars = s.chars().peekable();
+        let ok = parse_value(&mut chars);
+        skip_ws(&mut chars);
+        ok && chars.next().is_none()
+    }
+
+    fn skip_ws(chars: &mut std::iter::Peekable<std::str::Chars>) {
+        while matches!(chars.peek(), Some(' ' | '\t' | '\n' | '\r')) {
+            chars.next();
+        }
+    }
+
+    fn parse_value(chars: &mut std::iter::Peekable<std::str::Chars>) -> bool {
+        skip_ws(chars);
+        match chars.peek() {
+            Some('{') => parse_object(chars),
+            Some('[') => parse_array(chars),
+            Some('"') => parse_string(chars),
+            Some('t') => consume_literal(chars, "true"),
+            Some('f') => consume_literal(chars, "false"),
+            Some('n') => consume_literal(chars, "null"),
+            Some(c) if *c == '-' || c.is_ascii_digit() => parse_number(chars),
+            _ => false,
+        }
+    }
+
+    fn consume_literal(chars: &mut std::iter::Peekable<std::str::Chars>, lit: &str) -> bool {
+        for expected in lit.chars() {
+            if chars.next() != Some(expected) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn parse_string(chars: &mut std::iter::Peekable<std::str::Chars>) -> bool {
+        if chars.next() != Some('"') {
+            return false;
+        }
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => return true,
+                '\\' => match chars.next() {
+                    Some('"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't') => {}
+                    Some('u') => {
+                        for _ in 0..4 {
+                            if !matches!(chars.next(), Some(h) if h.is_ascii_hexdigit()) {
+                                return false;
+                            }
+                        }
+                    }
+                    _ => return false,
+                },
+                c if (c as u32) < 0x20 => return false, // unescaped control char
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn parse_number(chars: &mut std::iter::Peekable<std::str::Chars>) -> bool {
+        let mut saw_digit = false;
+        if chars.peek() == Some(&'-') {
+            chars.next();
+        }
+        while matches!(chars.peek(), Some(c) if c.is_ascii_digit() || *c == '.' || *c == 'e' || *c == 'E' || *c == '+' || *c == '-')
+        {
+            if chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+                saw_digit = true;
+            }
+            chars.next();
+        }
+        saw_digit
+    }
+
+    fn parse_array(chars: &mut std::iter::Peekable<std::str::Chars>) -> bool {
+        if chars.next() != Some('[') {
+            return false;
+        }
+        skip_ws(chars);
+        if chars.peek() == Some(&']') {
+            chars.next();
+            return true;
+        }
+        loop {
+            if !parse_value(chars) {
+                return false;
+            }
+            skip_ws(chars);
+            match chars.next() {
+                Some(',') => continue,
+                Some(']') => return true,
+                _ => return false,
+            }
+        }
+    }
+
+    fn parse_object(chars: &mut std::iter::Peekable<std::str::Chars>) -> bool {
+        if chars.next() != Some('{') {
+            return false;
+        }
+        skip_ws(chars);
+        if chars.peek() == Some(&'}') {
+            chars.next();
+            return true;
+        }
+        loop {
+            skip_ws(chars);
+            if !parse_string(chars) {
+                return false;
+            }
+            skip_ws(chars);
+            if chars.next() != Some(':') {
+                return false;
+            }
+            if !parse_value(chars) {
+                return false;
+            }
+            skip_ws(chars);
+            match chars.next() {
+                Some(',') => continue,
+                Some('}') => return true,
+                _ => return false,
+            }
+        }
     }
 }

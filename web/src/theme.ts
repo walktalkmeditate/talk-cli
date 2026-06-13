@@ -16,15 +16,52 @@ export type Rgb = readonly [number, number, number];
 /** A `LineKind` as emitted by `Settle.compose()` JSON (`kind` field). */
 export type LineKind = 'chrome' | 'settled' | 'edge' | 'question';
 
+const KNOWN_LINE_KINDS: ReadonlySet<string> = new Set<LineKind>([
+  'chrome',
+  'settled',
+  'edge',
+  'question',
+]);
+
 /** One composed line as `Settle.compose()` emits it (a `{text, kind}` object). */
 export interface ComposedLine {
   text: string;
   kind: LineKind;
 }
 
-/** Parse the JSON `Settle.compose()` returns into typed composed lines. */
+function isComposedLine(value: unknown): value is ComposedLine {
+  if (typeof value !== 'object' || value === null) return false;
+  const line = value as Record<string, unknown>;
+  return typeof line.text === 'string' && typeof line.kind === 'string' && KNOWN_LINE_KINDS.has(line.kind);
+}
+
+/**
+ * Parse the JSON `Settle.compose()` returns into typed composed lines. Defensive
+ * at the wasm↔JS boundary: malformed JSON yields `[]` (the screen blanks for a
+ * frame rather than the loop throwing), and any element that is not a
+ * `{text: string, kind: <known LineKind>}` is dropped and logged.
+ */
 export function parseComposed(json: string): ComposedLine[] {
-  return JSON.parse(json) as ComposedLine[];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch (err) {
+    console.error('parseComposed: invalid JSON from Settle.compose()', err);
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    console.error('parseComposed: expected a JSON array, got', parsed);
+    return [];
+  }
+  const lines: ComposedLine[] = [];
+  for (const element of parsed) {
+    if (isComposedLine(element)) {
+      lines.push(element);
+    } else {
+      console.warn('parseComposed: dropping malformed composed line', element);
+    }
+  }
+  return lines;
 }
 
 /** The three paintable tones for a theme. `null` (Mono) defers to the terminal fg. */
@@ -104,7 +141,9 @@ export class Theme {
   }
 
   /** The wrapper a `LineKind` paints in: Settled→core, Edge & Question→dim,
-   *  Chrome→edge. Returned as a bound function so callers can apply it directly. */
+   *  Chrome→edge. Returned as a bound function so callers can apply it directly.
+   *  An unknown/new Rust `LineKind` falls back to `core` so it is still visible
+   *  (never silently undefined) — Phase C is expected to consume this directly. */
   toneForKind(kind: LineKind): (s: string) => string {
     switch (kind) {
       case 'settled':
@@ -114,6 +153,8 @@ export class Theme {
         return (s) => this.dim(s);
       case 'chrome':
         return (s) => this.edge(s);
+      default:
+        return (s) => this.core(s);
     }
   }
 }

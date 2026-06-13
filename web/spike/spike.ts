@@ -38,11 +38,9 @@ const setMetric = (id: string, text: string, state: ValState = "ok"): void => {
 
 type LogKind = "info" | "viol" | "net";
 const logEl = $("log");
-const logLines: string[] = [];
 function log(kind: LogKind, msg: string): void {
   const stamp = new Date().toISOString().slice(11, 23);
   const line = `${stamp}  ${msg}`;
-  logLines.push(`[${kind}] ${line}`);
   const row = document.createElement("div");
   row.className = `row ${kind}`;
   row.textContent = line;
@@ -57,6 +55,7 @@ interface Results {
   rtfLive: string;
   rtfFinal: string;
   footprintBytes: number | null;
+  footprintBaselineBytes: number | null;
   footprintQuota: number | null;
   digestFullMs: number | null;
   digestChunkMs: number | null;
@@ -75,6 +74,7 @@ const results: Results = {
   rtfLive: "seam not wired",
   rtfFinal: "seam not wired",
   footprintBytes: null,
+  footprintBaselineBytes: null,
   footprintQuota: null,
   digestFullMs: null,
   digestChunkMs: null,
@@ -170,7 +170,7 @@ const fmtBytes = (n: number): string => {
   return `${(mb / 1024).toFixed(2)} GB`;
 };
 
-async function measureFootprint(): Promise<void> {
+async function measureFootprint(isBaseline = false): Promise<void> {
   if (!navigator.storage?.estimate) {
     setMetric("m-storage", "storage.estimate() unsupported", "err");
     log("info", "navigator.storage.estimate() unsupported in this browser.");
@@ -179,15 +179,27 @@ async function measureFootprint(): Promise<void> {
   const est = await navigator.storage.estimate();
   const usage = est.usage ?? 0;
   const quota = est.quota ?? 0;
-  results.footprintBytes = usage;
   results.footprintQuota = quota;
 
-  const withinEnvelope = usage > 0 && usage <= ENVELOPE_BYTES * 1.15;
+  // Subtract the pre-load baseline so the reported footprint ≈ the model cache
+  // alone. storage.estimate() is ORIGIN-WIDE — it counts everything this origin
+  // has cached, so without a baseline the number includes unrelated storage.
+  if (isBaseline) {
+    results.footprintBaselineBytes = usage;
+    log("info", `storage.estimate() baseline (pre-load): ${fmtBytes(usage)} (${usage} bytes) — subtracted from later readings. NOTE: estimate() is origin-wide.`);
+    setMetric("m-storage", `baseline ${fmtBytes(usage)} captured — load models, then re-measure`, "warn");
+    return;
+  }
+
+  results.footprintBytes = usage;
+  const baseline = results.footprintBaselineBytes ?? 0;
+  const delta = Math.max(0, usage - baseline);
+  const withinEnvelope = delta > 0 && delta <= ENVELOPE_BYTES * 1.15;
   const note = usage === 0
     ? "0 — load the models first, then re-measure"
-    : `${fmtBytes(usage)} used / ${fmtBytes(quota)} quota (envelope ~330 MB)`;
+    : `Δ${fmtBytes(delta)} model cache (${fmtBytes(usage)} total − ${fmtBytes(baseline)} baseline) / ${fmtBytes(quota)} quota (envelope ~330 MB)`;
   setMetric("m-storage", note, usage === 0 ? "warn" : withinEnvelope ? "ok" : "warn");
-  log("info", `storage.estimate(): usage=${usage} (${fmtBytes(usage)}), quota=${quota} (${fmtBytes(quota)})`);
+  log("info", `storage.estimate(): usage=${usage} (${fmtBytes(usage)}), baseline=${baseline} (${fmtBytes(baseline)}), Δ=${delta} (${fmtBytes(delta)}), quota=${fmtBytes(quota)}`);
 
   // Persisted-storage opt-in is what protects the ~330 MB cache from eviction
   // (esp. iOS Safari). Report whether persistence is granted.
@@ -289,17 +301,45 @@ const finalRtf = new RtfMeter("m-rtf-final", "rtfFinal");
 // AudioWorklet preferred; ScriptProcessor fallback for older Safari.
 // ===========================================================================
 const TARGET_SR = 16000;
+// Cap the rolling capture buffer so a long session can't OOM the mid-range phone
+// this harness targets. 60 s of 16 kHz mono f32 ≈ 3.84 MB; we keep ~that and
+// evict the oldest frames when the window is exceeded.
+const MAX_CAPTURE_SAMPLES = TARGET_SR * 60;
 let audioCtx: AudioContext | null = null;
 let mediaStream: MediaStream | null = null;
 let workletNode: AudioWorkletNode | null = null;
 let scriptNode: ScriptProcessorNode | null = null;
 const capturedFrames: Float32Array[] = []; // for the "Finalize now" pass
+let capturedSamples = 0;
+let evictionLogged = false;
+
+function pushCapturedFrame(frame: Float32Array): void {
+  capturedFrames.push(frame);
+  capturedSamples += frame.length;
+  let evicted = false;
+  while (capturedSamples > MAX_CAPTURE_SAMPLES && capturedFrames.length > 1) {
+    const dropped = capturedFrames.shift();
+    if (!dropped) break;
+    capturedSamples -= dropped.length;
+    evicted = true;
+  }
+  if (evicted && !evictionLogged) {
+    log("info", `Capture buffer hit the ~60 s cap (${fmtBytes(MAX_CAPTURE_SAMPLES * 4)}); evicting oldest frames. "Finalize now" sees only the last ~60 s. (logged once)`);
+    evictionLogged = true;
+  }
+}
+
+function resetCapturedFrames(): void {
+  capturedFrames.length = 0;
+  capturedSamples = 0;
+  evictionLogged = false;
+}
 
 const partialsEl = $("partials");
 const finalEl = $("final");
 
 async function startMic(): Promise<void> {
-  capturedFrames.length = 0;
+  resetCapturedFrames();
   audioCtx = new AudioContext({ sampleRate: TARGET_SR });
   if (audioCtx.sampleRate !== TARGET_SR) {
     log("info", `Requested ${TARGET_SR} Hz; got ${audioCtx.sampleRate} Hz — frames need resampling before the recognizer. WIRE: resample to 16 kHz (mirror src/listen/resample.rs).`);
@@ -333,7 +373,7 @@ async function startMic(): Promise<void> {
 }
 
 function onFrame(frame: Float32Array): void {
-  capturedFrames.push(frame);
+  pushCapturedFrame(frame);
   const frameMs = (frame.length / TARGET_SR) * 1000;
 
   // ----------------------------------------------------------------------
@@ -445,7 +485,11 @@ function buildMemo(): string {
     : "    - (none caught — either the loader isn't wired yet, or it loads cleanly under the draft strict CSP)";
   const modNames = results.moduleNames.size ? [...results.moduleNames].join(", ") : "(none fetched yet)";
   const footprint = results.footprintBytes
-    ? `${fmtBytes(results.footprintBytes)} (${results.footprintBytes} bytes)`
+    ? (() => {
+        const baseline = results.footprintBaselineBytes ?? 0;
+        const delta = Math.max(0, (results.footprintBytes ?? 0) - baseline);
+        return `Δ${fmtBytes(delta)} model cache (total ${fmtBytes(results.footprintBytes)} − baseline ${fmtBytes(baseline)})`;
+      })()
     : "(not measured — load models, then 'Measure footprint')";
 
   return `## U1 spike go/no-go memo  (paste into the plan's Open Questions)
@@ -455,13 +499,31 @@ function buildMemo(): string {
 > Draft strict CSP applied: ${cspMeta?.content ?? "(meta missing!)"}
 > THROWAWAY harness — fill the [HUMAN] lines from your two-device runs.
 
+### ⚠ HARNESS LIMITATIONS — read before trusting any number below
+- METRICS 6 & 7 (module shape + zero-egress) are MAIN-THREAD ONLY. The fetch/XHR
+  wrappers patch only the page's fetch/XHR. A THREADED sherpa build loads its
+  WASM + pthread workers via worker/pthread fetches the page CANNOT intercept,
+  so those requests are INVISIBLE here. CONFIRM module shape AND egress for a
+  threaded build in the browser Network panel (or a logging proxy), not from
+  this harness.
+- METRIC 5 / crossOriginIsolated: a <meta> CSP CANNOT set COOP/COEP, so
+  crossOriginIsolated cannot be turned on from this spike. The threading branch
+  ("single-threaded OK vs threads needed") MUST be confirmed on a real
+  header-setting host, not concluded from this page.
+- METRIC 3 / chunked digest: the chunk loop runs a FULL SHA-256 per slice
+  (placeholder), so its total ≈ full-buffer cost. It measures the chunked-read
+  I/O shape ONLY and is NOT numerically comparable to the full-buffer hash. Do
+  NOT conclude "chunking isn't worth it" from this number — wire a real
+  streaming SHA-256 (e.g. hash-wasm) for the true chunked cost.
+- METRIC 2 / footprint: ${results.footprintBaselineBytes !== null ? `a pre-load baseline of ${fmtBytes(results.footprintBaselineBytes)} was subtracted, so the delta ≈ the model cache.` : "no baseline captured."} navigator.storage.estimate() is ORIGIN-WIDE — it counts everything this origin has cached, not just the models.
+
 ### Raw measurements (auto-captured this session)
 - RTF live edge (streaming Zipformer): ${results.rtfLive}
 - RTF finalize (Whisper base.en / Moonshine): ${results.rtfFinal}
-- Cached footprint (navigator.storage.estimate): ${footprint}
+- Cached footprint Δ (navigator.storage.estimate, baseline-subtracted, origin-wide): ${footprint}
   - envelope check: ~330 MB expected
 - crypto.subtle.digest full-buffer: ${results.digestFullMs !== null ? results.digestFullMs.toFixed(0) + " ms" : "(not run)"} over ${results.digestFileBytes ? fmtBytes(results.digestFileBytes) : "(no file picked)"}
-- crypto.subtle.digest chunked (placeholder hasher): ${results.digestChunkMs !== null ? results.digestChunkMs.toFixed(0) + " ms" : "(not run)"}
+- crypto.subtle.digest chunked (I/O-only placeholder — full SHA per slice, NOT comparable to full-buffer): ${results.digestChunkMs !== null ? results.digestChunkMs.toFixed(0) + " ms" : "(not run)"}
 - crossOriginIsolated: ${results.crossOriginIsolated}
 - SharedArrayBuffer available: ${results.sharedArrayBuffer}
 - threads requested by sherpa build: ${results.threadsRequested}
@@ -478,7 +540,7 @@ ${violations}
 3. Single-threaded acceptable, or are threads REQUIRED?       [ single-threaded OK / threads needed ]
 4. True cached footprint number (bytes):                      ____  (matches ~330 MB? __)
 5. Required CSP directive set (strict draft + any relaxations the loader forced):
-   default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob'; connect-src 'self' https://cdn.pilgrimapp.org;
+   ${cspMeta?.content ?? "(meta missing!)"}
    + observed extra relaxations: ____
 6. crypto.subtle.digest: full-buffer OK on mobile, or chunked/streaming REQUIRED? [ full / chunked ]
 7. Cache API vs OPFS recommendation (by measured write/footprint behavior):       [ Cache API / OPFS ]
@@ -540,7 +602,6 @@ function wireUi(): void {
   });
   $<HTMLButtonElement>("btn-clear-log").addEventListener("click", () => {
     logEl.replaceChildren();
-    logLines.length = 0;
   });
   $<HTMLButtonElement>("btn-copy").addEventListener("click", () => void copyMemo());
 }
@@ -551,7 +612,7 @@ function wireUi(): void {
 function boot(): void {
   wireUi();
   reportThreadingCaps();
-  measureFootprint().catch(() => undefined); // baseline (pre-load) footprint
+  measureFootprint(true).catch(() => undefined); // baseline (pre-load) footprint
   log("info", "U1 spike harness ready. Draft strict CSP applied via <meta>. Wire the sherpa-onnx loader at the `WIRE:` seams, then run on desktop + a mid-range phone.");
   log("info", "Recognizer NOT wired — RTF/partials/final stay empty until you complete the seams. No measurements are fabricated.");
 }
