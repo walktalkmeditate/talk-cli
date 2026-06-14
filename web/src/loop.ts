@@ -9,13 +9,23 @@ const ESU = '\x1b[?2026l';
 /** Home the cursor and overwrite in place — never clear-screen (`\x1b[2J`),
  *  which blanks the grid for a frame and reads as a flash. */
 const HOME = '\x1b[H';
+/** Erase from the cursor to the end of the current line. */
+const EL = '\x1b[K';
+/** Erase from the cursor to the end of the screen. */
+const ED = '\x1b[J';
 
 /**
  * Wrap one frame's content for a tear-free, flash-free write: synchronized
- * output around a cursor-home overwrite. Deliberately never emits `\x1b[2J`.
+ * output around a cursor-home overwrite. Each row is erased to end-of-line (so a
+ * shorter line can't leave a longer previous line's tail behind), and the screen
+ * is erased from the last row down (so a shorter frame can't leave a taller
+ * previous frame's rows behind) — the overlap/ghosting fix. Deliberately never
+ * emits `\x1b[2J` (a full clear reads as a flash); EL+ED clear precisely what the
+ * overwrite leaves.
  */
 export function frameSequence(content: string): string {
-  return BSU + HOME + content + ESU;
+  const cleared = content.split('\r\n').join(EL + '\r\n') + EL + ED;
+  return BSU + HOME + cleared + ESU;
 }
 
 /** Frame throttle: render only once `minInterval` ms have passed since `last`.
