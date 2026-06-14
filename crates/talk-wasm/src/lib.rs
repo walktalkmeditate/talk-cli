@@ -7,12 +7,14 @@
 //! `wasm-bindgen`, with every boundary input clamped/validated so nothing can
 //! panic across the wasm boundary and kill the session.
 //!
-//! Scope note: the privacy-critical off-record Commit/Revise *pairing* state
-//! machine (lifted from `src/live.rs`) is a separate, later unit — this façade
-//! exposes only the pure `talk-core` surface that exists today.
+//! The privacy-critical off-record Commit/Revise *pairing* state machine (lifted
+//! from `src/live.rs` into `talk_core::pairing`) is exposed here as `Pairing`, so the
+//! web ASR driver shares the CLI's exact drop-while-paused / disarm-paired-Revise /
+//! straddling-Revise invariant instead of re-implementing it in TypeScript.
 
 use talk_core::cleanup;
 use talk_core::entry::{self, Entry, Mode as EntryMode};
+use talk_core::pairing::{Decision, EventKind, Pairing as CorePairing};
 use talk_core::palette::{self, Theme, Tone};
 use talk_core::questions::Pack;
 use talk_core::render_model::{self, LineKind, Mode as ViewMode, View};
@@ -247,6 +249,92 @@ impl Settle {
 }
 
 impl Default for Settle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The off-record Commit/Revise/pause pairing machine — the privacy-critical guard
+/// that keeps off-record (paused) speech out of a kept entry, shared verbatim with
+/// the CLI (`talk_core::pairing`). The JS ASR driver feeds it event KINDS and pause/
+/// resume edges; it returns a DECISION string the driver acts on against its `Settle`.
+///
+/// The machine deliberately never sees the transcript text — the driver runs its own
+/// cleanup over the payload only when `decide` returns "applyCommit"/"applyRevise"/
+/// "applyPartial". This is exactly how `src/live.rs::apply_event` calls it.
+#[wasm_bindgen]
+pub struct Pairing {
+    inner: CorePairing,
+}
+
+#[wasm_bindgen]
+impl Pairing {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Pairing {
+        Pairing {
+            inner: CorePairing::new(),
+        }
+    }
+
+    /// Enter off-record. The driver still clears the live edge and tells its audio
+    /// path to go off-record — those are not modeled here.
+    #[wasm_bindgen(js_name = "pause")]
+    pub fn pause(&mut self) {
+        self.inner.pause();
+    }
+
+    /// Leave off-record. Does NOT re-arm the pairing guard (an off-record Revise can
+    /// still be in flight) — only the next accepted Commit re-arms it.
+    #[wasm_bindgen(js_name = "resume")]
+    pub fn resume(&mut self) {
+        self.inner.resume();
+    }
+
+    /// Lift the pause for the finish-drain while carrying the pairing guard forward,
+    /// so an in-flight Revise of a pause-dropped Commit is still dropped at finish.
+    #[wasm_bindgen(js_name = beginFinishDrain)]
+    pub fn begin_finish_drain(&mut self) {
+        self.inner.begin_finish_drain();
+    }
+
+    /// Whether the machine is currently off-record (paused).
+    #[wasm_bindgen(js_name = isPaused)]
+    pub fn is_paused(&self) -> bool {
+        self.inner.is_paused()
+    }
+
+    /// Whether the next pass-2 Revise will be dropped (its paired Commit was an
+    /// off-record drop). Exposed for driver-side diagnostics/mirroring.
+    #[wasm_bindgen(js_name = commitDropped)]
+    pub fn commit_dropped(&self) -> bool {
+        self.inner.commit_dropped()
+    }
+
+    /// Decide what to do with an event of the given KIND, mutating the pairing guard.
+    ///
+    /// `kind` is "partial" | "commit" | "revise" | "done" (anything else → "partial",
+    /// the harmless on-record default, so the boundary never throws). Returns one of
+    /// "done" | "drop" | "applyPartial" | "applyCommit" | "applyRevise".
+    #[wasm_bindgen(js_name = "decide")]
+    pub fn decide(&mut self, kind: &str) -> String {
+        let event = match kind.trim().to_ascii_lowercase().as_str() {
+            "commit" => EventKind::Commit,
+            "revise" => EventKind::Revise,
+            "done" => EventKind::Done,
+            _ => EventKind::Partial,
+        };
+        match self.inner.decide(event) {
+            Decision::Done => "done",
+            Decision::Drop => "drop",
+            Decision::ApplyPartial => "applyPartial",
+            Decision::ApplyCommit => "applyCommit",
+            Decision::ApplyRevise => "applyRevise",
+        }
+        .to_string()
+    }
+}
+
+impl Default for Pairing {
     fn default() -> Self {
         Self::new()
     }
@@ -792,6 +880,75 @@ mod tests {
         )
         .expect("a question is still selected");
         assert!(json.contains("\"id\":\"a\""));
+    }
+
+    #[test]
+    fn pairing_drops_a_paused_commit_and_its_paired_revise_even_after_resume() {
+        let mut p = Pairing::new();
+        assert_eq!(p.decide("commit"), "applyCommit"); // kept, on-record
+        p.pause();
+        assert_eq!(p.decide("commit"), "drop"); // OFF-RECORD
+        assert!(p.commit_dropped(), "a paused Commit must disarm its paired Revise");
+        p.resume(); // resume does NOT re-arm
+        assert_eq!(
+            p.decide("revise"),
+            "drop",
+            "the off-record Revise must drop, never overwrite the kept phrase"
+        );
+    }
+
+    #[test]
+    fn pairing_lets_a_straddling_revise_upgrade_while_paused() {
+        let mut p = Pairing::new();
+        assert_eq!(p.decide("commit"), "applyCommit");
+        p.pause();
+        assert_eq!(
+            p.decide("revise"),
+            "applyRevise",
+            "a Revise of an on-record Commit upgrades even while paused"
+        );
+    }
+
+    #[test]
+    fn pairing_rearms_on_the_next_accepted_commit_not_on_resume() {
+        let mut p = Pairing::new();
+        p.pause();
+        assert_eq!(p.decide("commit"), "drop"); // disarms
+        p.resume();
+        assert!(p.commit_dropped(), "resume alone must NOT re-arm");
+        assert_eq!(p.decide("commit"), "applyCommit"); // re-arms
+        assert!(!p.commit_dropped());
+        assert_eq!(p.decide("revise"), "applyRevise");
+    }
+
+    #[test]
+    fn pairing_finish_drain_still_drops_the_paused_pairs_revise() {
+        let mut p = Pairing::new();
+        p.pause();
+        assert_eq!(p.decide("commit"), "drop"); // OFF-RECORD
+        p.begin_finish_drain(); // lifts paused, carries commit_dropped
+        assert!(!p.is_paused());
+        assert_eq!(
+            p.decide("revise"),
+            "drop",
+            "the drain must not let the paused pair's Revise land"
+        );
+        assert_eq!(p.decide("done"), "done");
+    }
+
+    #[test]
+    fn pairing_drops_a_paused_partial_and_finishes_on_done_while_paused() {
+        let mut p = Pairing::new();
+        p.pause();
+        assert_eq!(p.decide("partial"), "drop");
+        assert_eq!(p.decide("done"), "done");
+    }
+
+    #[test]
+    fn pairing_unknown_kind_falls_back_to_partial_without_panicking() {
+        let mut p = Pairing::new();
+        assert_eq!(p.decide("nonsense"), "applyPartial");
+        assert_eq!(p.decide(""), "applyPartial");
     }
 
     #[test]

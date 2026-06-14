@@ -1,6 +1,7 @@
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use crossterm::event::{self, Event as CtEvent, KeyCode};
+use talk_core::pairing::{Decision, EventKind, Pairing};
 use talk_core::render_model::{compose_close, compose_released, Mode as RMode, View};
 use talk_core::settle::Settle;
 use crate::keymap::{action_for, Action};
@@ -39,45 +40,49 @@ pub struct LiveResult {
     pub cancelled: bool,
 }
 
-/// Pause + pass-2 pairing guards, shared by run_loop and the finish drain and
-/// extracted so the privacy invariant is unit-testable without a terminal.
-struct EventGuards {
-    paused: bool,
-    /// The worker emits Commit then Revise serially. A Revise whose paired Commit
-    /// was dropped during pause must be dropped too, or pass-2 text of OFF-RECORD
-    /// (paused) speech would overwrite the last accepted phrase. Re-armed only by
-    /// the next ACCEPTED Commit — never by resume, because the off-record Revise
-    /// can arrive after the user unpauses.
-    commit_dropped: bool,
+/// The kind of a transcript event, for the pure pairing machine (which decides
+/// drop/apply without seeing the payload).
+fn kind_of(ev: &Event) -> EventKind {
+    match ev {
+        Event::Partial(_) => EventKind::Partial,
+        Event::Commit(_) => EventKind::Commit,
+        Event::Revise(_) => EventKind::Revise,
+        Event::Done => EventKind::Done,
+    }
 }
 
-/// Apply one transcript event under the guards. Returns true on Done.
+/// Apply one transcript event under the shared `talk-core` pairing machine. Returns
+/// true on Done.
 ///
-/// Arm ORDER is load-bearing: the Revise arms sit ABOVE the `_ if paused`
-/// catch-all because Revise is gated on `commit_dropped`, not on `paused` — a
-/// straddling Revise (Commit accepted on-record, pass-2 landing during a pause)
-/// must still upgrade its block, while a Commit arriving during pause must be
-/// dropped AND disarm its own in-flight Revise.
-fn apply_event(ev: Event, g: &mut EventGuards, settle: &mut Settle, lexicon: &crate::lexicon::Lexicon) -> bool {
-    match ev {
-        Event::Done => return true,
-        Event::Revise(raw2) if !g.commit_dropped => {
-            let prev = settle.settled().last().map(|b| b.clean.clone());
-            let corrected = crate::lexicon::correct(&raw2, lexicon);
-            let clean = talk_core::cleanup::format_revise(&corrected, prev.as_deref());
-            settle.revise_committing(&raw2, &clean);
+/// The privacy-critical drop/disarm/straddle decisions live in
+/// `talk_core::pairing::Pairing` (compiled into talk-wasm so the web pipeline shares
+/// the same invariant). This caller only performs the CLI-specific text transform —
+/// the personal lexicon + deterministic cleanup — for the events the machine accepts.
+fn apply_event(ev: Event, p: &mut Pairing, settle: &mut Settle, lexicon: &crate::lexicon::Lexicon) -> bool {
+    match p.decide(kind_of(&ev)) {
+        Decision::Done => return true,
+        Decision::Drop => {} // off-record (paused) or a disarmed pass-2 Revise
+        Decision::ApplyPartial => {
+            if let Event::Partial(text) = ev {
+                settle.on_partial(&text);
+            }
         }
-        Event::Revise(_) => {} // paired Commit was dropped (off-record) → drop its pass-2 too
-        Event::Commit(_) if g.paused => { g.commit_dropped = true; }
-        _ if g.paused => {} // drain-and-discard while paused: don't record, don't grow the channel
-        Event::Commit(raw) => {
-            let corrected = crate::lexicon::correct(&raw, lexicon);
-            let pre = talk_core::cleanup::apply_backtrack(
-                &talk_core::cleanup::apply_spoken_commands(&corrected));
-            settle.commit(&raw, &talk_core::cleanup::deterministic_light(&pre));
-            g.commit_dropped = false;
+        Decision::ApplyCommit => {
+            if let Event::Commit(raw) = ev {
+                let corrected = crate::lexicon::correct(&raw, lexicon);
+                let pre = talk_core::cleanup::apply_backtrack(
+                    &talk_core::cleanup::apply_spoken_commands(&corrected));
+                settle.commit(&raw, &talk_core::cleanup::deterministic_light(&pre));
+            }
         }
-        Event::Partial(p) => settle.on_partial(&p),
+        Decision::ApplyRevise => {
+            if let Event::Revise(raw2) = ev {
+                let prev = settle.settled().last().map(|b| b.clean.clone());
+                let corrected = crate::lexicon::correct(&raw2, lexicon);
+                let clean = talk_core::cleanup::format_revise(&corrected, prev.as_deref());
+                settle.revise_committing(&raw2, &clean);
+            }
+        }
     }
     false
 }
@@ -104,7 +109,7 @@ pub fn run_loop(
     let mut paused_at: Option<Instant> = None;
     let mut last_speech = started - SPEECH_HANGOVER; // start un-latched
     let mut finished = false;
-    let mut guards = EventGuards { paused: false, commit_dropped: false };
+    let mut guards = Pairing::new();
 
     loop {
         // 1. drain transcript events (ALWAYS drain to keep the channel from growing;
@@ -112,16 +117,16 @@ pub fn run_loop(
         while let Some(ev) = source.next() {
             if apply_event(ev, &mut guards, &mut settle, cfg.lexicon) { finished = true; break; }
         }
-        if !guards.paused && speaking.load(Ordering::Relaxed) { last_speech = Instant::now(); }
+        if !guards.is_paused() && speaking.load(Ordering::Relaxed) { last_speech = Instant::now(); }
 
         // 2. paint
-        let listening = !guards.paused && last_speech.elapsed() < SPEECH_HANGOVER; // latch → no flicker
+        let listening = !guards.is_paused() && last_speech.elapsed() < SPEECH_HANGOVER; // latch → no flicker
         let elapsed = fmt_elapsed(started.elapsed() - paused_total
             - paused_at.map(|t| t.elapsed()).unwrap_or(Duration::ZERO));
         let v = View {
             mode: cfg.mode, question: cfg.question, held_label: cfg.held_label,
             settle: &settle, listening, elapsed: &elapsed, cleanup: cfg.cleanup,
-            show_raw, paused: guards.paused, confirm_cancel,
+            show_raw, paused: guards.is_paused(), confirm_cancel,
         };
         paint(&v, cfg.palette)?;
 
@@ -158,8 +163,14 @@ pub fn run_loop(
                         }
                         Action::ToggleRaw => show_raw = !show_raw,
                         Action::TogglePause => {
-                            guards.paused = !guards.paused;
-                            if guards.paused {
+                            if guards.is_paused() {
+                                guards.resume();
+                                pause.resume();
+                                if let Some(t) = paused_at.take() {
+                                    paused_total += t.elapsed();
+                                }
+                            } else {
+                                guards.pause();
                                 // The worker goes off-record at the audio level: it
                                 // destroys the in-flight hypothesis, segment audio and
                                 // parked chunks, and discards new chunks until resume.
@@ -170,11 +181,6 @@ pub fn run_loop(
                                 // clearing event — so the edge must not keep advertising
                                 // the stale partial.
                                 settle.on_partial("");
-                            } else {
-                                pause.resume();
-                                if let Some(t) = paused_at.take() {
-                                    paused_total += t.elapsed();
-                                }
                             }
                         }
                         Action::None => {}
@@ -207,11 +213,11 @@ pub fn run_loop(
 fn drain_until_done(
     source: &mut dyn TranscriptSource,
     settle: &mut Settle,
-    guards: &mut EventGuards,
+    guards: &mut Pairing,
     lexicon: &crate::lexicon::Lexicon,
 ) -> std::io::Result<()> {
     paint_plain(&["  settling…".to_string()])?;
-    guards.paused = false;
+    guards.begin_finish_drain();
     let idle_limit = Duration::from_secs(8);
     let mut last_event = Instant::now();
     loop {
@@ -336,23 +342,25 @@ pub fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    fn guards(paused: bool, commit_dropped: bool) -> EventGuards {
-        EventGuards { paused, commit_dropped }
-    }
-
     fn empty_lex() -> crate::lexicon::Lexicon {
         crate::lexicon::Lexicon::from_map(std::collections::BTreeMap::new())
     }
 
+    // The pure drop/disarm/straddle/re-arm decisions are unit-tested in
+    // `talk_core::pairing`. These behavior-preservation tests prove `apply_event`
+    // routes the SAME live.rs path through the shared machine end-to-end (guard +
+    // lexicon/cleanup transform + Settle), driving the guard through its public API
+    // exactly as run_loop and drain_until_done do.
+
     #[test]
     fn revise_of_a_pause_dropped_commit_is_dropped_even_after_resume() {
         let mut settle = Settle::new();
-        let mut g = guards(false, false);
+        let mut g = Pairing::new();
         apply_event(Event::Commit("kept phrase".into()), &mut g, &mut settle, &empty_lex());
-        g.paused = true;
+        g.pause();
         apply_event(Event::Commit("OFF RECORD".into()), &mut g, &mut settle, &empty_lex());
-        assert!(g.commit_dropped, "paused Commit must disarm its Revise");
-        g.paused = false; // resume does NOT re-arm — the off-record Revise is still in flight
+        assert!(g.commit_dropped(), "paused Commit must disarm its Revise");
+        g.resume(); // resume does NOT re-arm — the off-record Revise is still in flight
         apply_event(Event::Revise("off record, transcribed better".into()), &mut g, &mut settle, &empty_lex());
         assert_eq!(settle.committing().unwrap().raw, "kept phrase");
     }
@@ -361,19 +369,25 @@ mod tests {
     fn straddling_revise_applies_while_paused() {
         // Commit accepted on-record; pass-2 lands during a pause → still upgrades.
         let mut settle = Settle::new();
-        let mut g = guards(false, false);
+        let mut g = Pairing::new();
         apply_event(Event::Commit("rough streaming text".into()), &mut g, &mut settle, &empty_lex());
-        g.paused = true;
+        g.pause();
         apply_event(Event::Revise("Rough streaming text, corrected.".into()), &mut g, &mut settle, &empty_lex());
         assert_eq!(settle.committing().unwrap().raw, "Rough streaming text, corrected.");
     }
 
     #[test]
     fn an_accepted_commit_rearms_the_pairing_guard() {
+        // A prior paused Commit left the guard disarmed; the next on-record Commit
+        // re-arms it so its own pass-2 Revise applies.
         let mut settle = Settle::new();
-        let mut g = guards(false, true); // a prior paused Commit left the guard disarmed
+        let mut g = Pairing::new();
+        g.pause();
+        apply_event(Event::Commit("off record".into()), &mut g, &mut settle, &empty_lex()); // disarms
+        g.resume();
+        assert!(g.commit_dropped());
         apply_event(Event::Commit("next on-record phrase".into()), &mut g, &mut settle, &empty_lex());
-        assert!(!g.commit_dropped);
+        assert!(!g.commit_dropped());
         apply_event(Event::Revise("next on-record phrase, revised".into()), &mut g, &mut settle, &empty_lex());
         assert_eq!(settle.committing().unwrap().raw, "next on-record phrase, revised");
     }
@@ -385,9 +399,10 @@ mod tests {
         // must not overwrite the accepted phrase even though the drain lifts
         // `paused` (the leak the review's P0/P1 cluster named).
         let mut settle = Settle::new();
-        let mut g = guards(true, false);
+        let mut g = Pairing::new();
+        g.pause();
         apply_event(Event::Commit("OFF RECORD".into()), &mut g, &mut settle, &empty_lex());
-        g.paused = false; // drain_until_done lifts paused but carries commit_dropped
+        g.begin_finish_drain(); // drain_until_done lifts paused but carries commit_dropped
         apply_event(Event::Revise("off record revised".into()), &mut g, &mut settle, &empty_lex());
         assert!(settle.committing().is_none(), "nothing may land from the paused pair");
         assert!(apply_event(Event::Done, &mut g, &mut settle, &empty_lex()));
@@ -399,7 +414,7 @@ mod tests {
             [("TOC".to_string(), "talk".to_string())].into_iter().collect(),
         );
         let mut settle = Settle::new();
-        let mut g = guards(false, false);
+        let mut g = Pairing::new();
         apply_event(Event::Commit("open TOC (buzzer)".into()), &mut g, &mut settle, &lex);
         settle.finalize();
         let block = settle.settled().last().unwrap();
@@ -414,7 +429,7 @@ mod tests {
             [("TOC".to_string(), "talk".to_string())].into_iter().collect(),
         );
         let mut settle = Settle::new();
-        let mut g = guards(false, false);
+        let mut g = Pairing::new();
         apply_event(Event::Commit("rough".into()), &mut g, &mut settle, &empty_lex());
         apply_event(Event::Revise("the TOC (applause) shipped".into()), &mut g, &mut settle, &lex);
         settle.finalize();

@@ -8,6 +8,7 @@ pub mod format;
 pub mod frontmatter;
 pub mod lexicon;
 pub mod matchq;
+pub mod pairing;
 pub mod palette;
 pub mod questions;
 pub mod render_model;
