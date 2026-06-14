@@ -185,23 +185,32 @@ test.describe('net-silence', () => {
 
     expect(csp, 'no CSP meta tag present').not.toBeNull();
     expect(csp).toContain("default-src 'self'");
-    // SPIKE connect-src: the production model host PLUS the two transformers.js
-    // origins (HF model CDN + jsdelivr ort-wasm runtime). Production self-hosts
-    // both and narrows this back to `'self' https://cdn.pilgrimapp.org`.
+    // SPIKE connect-src: the production model host PLUS the transformers.js model
+    // origins — HuggingFace (the `.en` weights 302-redirect to its LFS/Xet
+    // subdomains, hence the two SCOPED wildcards) and jsdelivr (the ort-wasm
+    // runtime). Production self-hosts the model on cdn.pilgrimapp.org and narrows
+    // this back to `'self' https://cdn.pilgrimapp.org` (no HF, no wildcards).
     expect(csp).toContain(
-      "connect-src 'self' https://cdn.pilgrimapp.org https://huggingface.co https://cdn.jsdelivr.net",
+      "connect-src 'self' https://cdn.pilgrimapp.org https://huggingface.co https://*.huggingface.co https://*.hf.co https://cdn.jsdelivr.net",
     );
     expect(csp).toContain("object-src 'none'");
     expect(csp).toContain("base-uri 'none'");
-    // The connect-src must NOT contain a wildcard (no blanket egress). The exact
-    // permitted origins are the three named above (the spike allowlist); the
-    // canary keeps the net-silence proof honest by intercepting requests
-    // regardless of which origin the CSP permits.
+    // connect-src must carry NO BLANKET wildcard — a bare `*`, a scheme-only
+    // (`https:`), or a `scheme://*` source would permit egress to any host. The two
+    // HF entries are SCOPED wildcards (`*.huggingface.co` / `*.hf.co` only) and are
+    // an explicit part of the allowlist below, so they're not blanket egress. The
+    // exact-allowlist check + the runtime refusal below keep the proof honest.
     const connectSrc = csp?.match(/connect-src([^;]*)/)?.[1] ?? '';
-    expect(connectSrc).not.toContain('*');
+    for (const token of connectSrc.trim().split(/\s+/)) {
+      expect(token, `blanket wildcard in connect-src: ${token}`).not.toMatch(
+        /^\*$|^https?:$|^[a-z]+:\/\/\*$/,
+      );
+    }
     const SPIKE_ALLOWED_ORIGINS = [
       'https://cdn.pilgrimapp.org',
       'https://huggingface.co',
+      'https://*.huggingface.co',
+      'https://*.hf.co',
       'https://cdn.jsdelivr.net',
     ];
     const origins = connectSrc.match(/https?:\/\/[^\s]+/g) ?? [];
