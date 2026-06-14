@@ -187,6 +187,9 @@ export class ModeRouter {
   /** The held closure lines (close phrase or release), shown while `closing`. */
   private closeLines: readonly string[] = [];
   private closeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** True while a closure waits for a keypress (the save confirmation) rather than
+   *  auto-fading (the unburden release). The host shows a "press any key" hint. */
+  private closeWaits = false;
 
   constructor(opts: ModeRouterOptions) {
     this.store = opts.store;
@@ -230,6 +233,12 @@ export class ModeRouter {
    *  line for unburden). Empty unless the phase is `closing`. */
   closureLines(): readonly string[] {
     return this.closeLines;
+  }
+
+  /** True while the current closure waits for a keypress (the save confirmation),
+   *  so the host can show a "press any key to continue" hint. */
+  closureWaits(): boolean {
+    return this.closeWaits;
   }
 
   /** The labels the between-session picker offers (reflect default first). */
@@ -361,7 +370,9 @@ export class ModeRouter {
 
     const close = this.closeFor(payload);
     session.end();
-    this.beginClosing(close);
+    // The save confirmation waits for a keypress (it's the user's proof the entry
+    // landed) — unlike the unburden release, which fades on its own.
+    this.beginClosing(close, { wait: true });
   }
 
   /**
@@ -436,18 +447,21 @@ export class ModeRouter {
     return parseLines(wasmComposeClose(where, provenance, phrase));
   }
 
-  private beginClosing(lines: readonly string[]): void {
+  private beginClosing(lines: readonly string[], opts: { wait?: boolean } = {}): void {
     this.closeLines = lines;
+    this.closeWaits = opts.wait ?? false;
     this.phase = 'closing';
     this.session = null;
-    const dwell = this.reduceMotion ? CLOSE_DWELL_MS_REDUCED : CLOSE_DWELL_MS;
     this.clearCloseTimer();
-    this.closeTimer = setTimeout(() => {
-      this.closeTimer = null;
-      // Only auto-dismiss if we are still showing this closure (the user may
-      // have already dismissed it manually).
-      if (this.phase === 'closing') this.toPicker();
-    }, dwell);
+    if (!this.closeWaits) {
+      const dwell = this.reduceMotion ? CLOSE_DWELL_MS_REDUCED : CLOSE_DWELL_MS;
+      this.closeTimer = setTimeout(() => {
+        this.closeTimer = null;
+        // Only auto-dismiss if we are still showing this closure (the user may
+        // have already dismissed it manually).
+        if (this.phase === 'closing') this.toPicker();
+      }, dwell);
+    }
     this.emit();
   }
 

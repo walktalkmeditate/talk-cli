@@ -760,10 +760,14 @@ async function boot(): Promise<void> {
   };
 
   const composeClosing = (): string => {
-    return router
+    const body = router
       .closureLines()
       .map((l) => `  ${theme.core(l)}`)
       .join('\r\n');
+    // The save confirmation waits for a key — tell the user so (the release fades
+    // on its own and needs no prompt).
+    if (!router.closureWaits()) return body;
+    return `${body}\r\n\r\n  ${theme.edge('press any key to continue')}`;
   };
 
   /** The journal view (R18/R19): the by-date + by-thread IA rendered from
