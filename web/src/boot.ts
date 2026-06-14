@@ -9,9 +9,28 @@
 /** The host (talk.pilgrimapp.org) the login line names — the web front door. */
 export const BOOT_HOST = 'talk.pilgrimapp.org';
 
-/** The canonical install command, kept VERBATIM in sync with the README's brew
- *  line so the funnel never drifts from the real tap. */
-export const INSTALL_HINT = 'brew install talk';
+/** The OS families the install funnel detects, so the funnel shows the command
+ *  that actually works on the visitor's machine instead of one canonical line. */
+export type InstallOs = 'mac' | 'linux' | 'windows' | 'unknown';
+
+/** The per-OS install command, kept VERBATIM in sync with the README's Install
+ *  section so the funnel never drifts from the real tap / crate. macOS leads with
+ *  Homebrew (the tap is `walktalkmeditate/tap`); everywhere else uses the crate
+ *  (`talk-cli`, installing the `talk` binary), which needs only a Rust toolchain. */
+export function installHint(os: InstallOs): string {
+  switch (os) {
+    case 'mac':
+      return 'brew install walktalkmeditate/tap/talk';
+    case 'linux':
+    case 'windows':
+    case 'unknown':
+      return 'cargo install talk-cli';
+  }
+}
+
+/** The default funnel line (macOS Homebrew) used when no OS is supplied — the
+ *  pure renderers fall back to it so `boot.test.ts` stays platform-independent. */
+export const INSTALL_HINT = installHint('mac');
 
 /** Which rust tone a boot line paints in (main.ts maps these to theme.core /
  *  theme.dim / theme.edge — the same tones the composed session uses). */
@@ -49,22 +68,28 @@ export function relativeTime(fromMs: number, nowMs: number): string {
  * Pure — no terminal, no theme, no clock of its own — so `boot.test.ts` asserts
  * the copy directly and main.ts owns the painting.
  */
-export function renderBoot(version: string, lastVisit: number | null, nowMs: number): BootLine[] {
+export function renderBoot(
+  version: string,
+  lastVisit: number | null,
+  nowMs: number,
+  install: string = INSTALL_HINT,
+): BootLine[] {
   const login: BootLine =
     lastVisit !== null
       ? { text: `Last visit: ${relativeTime(lastVisit, nowMs)} on ${BOOT_HOST}`, tone: 'dim' }
       : { text: `Welcome — first reflection on ${BOOT_HOST}`, tone: 'dim' };
 
-  return [login, { text: '', tone: 'edge' }, ...renderMotd(version)];
+  return [login, { text: '', tone: 'edge' }, ...renderMotd(version, install)];
 }
 
 /** The MOTD banner: the talk wordmark, a rule, the version/local-session stamp,
- *  and the soft install funnel (the only nudge to the real CLI). */
-export function renderMotd(version: string): BootLine[] {
+ *  and the soft install funnel (the only nudge to the real CLI). `install` is the
+ *  OS-detected command the host resolves; it defaults to the macOS Homebrew line. */
+export function renderMotd(version: string, install: string = INSTALL_HINT): BootLine[] {
   return [
     { text: 'talk', tone: 'core' },
     { text: '────', tone: 'edge' },
     { text: `v${version} · local session · no account, nothing leaves your browser`, tone: 'dim' },
-    { text: `install the CLI: ${INSTALL_HINT}`, tone: 'edge' },
+    { text: `install the CLI: ${install}`, tone: 'edge' },
   ];
 }

@@ -36,7 +36,7 @@ import {
   cleanupForMode,
   type SessionMode,
 } from './mobile';
-import { renderBoot, INSTALL_HINT, type BootLine, type BootTone } from './boot';
+import { renderBoot, installHint, type InstallOs, type BootLine, type BootTone } from './boot';
 import { parseHash } from './deeplink';
 
 const MB = 1024 * 1024;
@@ -63,17 +63,29 @@ function resolveEngine(search: string): { real: boolean; modelId: string | undef
   return { real, modelId: modelParam ?? undefined };
 }
 
-/** How long the login/MOTD boot banner holds before the front door takes over;
- *  any key dismisses it early. Reduced motion shortens it (R26 calm parity). */
-const BOOT_DWELL_MS = 4200;
-const BOOT_DWELL_MS_REDUCED = 1800;
-
 /** A dedicated last-visit stamp for the boot banner's "Last visit …" line, kept
  *  in its own localStorage key so it is independent of the journal blob's schema
  *  (boot must work even before any entry is kept, and a journal-schema bump must
  *  not disturb the visit clock). Best-effort: a storage failure simply degrades
  *  to a first-visit welcome. */
 const LAST_VISIT_KEY = 'talk.last-visit.v1';
+
+/** Set once the speech model has finished loading on this browser, so a later
+ *  visit can call it "loading" (a fast local cache read) instead of falsely
+ *  claiming a "download" when the model is already cached. */
+const MODEL_SEEN_KEY = 'talk.model-seen.v1';
+
+/** Detect the visitor's OS family for the install funnel — so it shows the
+ *  command that actually works on their machine (Homebrew on macOS, the crate
+ *  elsewhere). Best-effort string sniff; an unknown UA falls back to the crate. */
+function detectInstallOs(): InstallOs {
+  const nav = navigator as Navigator & { userAgentData?: { platform?: string } };
+  const hint = `${nav.userAgentData?.platform ?? ''} ${navigator.platform ?? ''} ${navigator.userAgent}`.toLowerCase();
+  if (hint.includes('mac') || hint.includes('iphone') || hint.includes('ipad')) return 'mac';
+  if (hint.includes('win')) return 'windows';
+  if (hint.includes('linux') || hint.includes('android') || hint.includes('x11')) return 'linux';
+  return 'unknown';
+}
 
 /** Read the previous visit's epoch-ms, or null on a first visit / unreadable
  *  storage (→ the boot banner shows the first-reflection welcome). */
@@ -194,6 +206,14 @@ const PICKER_LABELS: Record<SessionMode, string> = {
   ephemeral: 'unburden',
 };
 
+/** One calm line per mode, so the picker says what each choice does (mirrors the
+ *  requirements doc's R14–R16) instead of three bare verbs. */
+const PICKER_DESC: Record<SessionMode, string> = {
+  reflect: 'a question to sit with — kept in your journal',
+  journal: "freeform — kept under today's date",
+  ephemeral: 'speak freely — nothing is kept',
+};
+
 /** The browser clock the router selects + timestamps from (local-civil). */
 function browserClock(): ModeClock {
   const pad = (n: number): string => String(n).padStart(2, '0');
@@ -232,6 +252,19 @@ async function boot(): Promise<void> {
   window.addEventListener('focus', refocus);
 
   let statusText = '';
+
+  // The OS-aware install command (Homebrew on macOS, the crate elsewhere), shown
+  // in the boot MOTD, the `i` funnel, and the help overlay.
+  const installCmd = installHint(detectInstallOs());
+
+  // Whether this browser has loaded the model before — drives "downloading" (first
+  // time, a real network fetch) vs "loading" (a fast local cache read) wording.
+  let modelSeen = false;
+  try {
+    modelSeen = localStorage.getItem(MODEL_SEEN_KEY) !== null;
+  } catch {
+    // Storage blocked → treat as first load (it will say "downloading" once).
+  }
 
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -333,6 +366,26 @@ async function boot(): Promise<void> {
         ? new LiveModeSession(mode, onControlsChange, {
             modelId,
             onModelStatus: (s) => {
+              if (s.phase === 'ready') {
+                // Steady state — clear the line so "speech model ready" doesn't trail
+                // the user across every screen; the header + session indicator already
+                // show it's ready. Remember the model so next visit says "loading".
+                statusText = '';
+                if (!modelSeen) {
+                  modelSeen = true;
+                  try {
+                    localStorage.setItem(MODEL_SEEN_KEY, '1');
+                  } catch {
+                    // No durable flag just means next visit may say "downloading" once.
+                  }
+                }
+                return;
+              }
+              if (s.phase === 'downloading' && modelSeen) {
+                // Already cached — it's a fast local read, not a network download.
+                statusText = 'loading speech model…';
+                return;
+              }
               statusText = s.message;
             },
             onMicState: (d) => {
@@ -355,13 +408,15 @@ async function boot(): Promise<void> {
   // one, so the line shows when you were last here, not "just now".
   const lastVisit = readLastVisit(localStorage);
   markVisit(localStorage, Date.now());
-  const bootLines: readonly BootLine[] = renderBoot(VERSION, lastVisit, Date.now());
+  const bootLines: readonly BootLine[] = renderBoot(VERSION, lastVisit, Date.now(), installCmd);
   let showingBoot = true;
-  const bootDwell = reduceMotion ? BOOT_DWELL_MS_REDUCED : BOOT_DWELL_MS;
+  // No auto-dismiss timer: the "press any key to begin" gate IS the user gesture
+  // the mic needs (getUserMedia/AudioContext are gesture-gated). Auto-advancing on
+  // a timer would drop the user into a session with a dead mic — so boot holds
+  // until a key or click, which then begins capture.
   const dismissBoot = (): void => {
     showingBoot = false;
   };
-  const bootTimer = setTimeout(dismissBoot, bootDwell);
 
   // Deep-link (U11): `#q=<question-id>` opens that specific reflect question on
   // load IF it resolves to a known question in the pack. The hash is already run
@@ -520,9 +575,8 @@ async function boot(): Promise<void> {
   // `v` opens the journal view. During the closure moment: any key dismisses it.
   term.onData((data) => {
     if (showingBoot) {
-      // Any key skips the login banner straight into the front door — and this
-      // keypress is the user gesture that lets the front-door session start the mic.
-      clearTimeout(bootTimer);
+      // Any key leaves the login banner for the front door — and this keypress is
+      // the user gesture that lets the front-door session start the mic.
       dismissBoot();
       beginCurrentSession();
       return;
@@ -555,7 +609,7 @@ async function boot(): Promise<void> {
         // The soft install funnel: surface the CLI install line as a notice, not
         // a nag. The same hint also rides the boot MOTD; this is the on-demand
         // echo for a returning visitor who skipped the banner.
-        showNotice(`run it in your real terminal:  ${INSTALL_HINT}`);
+        showNotice(`run it in your real terminal:  ${installCmd}`);
         return;
       }
       const mode = pickerKey(data);
@@ -575,16 +629,50 @@ async function boot(): Promise<void> {
     if (data === 'n') router.command('new-question');
   });
 
+  // Route Escape through xterm's key-event handler instead of relying on `onData`
+  // to deliver '\x1b': letter keys arrived but a bare Escape did not, so esc-cancel
+  // and esc-back silently did nothing. This is context-aware "back / cancel".
+  const handleEscape = (): void => {
+    if (showingBoot) {
+      dismissBoot();
+      beginCurrentSession();
+      return;
+    }
+    if (showingHelp) {
+      showingHelp = false;
+      return;
+    }
+    if (viewingJournal) {
+      closeJournalView();
+      return;
+    }
+    const phase = router.currentPhase();
+    if (phase === 'closing') {
+      router.dismissClosure();
+      return;
+    }
+    if (phase === 'session') {
+      // First esc arms the discard prompt; a second esc confirms (controls own the
+      // two-step). Ephemeral cancels immediately.
+      boundSession?.controlsCommand('cancel');
+    }
+    // picker: the front door — nothing to go back to.
+  };
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type === 'keydown' && e.key === 'Escape') {
+      handleEscape();
+      return false; // consume — don't also surface '\x1b' through onData
+    }
+    return true;
+  });
+
   // A click/tap anywhere is ALSO a "begin" gesture — robust when the terminal
   // lacks keyboard focus (e.g. DevTools is open), where xterm never receives the
   // "press any key" keystroke. A click dismisses the boot banner, starts the
   // session's mic (the gesture getUserMedia/AudioContext require), and focuses the
   // terminal so subsequent keys land.
   document.addEventListener('pointerdown', () => {
-    if (showingBoot) {
-      clearTimeout(bootTimer);
-      dismissBoot();
-    }
+    if (showingBoot) dismissBoot();
     beginCurrentSession();
     term.focus();
   });
@@ -660,7 +748,12 @@ async function boot(): Promise<void> {
     const head = theme.core('  take a breath. what now?');
     const opts = router
       .pickerOptions()
-      .map((m, i) => theme.dim(`    [${i + 1}] ${PICKER_LABELS[m]}`))
+      .map((m, i) => {
+        const key = theme.core(`[${i + 1}]`); // the keystroke pops
+        const label = theme.dim(PICKER_LABELS[m].padEnd(9));
+        const desc = theme.edge(PICKER_DESC[m]);
+        return `    ${key} ${label} ${desc}`;
+      })
       .join('\r\n');
     const hint = theme.edge('  press 1 · 2 · 3   (or r · j · u)   ·   v  journal   ·   i  install   ·   ?  help');
     return `${head}\r\n\r\n${opts}\r\n\r\n${hint}`;
@@ -746,6 +839,10 @@ async function boot(): Promise<void> {
       }
     }
     section('always', ['?  or  /   this help']);
+    section('install the cli', [
+      `${installCmd}   ← for your machine`,
+      'or  cargo install talk-cli   ·   brew install walktalkmeditate/tap/talk',
+    ]);
     rows.push(theme.dim('  nothing you say or write leaves your browser.'));
     rows.push('');
     rows.push(theme.edge('  press any key to close'));
@@ -807,7 +904,6 @@ async function boot(): Promise<void> {
     loop.stop();
     router.dispose();
     store.dispose();
-    clearTimeout(bootTimer);
     if (noticeTimer !== null) clearTimeout(noticeTimer);
     if (disclosureTimer !== null) clearTimeout(disclosureTimer);
     document.removeEventListener('pointerdown', refocus);
