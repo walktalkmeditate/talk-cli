@@ -336,9 +336,12 @@ async function boot(): Promise<void> {
               statusText = s.message;
             },
             onMicState: (d) => {
-              // Surface a non-listening mic state (waiting / denied / busy) so the
-              // user isn't left guessing; a granted mic falls back to the model line.
-              if (d.state !== 'granted') statusText = d.message;
+              // Surface a transient/failed mic state (waiting / denied / busy) so the
+              // user isn't left guessing; once granted, clear the line — otherwise the
+              // brief 'pending' message latches even on an already-granted mic (it
+              // still passes through 'pending' for a frame). The session view's own
+              // 'ready' / '[ Silence ]' indicator conveys that it's listening.
+              statusText = d.state === 'granted' ? '' : d.message;
             },
           })
         : new DemoModeSession(mode, onControlsChange),
