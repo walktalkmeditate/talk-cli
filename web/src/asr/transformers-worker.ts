@@ -81,6 +81,9 @@ interface LoadedEngine {
   readonly processor: Processor;
   readonly model: PreTrainedModel;
   readonly device: EnginePlacement;
+  /** English-only Whisper checkpoints (id contains `.en`) REJECT `language`/`task`
+   *  at generate() — those args are multilingual-only. Track it so we omit them. */
+  readonly englishOnly: boolean;
 }
 
 let engine: LoadedEngine | null = null;
@@ -128,7 +131,7 @@ async function load(modelId: string): Promise<void> {
     }),
   ]);
 
-  engine = { tokenizer, processor, model, device };
+  engine = { tokenizer, processor, model, device, englishOnly: /\.en\b/i.test(modelId) };
   post({ type: 'ready', modelId, device });
 }
 
@@ -153,7 +156,7 @@ async function transcribe(id: number, audio: Float32Array, isFinal: boolean): Pr
   while (busy) await new Promise((r) => setTimeout(r, 5));
   busy = true;
 
-  const { tokenizer, processor, model } = engine;
+  const { tokenizer, processor, model, englishOnly } = engine;
   try {
     const streamer = new TextStreamer(tokenizer, {
       skip_prompt: true,
@@ -167,7 +170,9 @@ async function transcribe(id: number, audio: Float32Array, isFinal: boolean): Pr
     const outputs = await model.generate({
       ...inputs,
       max_new_tokens: MAX_NEW_TOKENS,
-      language: 'en',
+      // `language`/`task` are multilingual-only; an English-only checkpoint throws
+      // "Cannot specify 'task' or 'language' for an English-only model" if they're set.
+      ...(englishOnly ? {} : { language: 'en', task: 'transcribe' }),
       streamer,
     });
 

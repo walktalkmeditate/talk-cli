@@ -419,8 +419,12 @@ async function boot(): Promise<void> {
   // Whenever the router swaps the live session, (re)bind it + remount the chips.
   // Called from the render loop (composeView) so it tracks every phase change.
   const syncSession = (): void => {
-    const live = router.liveSession();
-    if (live instanceof DemoModeSession) {
+    // The router types sessions as the narrower ModeSession, but THIS host's
+    // sessionFactory only ever builds LiveSessionView instances (DemoModeSession |
+    // LiveModeSession), so the cast is sound. (The old `instanceof DemoModeSession`
+    // check silently excluded the real LiveModeSession — keys never bound.)
+    const live = router.liveSession() as LiveSessionView | null;
+    if (live) {
       if (live !== boundSession) {
         boundSession = live;
         completed = false;
@@ -430,6 +434,13 @@ async function boot(): Promise<void> {
       boundSession = null;
       mountChips();
     }
+  };
+
+  /** Start the current session's capture — MUST run from a user gesture
+   *  (keypress/click), because getUserMedia + AudioContext are gesture-gated.
+   *  Idempotent, so calling it on every session-starting gesture is safe. */
+  const beginCurrentSession = (): void => {
+    (router.liveSession() as LiveSessionView | null)?.begin();
   };
 
   // The deferred clipboard-disclosure note's timer — held so unload can clear it
@@ -486,6 +497,7 @@ async function boot(): Promise<void> {
       case 'new-entry':
         closeJournalView();
         router.start('journal');
+        beginCurrentSession();
         return;
       case 'back':
         closeJournalView();
@@ -501,9 +513,11 @@ async function boot(): Promise<void> {
   // `v` opens the journal view. During the closure moment: any key dismisses it.
   term.onData((data) => {
     if (showingBoot) {
-      // Any key skips the login banner straight into the front door.
+      // Any key skips the login banner straight into the front door — and this
+      // keypress is the user gesture that lets the front-door session start the mic.
       clearTimeout(bootTimer);
       dismissBoot();
+      beginCurrentSession();
       return;
     }
     if (viewingJournal) {
@@ -528,14 +542,34 @@ async function boot(): Promise<void> {
         return;
       }
       const mode = pickerKey(data);
-      if (mode) router.start(mode);
+      if (mode) {
+        router.start(mode);
+        beginCurrentSession(); // the picker keypress is the gesture
+      }
       return;
     }
     // session phase
+    // Catch-all gesture: if boot auto-dismissed on its timer (no keypress), this
+    // first session key is the gesture that starts the mic. Idempotent.
+    beginCurrentSession();
     const session = boundSession;
     if (!session) return;
     if (session.controlsKey(data)) return;
     if (data === 'n') router.command('new-question');
+  });
+
+  // A click/tap anywhere is ALSO a "begin" gesture — robust when the terminal
+  // lacks keyboard focus (e.g. DevTools is open), where xterm never receives the
+  // "press any key" keystroke. A click dismisses the boot banner, starts the
+  // session's mic (the gesture getUserMedia/AudioContext require), and focuses the
+  // terminal so subsequent keys land.
+  document.addEventListener('pointerdown', () => {
+    if (showingBoot) {
+      clearTimeout(bootTimer);
+      dismissBoot();
+    }
+    beginCurrentSession();
+    term.focus();
   });
 
   /** Keys while the journal view is open. `c` continues the most-recent thread —
@@ -573,6 +607,7 @@ async function boot(): Promise<void> {
     if (!first || first.question === null) return;
     closeJournalView();
     router.continueQuestion(first.question);
+    beginCurrentSession();
   };
 
   const composeSession = (session: LiveSessionView, mode: SessionMode): string => {

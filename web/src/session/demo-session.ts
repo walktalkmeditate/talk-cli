@@ -44,6 +44,11 @@ export const DEMO_STEP_MS = 700;
  * satisfy this, not the concrete `DemoModeSession`.
  */
 export interface LiveSessionView extends ModeSession {
+  /** Start capture/playback — MUST be called from a user gesture (keypress/click).
+   *  getUserMedia + AudioContext are gesture-gated by browsers; starting in the
+   *  constructor (which the router runs at page load) leaves the AudioContext
+   *  suspended and no audio is ever captured. Idempotent. */
+  begin(): void;
   /** Compose the session's screen as a wasm JSON string for the given view fields. */
   compose(args: {
     readonly mode: SessionMode;
@@ -71,7 +76,8 @@ export class DemoModeSession implements LiveSessionView {
   private readonly pipeline: Pipeline;
   private readonly controls: SessionControls;
   private readonly recognizer: MockRecognizer;
-  private readonly timer: ReturnType<typeof setInterval>;
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private started = false;
   private cancelled = false;
 
   constructor(mode: SessionMode, onControlsChange: () => void) {
@@ -82,8 +88,13 @@ export class DemoModeSession implements LiveSessionView {
       ephemeral: isEphemeralMode(mode),
       onChange: onControlsChange,
     });
+  }
+
+  begin(): void {
+    if (this.started) return;
+    this.started = true;
     this.timer = setInterval(() => {
-      if (!this.recognizer.step()) clearInterval(this.timer);
+      if (!this.recognizer.step() && this.timer) clearInterval(this.timer);
     }, DEMO_STEP_MS);
   }
 
@@ -147,7 +158,7 @@ export class DemoModeSession implements LiveSessionView {
   }
 
   end(): void {
-    clearInterval(this.timer);
+    if (this.timer) clearInterval(this.timer);
     this.pipeline.free();
   }
 }

@@ -41,6 +41,7 @@ export class LiveModeSession implements LiveSessionView {
   private readonly controls: SessionControls;
   private readonly recognizer: TransformersRecognizer;
   private readonly capture: AudioCapture;
+  private started = false;
   private cancelled = false;
   private ended = false;
 
@@ -49,6 +50,10 @@ export class LiveModeSession implements LiveSessionView {
     onControlsChange: () => void,
     opts: LiveModeSessionOptions = {},
   ) {
+    // The model can begin loading at construction (no gesture needed for a fetch),
+    // but the MIC must wait for begin() — getUserMedia + AudioContext are
+    // gesture-gated; starting them here (the router constructs sessions at page
+    // load) leaves the AudioContext suspended and captures no audio.
     this.recognizer = new TransformersRecognizer({
       modelId: opts.modelId,
       onModelStatus: opts.onModelStatus,
@@ -63,6 +68,11 @@ export class LiveModeSession implements LiveSessionView {
       onFrame: (frame) => this.pipeline.pushAudio(frame),
       onState: (detail) => opts.onMicState?.(detail),
     });
+  }
+
+  begin(): void {
+    if (this.started) return;
+    this.started = true;
     // Fire-and-forget: the permission outcome is surfaced through onMicState; a
     // rejection never throws here (AudioCapture carries the state, not an error).
     void this.capture.start();
