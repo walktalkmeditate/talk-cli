@@ -235,6 +235,22 @@ export class ModeRouter {
   }
 
   /**
+   * Continue an existing reflect thread (U9's "continue a thread", R19): start a
+   * reflect session bound to a SPECIFIC question rather than drawing the next via
+   * the rotation, so a kept thread can be answered again. Records the serve so
+   * the rotation's recency still advances. Valid from the picker (or boot).
+   */
+  continueQuestion(question: ReflectQuestion): void {
+    this.clearCloseTimer();
+    this.currentMode = 'reflect';
+    this.question = question;
+    this.store.noteServed(question.id);
+    this.session = this.sessionFactory('reflect');
+    this.phase = 'session';
+    this.emit();
+  }
+
+  /**
    * Skip / re-roll the reflect question BEFORE answering (the `new-question`
    * chip / `n` key / `:skip`). Draws the next question via the same rotation.
    * A no-op outside an in-progress reflect session.

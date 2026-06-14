@@ -9,10 +9,23 @@ import { MockRecognizer, type ScriptStep } from './asr/recognizer';
 import { SessionControls } from './session/controls';
 import {
   ModeRouter,
-  InMemoryEntryStore,
   type ModeClock,
   type ModeSession,
 } from './session/modes';
+import {
+  JournalStore,
+  detectPrivateMode,
+  durabilityWarnings,
+  DURABILITY_WARNING_COPY,
+  type StorageEvent,
+} from './journal/store';
+import { buildJournalView, continueThread, type JournalThreadGroup } from './journal/view';
+import {
+  runExport,
+  browserExportSink,
+  ExportDisclosure,
+  type ExportScope,
+} from './journal/export';
 import {
   isTouch,
   createChipBar,
@@ -27,6 +40,12 @@ const MB = 1024 * 1024;
 
 function fmtMb(bytes: number): string {
   return `${(bytes / MB).toFixed(0)} MB`;
+}
+
+/** One-line preview of an entry body for the journal list (first line, clipped). */
+function truncate(text: string, max = 64): string {
+  const firstLine = text.split('\n')[0] ?? '';
+  return firstLine.length > max ? `${firstLine.slice(0, max - 1)}…` : firstLine;
 }
 
 /**
@@ -229,11 +248,40 @@ async function boot(): Promise<void> {
     }
   };
 
+  // A transient banner the host surfaces below the screen: storage failures
+  // (R23), the first-keep export prompt (R21), and durability/exposure warnings
+  // (R21/R22). It auto-clears after a dwell so it never sticks. A quota failure
+  // is the one banner held longer — it is the user's cue to export.
+  let noticeText = '';
+  let noticeTimer: ReturnType<typeof setTimeout> | null = null;
+  const NOTICE_DWELL_MS = 8000;
+  const showNotice = (text: string, dwellMs = NOTICE_DWELL_MS): void => {
+    noticeText = text;
+    if (noticeTimer !== null) clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => {
+      noticeText = '';
+      noticeTimer = null;
+    }, dwellMs);
+  };
+
+  // The durable browser-local journal (U9) — the production EntryStore behind the
+  // exact `modes.ts` seam, so the router is unchanged. `localStorage` is the
+  // backend; a probe up front decides whether anything will persist (private
+  // mode). Storage failures and the first-keep prompt surface as notices.
+  const store = new JournalStore({
+    backend: localStorage,
+    onStorageEvent: (event: StorageEvent) => showNotice(event.message),
+    onFirstKeep: () =>
+      showNotice('first entry kept — open your journal ( v ) and export ( e ) to keep a copy off this browser'),
+  });
+  const privateMode = detectPrivateMode(localStorage);
+  const exportSink = browserExportSink();
+  const exportDisclosure = new ExportDisclosure();
+
   // The mode router (U8) owns the experience flow: it boots into the reflect
   // front door, runs a session through the demo pipeline + U7 controls, lands the
-  // entry through the in-memory store seam (U9 swaps in the durable one), then
-  // routes to the between-session picker. A repaint is implicit via the rAF loop.
-  const store = new InMemoryEntryStore();
+  // entry through the durable store seam (U9), then routes to the between-session
+  // picker. A repaint is implicit via the rAF loop.
   const router = new ModeRouter({
     store,
     clock: browserClock(),
@@ -241,12 +289,43 @@ async function boot(): Promise<void> {
     session: (mode) => new DemoModeSession(mode, onControlsChange),
   });
 
+  // One-time durability/exposure warnings (R21/R22): surface them once the page
+  // settles, opting into persistent storage first so the eviction-risk decision
+  // reflects reality.
+  void surfaceDurabilityWarnings();
+  async function surfaceDurabilityWarnings(): Promise<void> {
+    const persisted = privateMode ? false : await store.requestPersist();
+    const warnings = durabilityWarnings({ privateMode, persisted, hasKept: store.hasKept() });
+    if (warnings.length === 0) return;
+    // Show the most urgent one (the list is ordered by urgency); the rest are
+    // re-derivable from the journal view if the user opens it.
+    showNotice(DURABILITY_WARNING_COPY[warnings[0]]);
+  }
+
+  // The host-level journal-view overlay (R18/R19): opened from the picker (`v`)
+  // or the new-entry/back chips; rendered from view.ts via the theme. `false`
+  // means a session/picker is showing, not the journal browser.
+  let viewingJournal = false;
+  const openJournalView = (): void => {
+    viewingJournal = true;
+    mountChips();
+  };
+  const closeJournalView = (): void => {
+    viewingJournal = false;
+    mountChips();
+  };
+
   let chipBar: HTMLElement | null = null;
   const mountChips = (): void => {
     if (!isTouch()) return;
     if (chipBar) {
       chipBar.remove();
       chipBar = null;
+    }
+    if (viewingJournal) {
+      chipBar = createChipBar(chipsFor('journal-view'), (command) => handleCommand(command));
+      document.body.appendChild(chipBar);
+      return;
     }
     if (router.currentPhase() !== 'session') return;
     const mode = router.mode();
@@ -271,7 +350,26 @@ async function boot(): Promise<void> {
     }
   };
 
-  /** Route a normalized command (key or chip) to the controls or the router. */
+  /** Export the whole journal (the `:export` command / the journal-view chip).
+   *  Downloads a CLI-identical markdown file; the confirmation lands as a notice. */
+  const exportJournal = (channel: 'download' | 'clipboard' = 'download'): void => {
+    const entries = store.allEntries();
+    if (entries.length === 0) {
+      showNotice('nothing to export yet');
+      return;
+    }
+    const scope: ExportScope = { kind: 'all', entries };
+    void runExport(scope, channel, exportSink, exportDisclosure).then((result) => {
+      showNotice(result.message);
+      if (result.clipboardDisclosure) {
+        // The one-time OS-shared note follows the confirmation on the next frame.
+        setTimeout(() => showNotice(result.clipboardDisclosure as string), 1500);
+      }
+    });
+  };
+
+  /** Route a normalized command (key or chip) to the controls, the router, or
+   *  the host-level journal view (new-entry / export / back). */
   const handleCommand = (command: string): void => {
     const session = boundSession;
     switch (command) {
@@ -284,22 +382,40 @@ async function boot(): Promise<void> {
       case 'new-question':
         router.command('new-question');
         return;
+      case 'export':
+        exportJournal('download');
+        return;
+      case 'new-entry':
+        closeJournalView();
+        router.start('journal');
+        return;
+      case 'back':
+        closeJournalView();
+        return;
       default:
-        // new-entry / export / back belong to the U9 journal view.
         return;
     }
   };
 
-  // Desktop keys → commands. In a session: space/u/p/esc drive the controls,
-  // `n` re-rolls the reflect question. At the picker: r/j/u (or 1/2/3) pick a
-  // mode. During the closure moment: any key dismisses it early.
+  // Desktop keys → commands. In the journal view: e=export, c=continue the first
+  // thread, esc/b=back. In a session: space/u/p/esc drive the controls, `n`
+  // re-rolls the reflect question. At the picker: r/j/u (or 1/2/3) pick a mode,
+  // `v` opens the journal view. During the closure moment: any key dismisses it.
   term.onData((data) => {
+    if (viewingJournal) {
+      handleJournalViewKey(data);
+      return;
+    }
     const phase = router.currentPhase();
     if (phase === 'closing') {
       router.dismissClosure();
       return;
     }
     if (phase === 'picker') {
+      if (data === 'v') {
+        openJournalView();
+        return;
+      }
       const mode = pickerKey(data);
       if (mode) router.start(mode);
       return;
@@ -310,6 +426,43 @@ async function boot(): Promise<void> {
     if (session.controls.onKey(data)) return;
     if (data === 'n') router.command('new-question');
   });
+
+  /** Keys while the journal view is open. `c` continues the most-recent thread —
+   *  re-prompting that exact reflect question (R19's "continue a thread"). */
+  const handleJournalViewKey = (data: string): void => {
+    switch (data) {
+      case 'e':
+        exportJournal('download');
+        return;
+      case 'b':
+      case '\x1b': // esc
+        closeJournalView();
+        return;
+      case 'c': {
+        const top = topThread();
+        if (top) continueThreadView(top);
+        return;
+      }
+      default:
+        return;
+    }
+  };
+
+  /** The most-recently-touched reflect thread, or null when there are none. */
+  const topThread = (): JournalThreadGroup | null => {
+    const vm = buildJournalView(store.journalDays(), store.threads());
+    return vm.byThread.length > 0 ? vm.byThread[0] : null;
+  };
+
+  /** Continue a thread: resolve its full question (from the thread's first kept
+   *  entry) and hand it to the router so the exact question is re-prompted. */
+  const continueThreadView = (group: JournalThreadGroup): void => {
+    const id = continueThread(group);
+    const first = store.thread(id)[0];
+    if (!first || first.question === null) return;
+    closeJournalView();
+    router.continueQuestion(first.question);
+  };
 
   const composeSession = (session: DemoModeSession, mode: SessionMode): string => {
     const idle = session.pipeline.idleStatus();
@@ -334,7 +487,7 @@ async function boot(): Promise<void> {
       .pickerOptions()
       .map((m, i) => theme.dim(`    [${i + 1}] ${PICKER_LABELS[m]}`))
       .join('\r\n');
-    const hint = theme.edge('  press 1 · 2 · 3   (or r · j · u)');
+    const hint = theme.edge('  press 1 · 2 · 3   (or r · j · u)   ·   v  read your journal');
     return `${head}\r\n\r\n${opts}\r\n\r\n${hint}`;
   };
 
@@ -345,8 +498,46 @@ async function boot(): Promise<void> {
       .join('\r\n');
   };
 
+  /** The journal view (R18/R19): the by-date + by-thread IA rendered from
+   *  view.ts. view.ts owns the grouping/ordering/empty-state DECISION; this only
+   *  paints the resulting view-model in the theme. */
+  const composeJournalView = (): string => {
+    const vm = buildJournalView(store.journalDays(), store.threads());
+    const lines: string[] = [theme.core('  your journal'), ''];
+
+    if (vm.isEmpty) {
+      lines.push(theme.dim(`    ${vm.emptyMessage}`));
+    } else {
+      if (vm.byDate.length > 0) {
+        lines.push(theme.edge('  by date'));
+        for (const group of vm.byDate) {
+          lines.push(theme.dim(`    ${group.date}`));
+          for (const e of group.entries) {
+            lines.push(`      ${theme.core(`${e.time}  ${truncate(e.clean)}`)}`);
+          }
+        }
+        lines.push('');
+      }
+      if (vm.byThread.length > 0) {
+        lines.push(theme.edge('  by thread'));
+        for (const t of vm.byThread) {
+          lines.push(theme.dim(`    ${t.questionText}`));
+          for (const e of t.entries) {
+            lines.push(`      ${theme.core(`${e.date} ${e.time}  ${truncate(e.clean)}`)}`);
+          }
+        }
+        lines.push('');
+      }
+    }
+
+    const hint = theme.edge('  e  export   ·   c  continue a thread   ·   b / esc  back');
+    lines.push(hint);
+    return lines.join('\r\n');
+  };
+
   const composeView = (): string => {
     syncSession();
+    if (viewingJournal) return composeJournalView();
     const phase = router.currentPhase();
     if (phase === 'picker') return composePicker();
     if (phase === 'closing') return composeClosing();
@@ -360,8 +551,9 @@ async function boot(): Promise<void> {
     const { cols, rows } = term;
     if (cols === 0 || rows === 0) return null;
     const body = composeView();
+    const notice = noticeText ? theme.dim(`  ${noticeText}`) : '';
     const bottom = statusText ? theme.edge(`  ${statusText}`) : '';
-    return `${body}\r\n\r\n${bottom}\x1b[K`;
+    return `${body}\r\n\r\n${notice}\x1b[K\r\n${bottom}\x1b[K`;
   };
 
   const loop: LoopHandle = startRenderLoop({
@@ -387,6 +579,7 @@ async function boot(): Promise<void> {
   window.addEventListener('beforeunload', () => {
     loop.stop();
     router.dispose();
+    if (noticeTimer !== null) clearTimeout(noticeTimer);
   });
 }
 
