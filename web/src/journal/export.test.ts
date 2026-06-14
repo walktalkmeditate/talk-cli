@@ -108,19 +108,31 @@ describe('buildMarkdown — parity with talk-wasm appendEntry', () => {
 // ── Filenames ──────────────────────────────────────────────────────────────────
 
 describe('filenameFor', () => {
-  it('uses the question slug for a reflect entry', () => {
+  it('uses the question slug for a reflect entry (Obsidian-clean, no prefix)', () => {
     expect(filenameFor({ kind: 'entry', entry: reflect('avoidance', 'x.') })).toBe(
-      'talk-avoidance-slug.md',
+      'avoidance-slug.md',
     );
   });
 
-  it('uses the date for a journal entry', () => {
+  it('uses the bare date for a journal entry (Obsidian daily-note pattern)', () => {
     expect(filenameFor({ kind: 'entry', entry: journal('x.', '2026-06-13') })).toBe(
-      'talk-journal-2026-06-13.md',
+      '2026-06-13.md',
     );
   });
 
-  it('names a full export talk-journal.md', () => {
+  it('names a journal day by its date (the daily-note file)', () => {
+    expect(filenameFor({ kind: 'day', date: '2026-06-13', entries: [journal('x.')] })).toBe(
+      '2026-06-13.md',
+    );
+  });
+
+  it('names a thread by its question slug', () => {
+    expect(
+      filenameFor({ kind: 'thread', questionId: 'avoidance', entries: [reflect('avoidance', 'x.')] }),
+    ).toBe('avoidance-slug.md');
+  });
+
+  it('names the whole-vault export talk-journal.md', () => {
     expect(filenameFor({ kind: 'all', entries: [] })).toBe('talk-journal.md');
   });
 });
@@ -134,8 +146,8 @@ describe('runExport — download channel', () => {
     const result = await runExport(scope, 'download', sink, new ExportDisclosure());
     expect(result.ok).toBe(true);
     expect(sink.downloads).toHaveLength(1);
-    expect(sink.downloads[0].filename).toBe('talk-journal-2026-06-13.md');
-    expect(result.message).toContain('talk-journal-2026-06-13.md');
+    expect(sink.downloads[0].filename).toBe('2026-06-13.md');
+    expect(result.message).toContain('2026-06-13.md');
     // download carries no clipboard disclosure
     expect(result.clipboardDisclosure).toBeUndefined();
   });

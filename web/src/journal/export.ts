@@ -14,9 +14,12 @@
 import { appendEntry } from '../wasm/talk_wasm.js';
 import type { EntryPayload } from '../session/modes';
 
-/** What to export. */
+/** What to export. `day` folds one calendar day's journal entries into a single
+ *  `YYYY-MM-DD.md` (the Obsidian daily-note pattern); `thread` folds one reflect
+ *  question's entries; `all` is the whole vault; `entry` is a single entry. */
 export type ExportScope =
   | { readonly kind: 'entry'; readonly entry: EntryPayload }
+  | { readonly kind: 'day'; readonly date: string; readonly entries: readonly EntryPayload[] }
   | { readonly kind: 'thread'; readonly questionId: string; readonly entries: readonly EntryPayload[] }
   | { readonly kind: 'all'; readonly entries: readonly EntryPayload[] };
 
@@ -88,6 +91,8 @@ export function buildMarkdown(scope: ExportScope): string {
   switch (scope.kind) {
     case 'entry':
       return buildBody([scope.entry]);
+    case 'day':
+      return buildBody(scope.entries);
     case 'thread':
       return buildBody(scope.entries);
     case 'all':
@@ -95,20 +100,24 @@ export function buildMarkdown(scope: ExportScope): string {
   }
 }
 
-/** A filesystem-safe filename for a scope, ending `.md`. Mirrors the CLI's
- *  per-question / per-day file naming closely enough to be recognizable. */
+/** A filesystem-safe filename for a scope, ending `.md`. Individual exports use
+ *  Obsidian-friendly names — a journal day is its bare date (`2026-06-14.md`, the
+ *  daily-note pattern), a reflect thread/entry is its question slug — so they drop
+ *  straight into a vault. Only the whole-vault export keeps the `talk-` brand. */
 export function filenameFor(scope: ExportScope): string {
   switch (scope.kind) {
     case 'entry': {
       const e = scope.entry;
-      const stem =
-        e.mode === 'reflect' && e.question
-          ? e.question.slug ?? e.question.id
-          : `journal-${e.date}`;
-      return `talk-${safeStem(stem)}.md`;
+      return e.mode === 'reflect' && e.question
+        ? `${safeStem(e.question.slug ?? e.question.id)}.md`
+        : `${e.date}.md`;
     }
-    case 'thread':
-      return `talk-${safeStem(scope.questionId)}.md`;
+    case 'day':
+      return `${scope.date}.md`;
+    case 'thread': {
+      const stem = scope.entries[0]?.question?.slug ?? scope.questionId;
+      return `${safeStem(stem)}.md`;
+    }
     case 'all':
       return 'talk-journal.md';
   }
@@ -127,6 +136,8 @@ function scopeNoun(scope: ExportScope): string {
   switch (scope.kind) {
     case 'entry':
       return 'entry';
+    case 'day':
+      return 'day';
     case 'thread':
       return 'thread';
     case 'all':

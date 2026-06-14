@@ -12,6 +12,7 @@ import { LiveModeSession } from './session/live-session';
 import {
   ModeRouter,
   type ModeClock,
+  type EntryPayload,
 } from './session/modes';
 import {
   JournalStore,
@@ -509,15 +510,10 @@ async function boot(): Promise<void> {
   // (a pending setTimeout firing after teardown would touch a dead screen).
   let disclosureTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /** Export the whole journal (the `:export` command / the journal-view chip).
-   *  Downloads a CLI-identical markdown file; the confirmation lands as a notice. */
-  const exportJournal = (channel: 'download' | 'clipboard' = 'download'): void => {
-    const entries = store.allEntries();
-    if (entries.length === 0) {
-      showNotice('nothing to export yet');
-      return;
-    }
-    const scope: ExportScope = { kind: 'all', entries };
+  /** Run an export scope through the sink, surfacing the confirmation (+ the
+   *  one-time clipboard disclosure) as notices. Shared by the whole-journal export
+   *  and the per-day / per-thread exports. */
+  const runExportScope = (scope: ExportScope, channel: 'download' | 'clipboard'): void => {
     runExport(scope, channel, exportSink, exportDisclosure)
       .then((result) => {
         showNotice(result.message);
@@ -537,6 +533,44 @@ async function boot(): Promise<void> {
         showNotice('export failed — try again');
         console.error('export failed', err);
       });
+  };
+
+  /** Export the WHOLE journal at once → `talk-journal.md` (the `e` key / chip). */
+  const exportJournal = (channel: 'download' | 'clipboard' = 'download'): void => {
+    const entries = store.allEntries();
+    if (entries.length === 0) {
+      showNotice('nothing to export yet');
+      return;
+    }
+    runExportScope({ kind: 'all', entries }, channel);
+  };
+
+  /** The raw entries kept under a journal date (for a per-day export). */
+  const dayEntries = (date: string): readonly EntryPayload[] =>
+    store.journalDays().find(([d]) => d === date)?.[1] ?? [];
+
+  /** The individually-exportable units the journal view numbers, in display order:
+   *  each journal day (→ `YYYY-MM-DD.md`, the Obsidian daily-note pattern) then
+   *  each reflect thread (→ `<slug>.md`). */
+  const exportUnits = (): readonly ExportScope[] => {
+    const vm = buildJournalView(store.journalDays(), store.threads());
+    const days = vm.byDate.map((g): ExportScope => ({
+      kind: 'day',
+      date: g.date,
+      entries: dayEntries(g.date),
+    }));
+    const threads = vm.byThread.map((g): ExportScope => ({
+      kind: 'thread',
+      questionId: g.questionId,
+      entries: store.thread(g.questionId),
+    }));
+    return [...days, ...threads];
+  };
+
+  /** Export the Nth numbered unit (1-based) shown in the journal view. */
+  const exportUnit = (index: number): void => {
+    const unit = exportUnits()[index - 1];
+    if (unit) runExportScope(unit, 'download');
   };
 
   /** Route a normalized command (key or chip) to the controls, the router, or
@@ -682,6 +716,12 @@ async function boot(): Promise<void> {
   /** Keys while the journal view is open. `c` continues the most-recent thread —
    *  re-prompting that exact reflect question (R19's "continue a thread"). */
   const handleJournalViewKey = (data: string): void => {
+    // A digit exports that numbered unit (a journal day → YYYY-MM-DD.md, a reflect
+    // thread → slug.md) — the per-item half of the two-tier export.
+    if (data >= '1' && data <= '9') {
+      exportUnit(Number(data));
+      return;
+    }
     switch (data) {
       case 'e':
         exportJournal('download');
@@ -782,10 +822,17 @@ async function boot(): Promise<void> {
     if (vm.isEmpty) {
       lines.push(theme.dim(`    ${vm.emptyMessage}`));
     } else {
+      // Number day + thread groups in one sequence (days first), matching
+      // exportUnits(): pressing the digit exports that one as its own file.
+      let n = 0;
+      const tag = (): string => {
+        n += 1;
+        return n <= 9 ? `${theme.core(`[${n}]`)} ` : '';
+      };
       if (vm.byDate.length > 0) {
         lines.push(theme.edge('  by date'));
         for (const group of vm.byDate) {
-          lines.push(theme.dim(`    ${group.date}`));
+          lines.push(`    ${tag()}${theme.dim(group.date)}`);
           for (const e of group.entries) {
             lines.push(`      ${theme.core(`${e.time}  ${truncate(e.clean)}`)}`);
           }
@@ -795,7 +842,7 @@ async function boot(): Promise<void> {
       if (vm.byThread.length > 0) {
         lines.push(theme.edge('  by thread'));
         for (const t of vm.byThread) {
-          lines.push(theme.dim(`    ${t.questionText}`));
+          lines.push(`    ${tag()}${theme.dim(t.questionText)}`);
           for (const e of t.entries) {
             lines.push(`      ${theme.core(`${e.date} ${e.time}  ${truncate(e.clean)}`)}`);
           }
@@ -804,7 +851,7 @@ async function boot(): Promise<void> {
       }
     }
 
-    const hint = theme.edge('  e  export   ·   c  continue a thread   ·   b / esc  back   ·   ?  help');
+    const hint = theme.edge('  e  export all   ·   1–9  export one   ·   c  continue   ·   b / esc  back   ·   ?  help');
     lines.push(hint);
     return lines.join('\r\n');
   };
@@ -821,7 +868,12 @@ async function boot(): Promise<void> {
       rows.push('');
     };
     if (viewingJournal) {
-      section('your journal', ['e  export', 'c  continue a thread', 'b / esc  back']);
+      section('your journal', [
+        'e  export everything → talk-journal.md',
+        '1–9  export one day → YYYY-MM-DD.md  (or a thread → slug.md)',
+        'c  continue a thread',
+        'b / esc  back',
+      ]);
     } else {
       const phase = router.currentPhase();
       if (phase === 'session') {
