@@ -22,10 +22,24 @@ export interface CacheBackend {
   clear(): Promise<void>;
 }
 
+/**
+ * The outcome of a cache `put`. A write failure (e.g. the origin's quota is
+ * exhausted) is NOT a download error — the bytes were fetched + verified fine, so
+ * the caller must treat a put failure distinctly (do not re-fetch the whole file).
+ */
+export interface PutResult {
+  /** True when the bytes were committed to the backend. */
+  readonly ok: boolean;
+  /** Set when `ok` is false — the underlying write error (for classification). */
+  readonly error?: unknown;
+}
+
 /** The cache surface the download/load layers use. */
 export interface ModelCache {
   get(path: string): Promise<ArrayBuffer | null>;
-  put(path: string, bytes: ArrayBuffer): Promise<void>;
+  /** Commit verified bytes. Returns a result rather than throwing, so a quota/
+   *  write failure on put is distinguishable from a network download failure. */
+  put(path: string, bytes: ArrayBuffer): Promise<PutResult>;
   has(path: string): Promise<boolean>;
   remove(path: string): Promise<void>;
   clear(): Promise<void>;
@@ -52,8 +66,16 @@ export class BackedModelCache implements ModelCache {
     }
   }
 
-  async put(path: string, bytes: ArrayBuffer): Promise<void> {
-    await this.backend.write(path, bytes);
+  async put(path: string, bytes: ArrayBuffer): Promise<PutResult> {
+    try {
+      await this.backend.write(path, bytes);
+      return { ok: true };
+    } catch (error) {
+      // A write failure (commonly a quota error) is NOT a network failure — the
+      // bytes were already fetched + verified. Report it so the caller can react
+      // distinctly (surface "storage full", do NOT re-fetch the whole file).
+      return { ok: false, error };
+    }
   }
 
   async has(path: string): Promise<boolean> {

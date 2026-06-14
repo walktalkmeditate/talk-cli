@@ -22,6 +22,7 @@ import {
   selectQuestion as wasmSelectQuestion,
   composeReleased as wasmComposeReleased,
   composeClose as wasmComposeClose,
+  selectClosePhrase as wasmSelectClosePhrase,
 } from '../wasm/talk_wasm.js';
 import { isEphemeralMode, type SessionMode } from '../mobile';
 
@@ -86,16 +87,35 @@ export interface ReflectQuestion {
  */
 export interface EntryStore {
   /** Persist a completed entry. Reflect entries append to their question's
-   *  thread (keyed by `payload.question.id`); journal entries append by date. */
-  keep(payload: EntryPayload): void;
+   *  thread (keyed by `payload.question.id`); journal entries append by date.
+   *
+   *  Returns `SaveResult | void`: the durable store reports whether the write
+   *  landed (so a quota/persist failure is observable AT this seam), while the
+   *  in-memory store returns `void`. The router does not depend on the result —
+   *  the entry is held in-memory either way — but the host can read it to react. */
+  keep(payload: EntryPayload): SaveResult | void;
   /** The selection state the reflect rotation reads (served counts + recency +
    *  any in-progress held run). Returned by reference is fine — the router only
    *  reads it; mutation goes through `keep` / `noteServed`. */
   selection(): SelectionSnapshot;
   /** Record that a question was SHOWN (served) — drives the rotation's recency
    *  even when the user skips/re-rolls before answering, mirroring the CLI which
-   *  advances the served ordinal on selection. */
-  noteServed(questionId: string): void;
+   *  advances the served ordinal on selection. Returns `SaveResult | void` (same
+   *  honesty seam as `keep`). */
+  noteServed(questionId: string): SaveResult | void;
+}
+
+/**
+ * The minimal outcome of a mutating store call: did the durable write land? The
+ * durable store (`journal/store.ts`) returns a RICHER `SaveResult` (with the
+ * classified failure) that is structurally assignable to this; the in-memory
+ * store returns `void`. Widening the seam to `SaveResult | void` lets a host
+ * observe a storage failure at the seam without forcing the in-memory store to
+ * fabricate one — `void`-returning callers still satisfy it.
+ */
+export interface SaveResult {
+  /** True if the write was durably committed. */
+  readonly persisted: boolean;
 }
 
 /** A read-only view of the reflect selection state for `selectQuestion`. */
@@ -227,6 +247,10 @@ export class ModeRouter {
    */
   start(mode: SessionMode): void {
     this.clearCloseTimer();
+    // End any session still bound before replacing it, so a deep-link boot (which
+    // can start a second session over the constructor's first) or any re-entry
+    // never orphans a running pipeline/timer.
+    this.session?.end();
     this.currentMode = mode;
     this.question = mode === 'reflect' ? this.selectNext() : null;
     this.session = this.sessionFactory(mode);
@@ -242,6 +266,8 @@ export class ModeRouter {
    */
   continueQuestion(question: ReflectQuestion): void {
     this.clearCloseTimer();
+    // End any session still bound before replacing it (same orphan guard as start).
+    this.session?.end();
     this.currentMode = 'reflect';
     this.question = question;
     this.store.noteServed(question.id);
@@ -332,7 +358,6 @@ export class ModeRouter {
     // contemplative close phrase.
     const payload = this.buildPayload(session, mode);
     this.store.keep(payload);
-    this.recordKept(payload);
 
     const close = this.closeFor(payload);
     session.end();
@@ -396,14 +421,6 @@ export class ModeRouter {
       mode,
       question: mode === 'reflect' ? this.question : null,
     };
-  }
-
-  /** Update the in-router held-run bookkeeping after a kept reflect entry: a
-   *  held question advances its run; the store owns the durable counts. */
-  private recordKept(_payload: EntryPayload): void {
-    // The served-count / recency advance happens in the store via `keep`; the
-    // held-run turn count is the store's responsibility too (it persists with
-    // the thread). Kept here as a seam so a future held-run UI hangs off it.
   }
 
   private closeFor(payload: EntryPayload): readonly string[] {
@@ -533,8 +550,10 @@ function parseLines(json: string): readonly string[] {
     if (Array.isArray(parsed) && parsed.every((s) => typeof s === 'string')) {
       return parsed as string[];
     }
-  } catch {
-    // fall through to the empty closure (the host just shows nothing)
+  } catch (err) {
+    // fall through to the empty closure (the host just shows nothing), but surface
+    // the malformed wasm output — a silent empty closure would hide a real bug.
+    console.warn('modes: invalid JSON from a compose* wasm export', err);
   }
   return [];
 }
@@ -544,7 +563,8 @@ function parseQuestion(json: string): ReflectQuestion | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
-  } catch {
+  } catch (err) {
+    console.warn('modes: invalid JSON from selectQuestion wasm export', err);
     return null;
   }
   if (typeof parsed !== 'object' || parsed === null) return null;
@@ -620,23 +640,14 @@ function clampHour(hour: number): number {
 }
 
 /**
- * The curated close phrases, mirrored from `src/live.rs::CLOSE_PHRASES`. The CLI
- * rotates by kept-entry count; the web has no on-disk count here yet (U9), so it
- * rotates by the clock so a returning user does not see the same line twice in a
- * row. Kept in sync with the CLI list.
+ * Pick a curated close phrase via the shared wasm export (`selectClosePhrase`),
+ * which reads `talk_core::close::CLOSE_PHRASES` — the SINGLE source of truth the
+ * CLI uses too, so the web can never drift from it. The CLI rotates by kept-entry
+ * count; the web has no on-disk count here yet (U9), so it rotates by the clock so
+ * a returning user does not see the same line twice in a row. A non-finite seed
+ * clamps to 0 at the boundary.
  */
-export const CLOSE_PHRASES: readonly string[] = [
-  'Stillness carries forward.',
-  'Said out loud, it weighs less.',
-  'You showed up. That was the practice.',
-  'Let it settle.',
-  'The thread holds.',
-  'Nothing to fix. Just to hear.',
-  'The words keep working after you stop.',
-  'Come back when it tugs.',
-];
-
 function pickClosePhrase(seed: number): string {
-  const i = Math.abs(Math.floor(seed)) % CLOSE_PHRASES.length;
-  return CLOSE_PHRASES[i];
+  const safe = Number.isFinite(seed) ? Math.abs(Math.floor(seed)) : 0;
+  return wasmSelectClosePhrase(safe);
 }

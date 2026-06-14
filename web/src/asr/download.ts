@@ -77,6 +77,17 @@ export interface DownloadOptions {
   readonly isOnline?: () => boolean;
   /** Max fetch attempts per file before giving up (default 3). */
   readonly maxAttempts?: number;
+  /** Sleep `ms` between retry attempts (defaults to a `setTimeout` sleep). The
+   *  test seam: inject a no-op (or a fake-timer-driven) sleep so retries don't
+   *  spend real wall-clock time. */
+  readonly sleep?: (ms: number) => Promise<void>;
+  /** Jitter source in [0,1) (defaults to `Math.random`). Injectable so the
+   *  backoff is deterministic in tests. */
+  readonly random?: () => number;
+  /** Abort a file fetch if no chunk arrives for this many ms (a stalled connection
+   *  that never errors). Default 30s; reset on every received chunk. Set 0 to
+   *  disable (the test default, so a fake fetch never trips a real timer). */
+  readonly stallTimeoutMs?: number;
 }
 
 export class DownloadCancelled extends Error {
@@ -103,9 +114,55 @@ export class DownloadFailed extends Error {
   }
 }
 
+/**
+ * A file was fetched + verified but could NOT be committed to the cache (commonly
+ * a storage-quota error). Distinct from `DownloadFailed` (a network failure): the
+ * bytes are good, so re-fetching the whole file wastes bandwidth and would hit the
+ * same wall — the caller surfaces a storage-full state instead of retrying.
+ */
+export class CacheWriteFailed extends Error {
+  constructor(
+    readonly path: string,
+    readonly cause: unknown,
+  ) {
+    super(`fetched ${path} but could not cache it: ${describe(cause)}`);
+    this.name = 'CacheWriteFailed';
+  }
+}
+
 function describe(cause: unknown): string {
   if (cause instanceof Error) return cause.message;
   return String(cause);
+}
+
+/** Base backoff (ms) for the first retry; doubles each attempt. */
+const RETRY_BASE_MS = 500;
+/** Max added jitter (ms) so concurrent clients don't retry in lock-step. */
+const RETRY_JITTER_MS = 200;
+
+/** Exponential backoff with jitter for retry `attempt` (0-based): the wait BEFORE
+ *  attempt N. `attempt` 0 (the first try) has no wait; from attempt 1 it grows as
+ *  `RETRY_BASE_MS * 2^(attempt-1)` plus up to `RETRY_JITTER_MS` of jitter. */
+function backoffMs(attempt: number, random: () => number): number {
+  if (attempt <= 0) return 0;
+  return RETRY_BASE_MS * 2 ** (attempt - 1) + Math.floor(random() * RETRY_JITTER_MS);
+}
+
+/** Default sleep — a `setTimeout` promise. Tests inject a no-op/fake-timer sleep. */
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Default per-file stall timeout: abort a fetch with no chunk for 30s. */
+const DEFAULT_STALL_TIMEOUT_MS = 30000;
+
+/** A fetch that stalled (no chunk within the stall window). Retriable like any
+ *  other transient network failure. */
+export class DownloadStalled extends Error {
+  constructor(readonly path: string) {
+    super(`download of ${path} stalled (no data received)`);
+    this.name = 'DownloadStalled';
+  }
 }
 
 interface FileTracker {
@@ -191,6 +248,9 @@ export async function downloadModels(opts: DownloadOptions = {}): Promise<void> 
   const fetchFn = opts.fetchFn ?? fetch;
   const isOnline = opts.isOnline ?? defaultIsOnline;
   const maxAttempts = opts.maxAttempts ?? 3;
+  const sleep = opts.sleep ?? defaultSleep;
+  const random = opts.random ?? Math.random;
+  const stallTimeoutMs = opts.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
   const signal = opts.signal;
 
   const trackers: FileTracker[] = manifest.files.map((f) => ({
@@ -245,6 +305,9 @@ export async function downloadModels(opts: DownloadOptions = {}): Promise<void> 
         fetchFn,
         isOnline,
         maxAttempts,
+        sleep,
+        random,
+        stallTimeoutMs,
         signal,
         emit: () => emit('downloading'),
         pause: () => emit('paused'),
@@ -254,6 +317,12 @@ export async function downloadModels(opts: DownloadOptions = {}): Promise<void> 
       if (err instanceof ModelsBlockedOffline) {
         tracker.state = 'paused';
         emit('paused');
+        throw err;
+      }
+      // A cache-write failure is not a network failure — propagate it verbatim so
+      // the caller can show "storage full" rather than "model download failed".
+      if (err instanceof CacheWriteFailed) {
+        emit('error');
         throw err;
       }
       tracker.state = 'error';
@@ -271,6 +340,9 @@ interface AcquireCtx {
   fetchFn: typeof fetch;
   isOnline: () => boolean;
   maxAttempts: number;
+  sleep: (ms: number) => Promise<void>;
+  random: () => number;
+  stallTimeoutMs: number;
   signal: AbortSignal | undefined;
   emit: () => void;
   pause: () => void;
@@ -289,6 +361,12 @@ async function acquireFile(file: ModelFile, tracker: FileTracker, ctx: AcquireCt
 
   for (let attempt = 0; attempt < ctx.maxAttempts; attempt++) {
     if (ctx.signal?.aborted) throw new DownloadCancelled();
+    // Back off before a RETRY (attempt > 0) so a transient failure isn't hammered;
+    // exponential with jitter, both injectable so tests stay fast + deterministic.
+    if (attempt > 0) {
+      await ctx.sleep(backoffMs(attempt, ctx.random));
+      if (ctx.signal?.aborted) throw new DownloadCancelled();
+    }
     if (!ctx.isOnline()) {
       tracker.state = 'paused';
       ctx.pause();
@@ -314,7 +392,15 @@ async function acquireFile(file: ModelFile, tracker: FileTracker, ctx: AcquireCt
         continue;
       }
 
-      await ctx.cache.put(url, bytes);
+      const put = await ctx.cache.put(url, bytes);
+      if (!put.ok) {
+        // The bytes are good but the cache write failed (commonly quota). Do NOT
+        // retry the full fetch — re-downloading would hit the same wall. Surface a
+        // distinct error so the caller shows a storage-full state, not a net error.
+        tracker.state = 'error';
+        ctx.emit();
+        throw new CacheWriteFailed(file.path, put.error);
+      }
       tracker.state = 'complete';
       tracker.received = bytes.byteLength;
       tracker.total = bytes.byteLength;
@@ -323,6 +409,7 @@ async function acquireFile(file: ModelFile, tracker: FileTracker, ctx: AcquireCt
     } catch (err) {
       if (err instanceof DownloadCancelled) throw err;
       if (err instanceof ModelsBlockedOffline) throw err;
+      if (err instanceof CacheWriteFailed) throw err; // not retriable — bytes are fine
       lastErr = err;
       // Retry the next attempt (clean re-fetch — fetchWholeFile reads no partial).
     }
@@ -335,42 +422,98 @@ async function acquireFile(file: ModelFile, tracker: FileTracker, ctx: AcquireCt
  * Stream the response body, updating progress per chunk. Resolves the assembled
  * bytes. If the body has no reader (e.g. a test fetch returning a plain
  * Response), falls back to `arrayBuffer()`.
+ *
+ * Stall guard (R7): a fetch whose connection hangs may never error or finish. An
+ * internal AbortController, merged with the caller's signal, is armed for
+ * `ctx.stallTimeoutMs` and RESET on every received chunk; if it fires, the read
+ * is aborted and surfaces as `DownloadStalled` (retriable). Disabled when
+ * `stallTimeoutMs` is 0.
  */
 async function fetchWholeFile(url: string, tracker: FileTracker, ctx: AcquireCtx): Promise<ArrayBuffer> {
-  const res = await ctx.fetchFn(url, { signal: ctx.signal });
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  const stall = ctx.stallTimeoutMs > 0 ? new AbortController() : null;
+  const fetchSignal = stall ? mergeSignals(ctx.signal, stall.signal) : ctx.signal;
+  let stallTimer: ReturnType<typeof setTimeout> | null = null;
+  const armStall = (): void => {
+    if (!stall) return;
+    if (stallTimer !== null) clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => stall.abort(), ctx.stallTimeoutMs);
+  };
+  const disarmStall = (): void => {
+    if (stallTimer !== null) clearTimeout(stallTimer);
+    stallTimer = null;
+  };
+  /** True when the abort came from OUR stall timer, not the caller's cancel. */
+  const stalledOut = (): boolean => stall !== null && stall.signal.aborted && !ctx.signal?.aborted;
 
-  const lenHeader = res.headers.get('content-length');
-  tracker.total = lenHeader ? Number(lenHeader) : null;
+  armStall();
+  try {
+    const res = await ctx.fetchFn(url, { signal: fetchSignal });
+    if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
 
-  const body = res.body;
-  if (!body) {
-    const buf = await res.arrayBuffer();
-    tracker.received = buf.byteLength;
-    if (tracker.total === null) tracker.total = buf.byteLength;
-    ctx.emit();
-    return buf;
-  }
+    const lenHeader = res.headers.get('content-length');
+    tracker.total = lenHeader ? Number(lenHeader) : null;
 
-  const reader = body.getReader();
-  const chunks: Uint8Array[] = [];
-  let received = 0;
-  for (;;) {
-    if (ctx.signal?.aborted) {
-      await reader.cancel().catch(() => undefined);
-      throw new DownloadCancelled();
-    }
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      chunks.push(value);
-      received += value.byteLength;
-      tracker.received = received;
+    const body = res.body;
+    if (!body) {
+      const buf = await res.arrayBuffer();
+      tracker.received = buf.byteLength;
+      if (tracker.total === null) tracker.total = buf.byteLength;
       ctx.emit();
+      return buf;
     }
-  }
 
-  return concat(chunks, received);
+    const reader = body.getReader();
+    const chunks: Uint8Array[] = [];
+    let received = 0;
+    for (;;) {
+      if (ctx.signal?.aborted) {
+        await reader.cancel().catch(() => undefined);
+        throw new DownloadCancelled();
+      }
+      let result: ReadableStreamReadResult<Uint8Array>;
+      try {
+        result = await reader.read();
+      } catch (err) {
+        if (stalledOut()) throw new DownloadStalled(tracker.path);
+        throw err;
+      }
+      const { done, value } = result;
+      if (done) break;
+      if (value) {
+        armStall(); // a chunk arrived — reset the stall window
+        chunks.push(value);
+        received += value.byteLength;
+        tracker.received = received;
+        ctx.emit();
+      }
+    }
+
+    return concat(chunks, received);
+  } catch (err) {
+    // An abort from our stall timer surfaces as DownloadStalled, not a bare abort.
+    if (stalledOut()) throw new DownloadStalled(tracker.path);
+    throw err;
+  } finally {
+    disarmStall();
+  }
+}
+
+/** Merge zero or more abort signals into one that aborts when ANY input does.
+ *  Avoids `AbortSignal.any` (not in every supported runtime) — wires listeners. */
+function mergeSignals(
+  caller: AbortSignal | undefined,
+  stall: AbortSignal,
+): AbortSignal {
+  if (!caller) return stall;
+  const merged = new AbortController();
+  const onAbort = (): void => merged.abort();
+  if (caller.aborted || stall.aborted) {
+    merged.abort();
+  } else {
+    caller.addEventListener('abort', onAbort, { once: true });
+    stall.addEventListener('abort', onAbort, { once: true });
+  }
+  return merged.signal;
 }
 
 function concat(chunks: readonly Uint8Array[], total: number): ArrayBuffer {

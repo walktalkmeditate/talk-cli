@@ -6,12 +6,30 @@ import {
   DownloadCancelled,
   ModelsBlockedOffline,
   DownloadFailed,
+  CacheWriteFailed,
+  DownloadStalled,
   type DownloadProgress,
 } from './download';
 import { sha256Hex, modelUrl, type ModelManifest, type ModelFile } from './integrity';
-import { BackedModelCache, MemoryBackend, type ModelCache } from './cache';
+import {
+  BackedModelCache,
+  MemoryBackend,
+  type CacheBackend,
+  type ModelCache,
+} from './cache';
 
 const HOST = 'https://cdn.test';
+
+/** A no-op sleep so retry backoff costs no wall-clock time in tests. */
+const noSleep = (): Promise<void> => Promise.resolve();
+
+/** A DOMException-shaped quota error (what a real cache write throws when full). */
+function quotaError(): Error {
+  const e = new Error('QuotaExceededError');
+  e.name = 'QuotaExceededError';
+  (e as { code?: number }).code = 22;
+  return e;
+}
 
 function bytes(s: string): Uint8Array {
   return new TextEncoder().encode(s);
@@ -137,6 +155,7 @@ describe('downloadModels — integrity refuse + retry (AE7)', () => {
       manifest,
       cache,
       fetchFn,
+      sleep: noSleep, // skip the retry backoff so the test stays fast
       onProgress: (p) => p.files.forEach((f) => states.push(f.state)),
     });
 
@@ -153,7 +172,7 @@ describe('downloadModels — integrity refuse + retry (AE7)', () => {
     const fetchFn = vi.fn(async () => bodyResponse(bytes('always wrong'))) as unknown as typeof fetch;
 
     await expect(
-      downloadModels({ manifest, cache, fetchFn, maxAttempts: 2 }),
+      downloadModels({ manifest, cache, fetchFn, maxAttempts: 2, sleep: noSleep }),
     ).rejects.toBeInstanceOf(DownloadFailed);
     // nothing bad got committed
     expect(await cache.get(modelUrl(manifest.host, 'a.onnx'))).toBeNull();
@@ -258,6 +277,130 @@ describe('cancellation', () => {
     await expect(
       downloadModels({ manifest, cache: freshCache(), fetchFn: serveFetch(manifest), signal: controller.signal }),
     ).rejects.toBeInstanceOf(DownloadCancelled);
+  });
+});
+
+describe('retry backoff (exponential + jitter)', () => {
+  it('waits between retries with an exponential, jittered backoff', async () => {
+    // #given a manifest whose first two fetches are tampered, the third is good
+    const { manifest } = await manifestOf({ 'a.onnx': 'good' });
+    const cache = freshCache();
+    let call = 0;
+    const fetchFn = vi.fn(async () => {
+      call += 1;
+      return bodyResponse(call < 3 ? bytes('TAMPERED') : bytes('good'));
+    }) as unknown as typeof fetch;
+
+    // #when downloaded with an injected sleep that records the waited durations
+    const waits: number[] = [];
+    await downloadModels({
+      manifest,
+      cache,
+      fetchFn,
+      maxAttempts: 3,
+      sleep: (ms) => {
+        waits.push(ms);
+        return Promise.resolve();
+      },
+      random: () => 0.5, // deterministic jitter (0.5 * 200 = 100ms)
+    });
+
+    // #then a backoff was waited before attempt 1 and attempt 2 (not before the
+    // first try), and it grew exponentially: 500*2^0+100, then 500*2^1+100.
+    expect(waits).toEqual([600, 1100]);
+    expect(call).toBe(3);
+  });
+});
+
+describe('cache-write failure is distinct from a network failure (R12/R23)', () => {
+  it('a put failure rejects CacheWriteFailed and does NOT re-fetch the file', async () => {
+    // #given a cache whose backend write always fails (e.g. quota exhausted)
+    const { manifest } = await manifestOf({ 'a.onnx': 'good' });
+    const failingBackend: CacheBackend = {
+      read: async () => null,
+      write: async () => {
+        throw quotaError();
+      },
+      delete: async () => undefined,
+      keys: async () => [],
+      clear: async () => undefined,
+    };
+    const cache = new BackedModelCache(failingBackend);
+    let fetchCount = 0;
+    const fetchFn = vi.fn(async () => {
+      fetchCount += 1;
+      return bodyResponse(bytes('good'));
+    }) as unknown as typeof fetch;
+
+    // #when downloaded
+    const promise = downloadModels({ manifest, cache, fetchFn, maxAttempts: 3, sleep: noSleep });
+
+    // #then it surfaces as CacheWriteFailed (storage), NOT DownloadFailed (network)
+    await expect(promise).rejects.toBeInstanceOf(CacheWriteFailed);
+    // #and the verified bytes were fetched ONCE — a put failure must not re-fetch
+    expect(fetchCount).toBe(1);
+  });
+});
+
+describe('per-file stall timeout (R7)', () => {
+  it('aborts a fetch whose body never delivers a chunk → DownloadStalled, then gives up', async () => {
+    // #given a fetch whose body reader never resolves (a hung connection)
+    const { manifest } = await manifestOf({ 'a.onnx': 'good' });
+    const cache = freshCache();
+    const stallingFetch = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          // never enqueue/close — only an abort can end the read
+          const signal = init?.signal;
+          signal?.addEventListener('abort', () => controller.error(new DOMException('aborted', 'AbortError')));
+        },
+      });
+      return Promise.resolve(new Response(body, { status: 200 }));
+    }) as unknown as typeof fetch;
+
+    // #when downloaded with a tiny stall timeout (and no retry backoff)
+    await expect(
+      downloadModels({
+        manifest,
+        cache,
+        fetchFn: stallingFetch,
+        maxAttempts: 2,
+        stallTimeoutMs: 10,
+        sleep: noSleep,
+      }),
+    ).rejects.toBeInstanceOf(DownloadFailed); // wraps the final DownloadStalled
+
+    // #then it tried (and stalled) each attempt — never committed bad bytes
+    expect(stallingFetch).toHaveBeenCalledTimes(2);
+    expect(await cache.get(modelUrl(manifest.host, 'a.onnx'))).toBeNull();
+  });
+
+  it('surfaces a DownloadStalled cause through the DownloadFailed message', async () => {
+    const { manifest } = await manifestOf({ 'a.onnx': 'good' });
+    const stallingFetch = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          init?.signal?.addEventListener('abort', () =>
+            controller.error(new DOMException('aborted', 'AbortError')),
+          );
+        },
+      });
+      return Promise.resolve(new Response(body, { status: 200 }));
+    }) as unknown as typeof fetch;
+
+    const err = await downloadModels({
+      manifest,
+      cache: freshCache(),
+      fetchFn: stallingFetch,
+      maxAttempts: 1,
+      stallTimeoutMs: 10,
+      sleep: noSleep,
+    }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(DownloadFailed);
+    expect((err as DownloadFailed).message).toContain('stalled');
+    // sanity: the stall error type itself is exported + named
+    expect(new DownloadStalled('x').name).toBe('DownloadStalled');
   });
 });
 

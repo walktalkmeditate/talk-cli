@@ -141,6 +141,11 @@ export class SessionControls {
       case 'cancel':
         this.doCancel();
         return true;
+      default:
+        // Exhaustiveness guard: `cmd` is `never` here, so a new SessionCommand that
+        // isn't handled above fails to compile. `never` is assignable to the
+        // boolean return; at runtime an off-contract string is simply ignored.
+        return cmd;
     }
   }
 

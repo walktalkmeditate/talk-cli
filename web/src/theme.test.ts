@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { initWasmForTest } from './wasm-test-init';
-import { Theme, themeTones, type Rgb } from './theme';
+import { Theme, themeTones, type ComposedLine, type Rgb } from './theme';
 
 // The page's dark warm ground (index.html: `background: #14100e`). The rust
 // tones are tuned to clear the WCAG targets against this background.
@@ -56,6 +56,29 @@ describe('LineKind → tone mapping', () => {
     expect(theme.render('edge', 'x')).toContain(dim);
     expect(theme.render('question', 'x')).toContain(dim);
     expect(theme.render('chrome', 'x')).toContain(edge);
+  });
+});
+
+describe('renderComposed — untrusted-text control-byte moat (security)', () => {
+  it('strips ESC/OSC/BEL bytes from the transcript line before painting', () => {
+    // #given a composed line whose TEXT (from the wasm settle machine) carries an
+    // OSC title/clipboard sequence + a BEL terminator — an attacker-shaped payload.
+    const theme = Theme.load('rust');
+    const lines: ComposedLine[] = [
+      { kind: 'settled', text: 'hello\x1b]0;pwned\x07 world' },
+    ];
+
+    // #when it is rendered for the terminal
+    const out = theme.renderComposed(lines);
+
+    // #then no raw ESC/OSC/BEL byte from the transcript survives — the only ESCs
+    // are the theme's own trusted SGR (color) + the `[K` erase, never `]0;` / BEL.
+    expect(out).not.toContain('\x1b]0;');
+    expect(out).not.toContain('\x07');
+    expect(out).toContain('hello');
+    expect(out).toContain('world');
+    // The theme's own truecolor escape (trusted) is still present.
+    expect(out).toContain('\x1b[38;2;210;146;118m');
   });
 });
 

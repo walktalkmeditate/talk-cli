@@ -8,6 +8,7 @@
 // quietest). Mono returns an empty byte array, meaning "use the terminal fg".
 
 import { palette as wasmPalette } from './wasm/talk_wasm.js';
+import { stripControl } from './deeplink';
 
 const RESET = '\x1b[0m';
 
@@ -135,9 +136,17 @@ export class Theme {
    * Render composed lines into a frame body: each line painted in its kind's
    * tone (with `\x1b[K` to erase a shrinking row's stale tail) and joined with
    * `\r\n`. Feed this to `frameSequence` for one synchronized write.
+   *
+   * The line TEXT comes from the wasm settle machine, which carries the user's
+   * transcript — an untrusted-text→terminal seam. Its control/ESC bytes are
+   * stripped here (the same moat deeplink.ts uses) BEFORE the theme wraps it in
+   * its own trusted SGR escapes, so a transcript carrying `\x1b]0;…\x07` (an OSC
+   * title/clipboard sequence) can never drive the terminal.
    */
   renderComposed(lines: ComposedLine[]): string {
-    return lines.map((l) => `${this.render(l.kind, l.text)}\x1b[K`).join('\r\n');
+    return lines
+      .map((l) => `${this.render(l.kind, stripControl(l.text))}\x1b[K`)
+      .join('\r\n');
   }
 
   /** The wrapper a `LineKind` paints in: Settled→core, Edge & Question→dim,

@@ -4,13 +4,13 @@ import { createTerminal } from './terminal';
 import { startRenderLoop, type LoopHandle } from './loop';
 import { Theme, parseComposed, themeTones, type Rgb } from './theme';
 import { resolveModelState, downloadModels, type DownloadProgress } from './asr/download';
-import { Pipeline } from './asr/pipeline';
-import { MockRecognizer, type ScriptStep } from './asr/recognizer';
-import { SessionControls } from './session/controls';
+import {
+  DemoModeSession,
+  type LiveSessionView,
+} from './session/demo-session';
 import {
   ModeRouter,
   type ModeClock,
-  type ModeSession,
 } from './session/modes';
 import {
   JournalStore,
@@ -32,7 +32,6 @@ import {
   createChipBar,
   chipsFor,
   sessionChipScreen,
-  isEphemeralMode,
   cleanupForMode,
   type SessionMode,
 } from './mobile';
@@ -169,91 +168,6 @@ function dismissLoading(): void {
   setTimeout(() => el.remove(), 600);
 }
 
-/**
- * The taste-it preview (R10), INLINED here per U10. The MockRecognizer replays
- * this canned partials→settle sequence into the REAL settle → render path so the
- * live edge animates — dim partials jittering, an endpoint settling them, the
- * pass-2 finalize upgrading to bright final text — as the FIRST thing a visitor
- * sees, BEFORE/WHILE the models would download. It reuses the exact pipeline the
- * real session uses (not a separate code path), so the "taste" is faithful to the
- * live experience. This is scripted playback, NOT real transcription; the
- * one-line swap to `WireSherpaRecognizer` (recognizer.ts, U6's WIRE seam) lights
- * up the real on-device engine once the sherpa-onnx WASM assets exist — behind
- * the same Pipeline, so the visitor's first impression transitions seamlessly
- * into a real session.
- */
-const DEMO_SCRIPT: readonly ScriptStep[] = [
-  { kind: 'partial', text: 'i think' },
-  { kind: 'partial', text: 'i think i have been' },
-  { kind: 'partial', text: 'um i think i have been holding my breath' },
-  { kind: 'partial', text: 'um i think i have been holding my breath all week' },
-  { kind: 'endpoint' },
-  { kind: 'finalize', text: 'I think I have been holding my breath all week.', noSpeechProb: 0.02 },
-  { kind: 'partial', text: 'and what i want' },
-  { kind: 'partial', text: 'and what i want is to slow down' },
-  { kind: 'partial', text: 'and what i want is to slow down and notice' },
-];
-
-const DEMO_STEP_MS = 700;
-
-/**
- * A demo-backed session the ModeRouter drives: a Pipeline over a MockRecognizer
- * walked on a timer, wrapped with the U7 SessionControls. It exposes the
- * ModeSession surface (final text + cancel flag + buffer-wiping `end`) the router
- * lands an entry from. The real session (U6 WIRE seam) replaces the timer with
- * mic frames and the mock with WireSherpaRecognizer behind this same shape.
- */
-class DemoModeSession implements ModeSession {
-  readonly pipeline: Pipeline;
-  readonly controls: SessionControls;
-  private readonly recognizer: MockRecognizer;
-  private readonly timer: ReturnType<typeof setInterval>;
-  private cancelled = false;
-
-  constructor(mode: SessionMode, onControlsChange: () => void) {
-    this.recognizer = new MockRecognizer(DEMO_SCRIPT, { advanceOnAudio: false });
-    this.pipeline = new Pipeline({ recognizer: this.recognizer });
-    this.controls = new SessionControls({
-      pipeline: this.pipeline,
-      ephemeral: isEphemeralMode(mode),
-      onChange: onControlsChange,
-    });
-    this.timer = setInterval(() => {
-      if (!this.recognizer.step()) clearInterval(this.timer);
-    }, DEMO_STEP_MS);
-  }
-
-  finalClean(): string {
-    return this.pipeline.settle
-      .settledText()
-      .split('\n')
-      .filter((s) => s.length > 0)
-      .join(' ');
-  }
-
-  finalRaw(): string | null {
-    const raw = this.pipeline.settle
-      .settledRaw()
-      .split('\n')
-      .filter((s) => s.length > 0)
-      .join(' ');
-    return raw.length > 0 ? raw : null;
-  }
-
-  wasCancelled(): boolean {
-    return this.cancelled;
-  }
-
-  markCancelled(): void {
-    this.cancelled = true;
-  }
-
-  end(): void {
-    clearInterval(this.timer);
-    this.pipeline.free();
-  }
-}
-
 const PICKER_LABELS: Record<SessionMode, string> = {
   reflect: 'reflect',
   journal: 'journal',
@@ -290,7 +204,8 @@ async function boot(): Promise<void> {
   const theme = Theme.load(themeName);
 
   // Keyboard devices: grab focus so keystrokes land in the terminal without a
-  // click, and re-focus on click and when the tab regains focus.
+  // click, and re-focus on click and when the tab regains focus. Held as named
+  // handlers so `beforeunload` can detach them (no listeners leak past teardown).
   const refocus = (): void => term.focus();
   refocus();
   document.addEventListener('pointerdown', refocus);
@@ -304,17 +219,17 @@ async function boot(): Promise<void> {
   // finished session lands/discards exactly once. Declared BEFORE the router
   // because the router boots a reflect session in its constructor (which calls
   // the session factory synchronously, wiring `onControlsChange`).
-  let boundSession: DemoModeSession | null = null;
+  let boundSession: LiveSessionView | null = null;
   let completed = false;
 
   // Bridge the U7 controls → the router's completion: when a session's controls
   // report `finished`, the router lands (done) or discards (cancel) exactly once.
-  // The DemoModeSession fires this after every control state change (key/chip),
-  // so completion is observed without polling.
+  // The session fires this after every control state change (key/chip), so
+  // completion is observed without polling.
   const onControlsChange = (): void => {
     const session = boundSession;
     if (!session) return;
-    const st = session.controls.state();
+    const st = session.controlsState();
     if (!st.finished || completed) return;
     completed = true;
     if (st.cancelled) {
@@ -345,11 +260,24 @@ async function boot(): Promise<void> {
   // exact `modes.ts` seam, so the router is unchanged. `localStorage` is the
   // backend; a probe up front decides whether anything will persist (private
   // mode). Storage failures and the first-keep prompt surface as notices.
+  // A quota failure means the just-kept entry did NOT durably persist (R23/R17):
+  // hold its banner longer (it is the cue to export now) than an advisory/transient
+  // failure, so the user has a real chance to act before it scrolls away.
+  const QUOTA_NOTICE_DWELL_MS = 20000;
   const store = new JournalStore({
     backend: localStorage,
-    onStorageEvent: (event: StorageEvent) => showNotice(event.message),
+    onStorageEvent: (event: StorageEvent) =>
+      showNotice(
+        event.message,
+        event.kind === 'quota-exceeded' ? QUOTA_NOTICE_DWELL_MS : NOTICE_DWELL_MS,
+      ),
     onFirstKeep: () =>
       showNotice('first entry kept — open your journal ( v ) and export ( e ) to keep a copy off this browser'),
+    onExternalChange: () => {
+      // Another tab kept/cleared an entry — the journal view (if open) is now stale.
+      // The rAF loop repaints from the store on the next frame; nothing to do here
+      // beyond letting the mirror reload (which the store already did).
+    },
   });
   const privateMode = detectPrivateMode(localStorage);
   const exportSink = browserExportSink();
@@ -466,6 +394,10 @@ async function boot(): Promise<void> {
     }
   };
 
+  // The deferred clipboard-disclosure note's timer — held so unload can clear it
+  // (a pending setTimeout firing after teardown would touch a dead screen).
+  let disclosureTimer: ReturnType<typeof setTimeout> | null = null;
+
   /** Export the whole journal (the `:export` command / the journal-view chip).
    *  Downloads a CLI-identical markdown file; the confirmation lands as a notice. */
   const exportJournal = (channel: 'download' | 'clipboard' = 'download'): void => {
@@ -475,13 +407,25 @@ async function boot(): Promise<void> {
       return;
     }
     const scope: ExportScope = { kind: 'all', entries };
-    void runExport(scope, channel, exportSink, exportDisclosure).then((result) => {
-      showNotice(result.message);
-      if (result.clipboardDisclosure) {
-        // The one-time OS-shared note follows the confirmation on the next frame.
-        setTimeout(() => showNotice(result.clipboardDisclosure as string), 1500);
-      }
-    });
+    runExport(scope, channel, exportSink, exportDisclosure)
+      .then((result) => {
+        showNotice(result.message);
+        // Capture the narrowed value before the closure so it's a plain string,
+        // not a re-read of the (widening) result field — no cast needed.
+        const disclosure = result.clipboardDisclosure;
+        if (disclosure) {
+          if (disclosureTimer !== null) clearTimeout(disclosureTimer);
+          // The one-time OS-shared note follows the confirmation on the next frame.
+          disclosureTimer = setTimeout(() => {
+            disclosureTimer = null;
+            showNotice(disclosure);
+          }, 1500);
+        }
+      })
+      .catch((err) => {
+        showNotice('export failed — try again');
+        console.error('export failed', err);
+      });
   };
 
   /** Route a normalized command (key or chip) to the controls, the router, or
@@ -493,7 +437,7 @@ async function boot(): Promise<void> {
       case 'pause':
       case 'toggle-raw':
       case 'cancel':
-        session?.controls.command(command);
+        session?.controlsCommand(command);
         return;
       case 'new-question':
         router.command('new-question');
@@ -552,7 +496,7 @@ async function boot(): Promise<void> {
     // session phase
     const session = boundSession;
     if (!session) return;
-    if (session.controls.onKey(data)) return;
+    if (session.controlsKey(data)) return;
     if (data === 'n') router.command('new-question');
   });
 
@@ -593,20 +537,14 @@ async function boot(): Promise<void> {
     router.continueQuestion(first.question);
   };
 
-  const composeSession = (session: DemoModeSession, mode: SessionMode): string => {
-    const idle = session.pipeline.idleStatus();
-    const ctl = session.controls.state();
-    const json = session.pipeline.settle.compose(
+  const composeSession = (session: LiveSessionView, mode: SessionMode): string => {
+    const json = session.compose({
       mode,
-      router.questionText() ?? '',
-      '', // held_label (U8 selection has no held-label surface yet)
-      idle.listening,
-      '0:00',
-      cleanupForMode(mode), // journal → High (paragraphs), reflect/unburden → Light
-      ctl.showRaw, // `u` flips raw verbatim ⇄ cleaned text
-      ctl.paused,
-      ctl.confirmCancel,
-    );
+      question: router.questionText() ?? '',
+      heldLabel: '', // U8 selection has no held-label surface yet
+      elapsed: '0:00',
+      cleanup: cleanupForMode(mode), // journal → High (paragraphs), reflect/unburden → Light
+    });
     return theme.renderComposed(parseComposed(json));
   };
 
@@ -723,13 +661,23 @@ async function boot(): Promise<void> {
     statusText = text;
   });
 
-  // Stop the loop + tear down the router/session when the page unloads.
-  window.addEventListener('beforeunload', () => {
+  // Stop the loop + tear down the router/session + detach every global listener
+  // and timer when the page unloads, so nothing fires against a dead screen.
+  const onUnload = (): void => {
     loop.stop();
     router.dispose();
+    store.dispose();
     clearTimeout(bootTimer);
     if (noticeTimer !== null) clearTimeout(noticeTimer);
-  });
+    if (disclosureTimer !== null) clearTimeout(disclosureTimer);
+    document.removeEventListener('pointerdown', refocus);
+    window.removeEventListener('focus', refocus);
+    window.removeEventListener('resize', refit);
+    window.visualViewport?.removeEventListener('resize', refit);
+    window.removeEventListener('beforeunload', onUnload);
+    term.dispose();
+  };
+  window.addEventListener('beforeunload', onUnload);
 }
 
 /** The picker key → mode mapping (1/2/3 or r/j/u). */

@@ -48,11 +48,21 @@ export interface RecognizerEvents {
  * session pauses off-record so pre-pause audio never reaches a kept entry).
  */
 export interface Recognizer {
-  /** Subscribe the driver's handlers. Returns `this` for chaining. */
+  /** Subscribe the driver's handlers. Returns `this` for chaining.
+   *
+   *  MULTIPLICITY: `on` is called ONCE per recognizer (the pipeline subscribes in
+   *  its constructor) and a later call REPLACES the handlers — it does not stack a
+   *  second subscriber. Implementations must hold a single handler set, not a list. */
   on(events: RecognizerEvents): Recognizer;
   /** Feed one 16 kHz Int16 frame to the streaming pass. */
   pushAudio(frame: Int16Frame): void;
-  /** Discard the in-flight hypothesis + any segment audio (off-record pause). */
+  /** Discard the in-flight hypothesis + any segment audio (off-record pause).
+   *
+   *  MUST NOT emit events: `reset` is a SILENT state clear. The pipeline already
+   *  clears the live edge itself on pause (`settle.onPartial('')`); a `reset` that
+   *  fired `partial('')` would route an empty partial back through the Pairing
+   *  guard while paused (a no-op today, but a contract violation that couples the
+   *  engine to the driver's pause sequencing). Clear in-flight state only. */
   reset(): void;
   /** Flush any trailing audio into a final endpoint+finalize (session end). */
   flush(): void;
@@ -182,9 +192,10 @@ export class MockRecognizer implements Recognizer {
   }
 
   reset(): void {
-    // Off-record: drop any in-flight partial by clearing the live edge. The
-    // script index is NOT rewound — a real engine drops audio, not the future.
-    this.handlers?.partial('');
+    // Silent state clear (the Recognizer contract): a `reset` MUST NOT emit
+    // events. The pipeline clears the live edge itself on pause; here there is no
+    // buffered hypothesis to drop, and the script index is NOT rewound (a real
+    // engine drops audio, not the future). Intentionally a no-op for the mock.
   }
 
   flush(): void {

@@ -39,8 +39,11 @@ const MAX_ECHO_LEN = 64;
  *  This is the core of the moat: no ESC (`\x1b`), C0/C1 control, or DEL byte
  *  survives, so a junk fragment can never drive the terminal (cursor moves, OSC
  *  title/clipboard sequences, color resets). Length is left intact so the
- *  alphabet gate can REJECT an over-long id rather than silently truncate it. */
-function stripControl(value: string): string {
+ *  alphabet gate can REJECT an over-long id rather than silently truncate it.
+ *
+ *  Exported so the OTHER untrusted-text→terminal seam (the wasm→xterm compose
+ *  path in theme.ts) shares the exact same moat — one neutralizer, two surfaces. */
+export function stripControl(value: string): string {
   // eslint-disable-next-line no-control-regex
   return value.replace(/[\x00-\x1f\x7f-\x9f]/g, '');
 }

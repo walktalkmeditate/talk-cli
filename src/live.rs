@@ -11,17 +11,11 @@ use crate::source::{Event, TranscriptSource};
 const SPEECH_HANGOVER: Duration = Duration::from_millis(350);
 
 /// Curated close phrases (spec §7) — rotated by entry count so a returning user
-/// doesn't see the same line twice in a row.
-pub const CLOSE_PHRASES: &[&str] = &[
-    "Stillness carries forward.",
-    "Said out loud, it weighs less.",
-    "You showed up. That was the practice.",
-    "Let it settle.",
-    "The thread holds.",
-    "Nothing to fix. Just to hear.",
-    "The words keep working after you stop.",
-    "Come back when it tugs.",
-];
+/// doesn't see the same line twice in a row. The list itself lives in
+/// `talk_core::close` (the single source of truth shared with the web façade);
+/// `select_close_phrase` is re-exported here so the CLI call site (`main.rs`) is
+/// unchanged.
+pub use talk_core::close::select_close_phrase;
 
 pub struct LiveConfig<'a> {
     pub mode: RMode,

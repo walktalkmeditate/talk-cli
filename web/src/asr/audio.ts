@@ -43,6 +43,24 @@ export interface MicStateDetail {
 /** The target capture rate — both recognizers consume 16 kHz mono. */
 export const TARGET_SAMPLE_RATE = 16000;
 
+/** Thrown when the AudioContext stays `suspended` after `resume()` — proceeding
+ *  would wire a graph that never receives frames (a silent, hung session). The
+ *  caller maps it to `device-unavailable` so the UI surfaces a real state. */
+export class AudioContextSuspendedError extends Error {
+  constructor() {
+    super('audio context stayed suspended after resume — no frames would arrive');
+    this.name = 'AudioContextSuspendedError';
+  }
+}
+
+/** Thrown internally to unwind `wireCaptureGraph` when `stop()` raced it. */
+class CaptureStopped extends Error {
+  constructor() {
+    super('capture stopped mid-wire');
+    this.name = 'CaptureStopped';
+  }
+}
+
 /**
  * Below this, a getUserMedia rejection arrived faster than a human could dismiss
  * a dialog — so the browser auto-rejected WITHOUT prompting (denied-suppressed),
@@ -154,6 +172,10 @@ export class AudioCapture {
   private scriptNode: ScriptProcessorNode | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
   private state: MicState = 'pending';
+  /** Set by `stop()` so an in-flight `wireCaptureGraph` (which awaits across the
+   *  permission + module-load boundary) bails out instead of leaving orphaned
+   *  nodes wired to a context that is about to be torn down. */
+  private stopping = false;
 
   constructor(private readonly opts: AudioCaptureOptions) {}
 
@@ -178,6 +200,7 @@ export class AudioCapture {
       ((c: MediaStreamConstraints) => navigator.mediaDevices.getUserMedia(c));
     const now = this.opts.now ?? (() => performance.now());
 
+    this.stopping = false; // a fresh start clears any prior stop flag
     this.setState('pending');
     const t0 = now();
     let stream: MediaStream;
@@ -199,11 +222,23 @@ export class AudioCapture {
     }
 
     this.stream = stream;
+    if (this.stopping) {
+      // stop() raced the permission grant — release the just-granted mic, no wire.
+      this.teardownGraph();
+      this.stream?.getTracks().forEach((t) => t.stop());
+      this.stream = null;
+      return this.state;
+    }
     try {
       await this.wireCaptureGraph(stream);
     } catch (err) {
-      // The mic was granted but the audio graph failed to wire — treat the
-      // device as unavailable rather than leaving the session in limbo.
+      if (err instanceof CaptureStopped) {
+        // A stop() landed mid-wire; teardownGraph already ran in stop(). Stay calm.
+        return this.state;
+      }
+      // The mic was granted but the audio graph failed to wire (incl. a context
+      // that never left `suspended`) — treat the device as unavailable rather than
+      // leaving the session in a silent, frameless limbo.
       this.teardownGraph();
       this.setState('device-unavailable');
       void err;
@@ -226,6 +261,10 @@ export class AudioCapture {
     // frames; the gesture that triggered start() satisfies the autoplay policy.
     if (ctx.state === 'suspended') {
       await ctx.resume().catch(() => undefined);
+      if (this.stopping) throw new CaptureStopped();
+      // If it STILL won't resume, no frames will ever arrive — fail loudly rather
+      // than wiring a graph into a silent context (a hung, frameless session).
+      if (ctx.state === 'suspended') throw new AudioContextSuspendedError();
     }
 
     const source = ctx.createMediaStreamSource(stream);
@@ -233,6 +272,7 @@ export class AudioCapture {
 
     if (ctx.audioWorklet) {
       await ctx.audioWorklet.addModule('/mic-worklet.js');
+      if (this.stopping) throw new CaptureStopped();
       const node = new AudioWorkletNode(ctx, 'mic-capture');
       node.port.onmessage = (e: MessageEvent<Int16Array>) => this.opts.onFrame(e.data);
       source.connect(node);
@@ -268,8 +308,11 @@ export class AudioCapture {
     this.ctx = null;
   }
 
-  /** Stop capture and release the mic. Safe to call when not started. */
+  /** Stop capture and release the mic. Safe to call when not started, and safe to
+   *  call WHILE `start()` is still awaiting — the `stopping` flag makes an in-flight
+   *  `wireCaptureGraph` bail before it leaves orphaned nodes emitting frames. */
   stop(): void {
+    this.stopping = true;
     this.teardownGraph();
     this.stream?.getTracks().forEach((t) => t.stop());
     this.stream = null;

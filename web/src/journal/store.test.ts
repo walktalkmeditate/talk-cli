@@ -5,6 +5,7 @@ import {
   classifyStorageError,
   detectPrivateMode,
   durabilityWarnings,
+  type StorageEventTarget,
   type StorageLike,
 } from './store';
 import type { EntryPayload, ReflectQuestion } from '../session/modes';
@@ -145,6 +146,48 @@ describe('JournalStore — corrupt-safe load', () => {
     expect(store.journalForDate('2026-06-13').map((e) => e.clean)).toEqual(['kept.']);
     expect(store.selection().servedCount.size).toBe(0);
   });
+
+  it('a getItem that throws (SecurityError) loads as an empty store, never throws', () => {
+    // #given a backend whose READ throws (a locked-down/private profile)
+    const backend: StorageLike = {
+      getItem: () => {
+        const e = new Error('blocked');
+        e.name = 'SecurityError';
+        throw e;
+      },
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    };
+    // #then construction recovers to an empty store rather than crashing the app
+    let store!: JournalStore;
+    expect(() => {
+      store = new JournalStore({ backend, storageEvents: null });
+    }).not.toThrow();
+    expect(store.hasKept()).toBe(false);
+  });
+
+  it('an empty-string blob loads as an empty store', () => {
+    const backend = fakeBackend({ [STORE_KEY]: '' });
+    const store = new JournalStore({ backend });
+    expect(store.hasKept()).toBe(false);
+    expect(store.journalDays()).toEqual([]);
+  });
+
+  it('an array of wrong-shape elements is rejected (not delivered as undefined fields)', () => {
+    // #given a journalByDate whose entries are missing the required fields
+    const blob = JSON.stringify({
+      schemaVersion: 1,
+      journalByDate: { '2026-06-13': [{ nope: true }, 42, null] },
+      threads: {},
+      selection: { servedCount: {}, lastServed: {}, heldRun: null, serveOrdinal: 0 },
+      hasKept: true,
+    });
+    const backend = fakeBackend({ [STORE_KEY]: blob });
+    const store = new JournalStore({ backend });
+    // #then the malformed array is dropped (the shape guard rejected it), so no
+    // corrupt entry with undefined fields reaches the read/export path.
+    expect(store.journalForDate('2026-06-13')).toEqual([]);
+  });
 });
 
 // ── Schema-version migration ───────────────────────────────────────────────────
@@ -216,6 +259,89 @@ describe('JournalStore — storage failures surface distinctly (R23)', () => {
     store.keep(reflectEntry('avoidance', 'still readable in-session.'));
     // #then the read path still returns it (the session is not lost)
     expect(store.thread('avoidance').map((e) => e.clean)).toEqual(['still readable in-session.']);
+  });
+});
+
+// ── Concurrent-tab merge + cross-tab sync (lost-update guard) ──────────────────
+
+/** A fake `storage` event source so the cross-tab listener is testable in node. */
+function fakeStorageEvents(): StorageEventTarget & { fire(key: string | null): void } {
+  let listener: ((e: { key: string | null }) => void) | null = null;
+  return {
+    addEventListener: (_t, l) => {
+      listener = l;
+    },
+    removeEventListener: () => {
+      listener = null;
+    },
+    fire: (key) => listener?.({ key }),
+  };
+}
+
+describe('JournalStore — concurrent-tab merge (lost-update guard)', () => {
+  it('a save MERGES the current on-disk blob so a sibling tab is not clobbered', () => {
+    // #given two stores over the same backend (two tabs)
+    const backend = fakeBackend();
+    const tabA = new JournalStore({ backend, storageEvents: null });
+    const tabB = new JournalStore({ backend, storageEvents: null });
+
+    // #when each keeps a DIFFERENT journal entry (B writes after A)
+    tabA.keep(journalEntry('from tab A.', '2026-06-13', '08:00'));
+    tabB.keep(journalEntry('from tab B.', '2026-06-13', '09:00'));
+
+    // #then a fresh load sees BOTH (B's save merged A's on-disk entry, not clobbered)
+    const reloaded = new JournalStore({ backend, storageEvents: null });
+    expect(reloaded.journalForDate('2026-06-13').map((e) => e.clean)).toEqual([
+      'from tab A.',
+      'from tab B.',
+    ]);
+  });
+
+  it('the merge dedups an identical entry written by both tabs', () => {
+    const backend = fakeBackend();
+    const tabA = new JournalStore({ backend, storageEvents: null });
+    const tabB = new JournalStore({ backend, storageEvents: null });
+    const same = (): EntryPayload => journalEntry('same note.', '2026-06-13', '08:00');
+    tabA.keep(same());
+    tabB.keep(same());
+    const reloaded = new JournalStore({ backend, storageEvents: null });
+    expect(reloaded.journalForDate('2026-06-13').map((e) => e.clean)).toEqual(['same note.']);
+  });
+
+  it('a storage event from another tab reloads the in-memory mirror', () => {
+    // #given a store listening to a fake storage-event source
+    const backend = fakeBackend();
+    const events = fakeStorageEvents();
+    const onExternalChange = vi.fn();
+    const store = new JournalStore({ backend, storageEvents: events, onExternalChange });
+    expect(store.journalForDate('2026-06-13')).toEqual([]);
+
+    // #when another tab writes an entry, then fires the storage event for our key
+    new JournalStore({ backend, storageEvents: null }).keep(journalEntry('from elsewhere.'));
+    events.fire(STORE_KEY);
+
+    // #then this tab's mirror reflects the sibling's write + notified the host
+    expect(store.journalForDate('2026-06-13').map((e) => e.clean)).toEqual(['from elsewhere.']);
+    expect(onExternalChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a storage event for an unrelated key', () => {
+    const backend = fakeBackend();
+    const events = fakeStorageEvents();
+    const onExternalChange = vi.fn();
+    new JournalStore({ backend, storageEvents: events, onExternalChange });
+    events.fire('some.other.key');
+    expect(onExternalChange).not.toHaveBeenCalled();
+  });
+
+  it('dispose detaches the cross-tab listener', () => {
+    const backend = fakeBackend();
+    const events = fakeStorageEvents();
+    const onExternalChange = vi.fn();
+    const store = new JournalStore({ backend, storageEvents: events, onExternalChange });
+    store.dispose();
+    events.fire(STORE_KEY);
+    expect(onExternalChange).not.toHaveBeenCalled();
   });
 });
 

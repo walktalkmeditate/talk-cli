@@ -165,8 +165,31 @@ function normalizeSelection(sel: unknown): StoredSelection {
   };
 }
 
+/** A shape guard for one stored entry. A corrupt/old-shape element (missing the
+ *  required string fields) would otherwise deliver `undefined` fields into
+ *  `appendEntry` at export time; this rejects it at load. `question` is optional
+ *  (journal entries have none) and only loosely checked — a malformed question is
+ *  tolerated as `null` rather than failing the whole entry. */
+function isEntryPayload(v: unknown): v is EntryPayload {
+  if (typeof v !== 'object' || v === null) return false;
+  const e = v as Record<string, unknown>;
+  return (
+    typeof e.date === 'string' &&
+    typeof e.time === 'string' &&
+    typeof e.clean === 'string' &&
+    (e.raw === null || typeof e.raw === 'string') &&
+    typeof e.mode === 'string'
+  );
+}
+
 function isRecordOfArrays(v: unknown): v is Record<string, EntryPayload[]> {
-  return typeof v === 'object' && v !== null && Object.values(v).every(Array.isArray);
+  return (
+    typeof v === 'object' &&
+    v !== null &&
+    Object.values(v).every(
+      (arr) => Array.isArray(arr) && arr.every(isEntryPayload),
+    )
+  );
 }
 
 function isRecordOfNumbers(v: unknown): v is Record<string, number> {
@@ -184,6 +207,87 @@ function isHeldRun(v: unknown): v is [string, number] {
     typeof v[0] === 'string' &&
     typeof v[1] === 'number'
   );
+}
+
+// ── Concurrent-tab merge ──────────────────────────────────────────────────────
+//
+// Two tabs share one localStorage origin. Without a merge, the last tab to `save`
+// would clobber the other's entries (last-write-wins lost-update). Before every
+// save the store re-loads the current on-disk blob and MERGES the in-memory state
+// into it: entries are unioned by identity, selection counts/ordinals take the
+// max, and `hasKept` is OR-ed. A `storage` event (fired in OTHER tabs) reloads the
+// in-memory mirror so a tab reflects a sibling's writes.
+
+/** A stable identity for an entry, for union-dedup across tabs. Entries carry no
+ *  id, so the natural key is date+time+mode+clean (a second identical entry at the
+ *  same minute is indistinguishable and treated as the same — acceptable). */
+function entryKey(e: EntryPayload): string {
+  return `${e.date} ${e.time} ${e.mode} ${e.clean}`;
+}
+
+/** Union two ordered entry lists, keeping `base`'s order then appending entries
+ *  from `incoming` whose key isn't already present. */
+function unionEntries(base: EntryPayload[], incoming: EntryPayload[]): EntryPayload[] {
+  const seen = new Set(base.map(entryKey));
+  const out = [...base];
+  for (const e of incoming) {
+    const k = entryKey(e);
+    if (!seen.has(k)) {
+      seen.add(k);
+      out.push(e);
+    }
+  }
+  return out;
+}
+
+/** Union two `Record<string, EntryPayload[]>` maps key-by-key. */
+function unionRecord(
+  base: Record<string, EntryPayload[]>,
+  incoming: Record<string, EntryPayload[]>,
+): Record<string, EntryPayload[]> {
+  const out: Record<string, EntryPayload[]> = {};
+  for (const k of new Set([...Object.keys(base), ...Object.keys(incoming)])) {
+    out[k] = unionEntries(base[k] ?? [], incoming[k] ?? []);
+  }
+  return out;
+}
+
+/** Max-merge two number maps (served counts / recency ordinals). */
+function maxMergeNumbers(
+  base: Record<string, number>,
+  incoming: Record<string, number>,
+): Record<string, number> {
+  const out: Record<string, number> = { ...base };
+  for (const [k, v] of Object.entries(incoming)) {
+    out[k] = Math.max(out[k] ?? 0, v);
+  }
+  return out;
+}
+
+/**
+ * Merge the on-disk blob (`disk`, possibly written by another tab) with this
+ * tab's in-memory state (`mine`). Entries are unioned; selection counts/ordinals
+ * take the max so neither tab's rotation regresses; `hasKept` is OR-ed; the held
+ * run prefers the one carrying the higher serve ordinal (the more-recent writer).
+ */
+function mergeData(disk: StoreData, mine: StoreData): StoreData {
+  const serveOrdinal = Math.max(disk.selection.serveOrdinal, mine.selection.serveOrdinal);
+  const heldRun =
+    mine.selection.serveOrdinal >= disk.selection.serveOrdinal
+      ? mine.selection.heldRun
+      : disk.selection.heldRun;
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    threads: unionRecord(disk.threads, mine.threads),
+    journalByDate: unionRecord(disk.journalByDate, mine.journalByDate),
+    selection: {
+      servedCount: maxMergeNumbers(disk.selection.servedCount, mine.selection.servedCount),
+      lastServed: maxMergeNumbers(disk.selection.lastServed, mine.selection.lastServed),
+      heldRun,
+      serveOrdinal,
+    },
+    hasKept: disk.hasKept || mine.hasKept,
+  };
 }
 
 // ── Failure classification ────────────────────────────────────────────────────
@@ -234,6 +338,19 @@ function isPersistDeniedError(err: unknown): boolean {
 
 // ── The store ─────────────────────────────────────────────────────────────────
 
+/** The cross-tab event surface (a structural subset of `window`). Injected so the
+ *  listener is testable in node and absent gracefully in a non-browser runtime. */
+export interface StorageEventTarget {
+  addEventListener(
+    type: 'storage',
+    listener: (event: { key: string | null }) => void,
+  ): void;
+  removeEventListener(
+    type: 'storage',
+    listener: (event: { key: string | null }) => void,
+  ): void;
+}
+
 export interface JournalStoreOptions {
   /** The persistence backend (inject a fake in tests; `localStorage` in main). */
   readonly backend: StorageLike;
@@ -241,6 +358,16 @@ export interface JournalStoreOptions {
   readonly onStorageEvent?: (event: StorageEvent) => void;
   /** Fired once, the first time an entry is kept (R21 export prompt). */
   readonly onFirstKeep?: () => void;
+  /**
+   * The cross-tab event source for the `storage` event (defaults to `window` when
+   * present). When another tab writes `STORE_KEY`, this store reloads its mirror
+   * so it reflects the sibling's writes. Pass a fake in tests; pass `null` (or
+   * leave it in a non-browser runtime) to disable the listener.
+   */
+  readonly storageEvents?: StorageEventTarget | null;
+  /** Notified after the mirror reloads from another tab's write, so the host can
+   *  repaint a stale journal view. */
+  readonly onExternalChange?: () => void;
 }
 
 /**
@@ -253,13 +380,38 @@ export class JournalStore implements EntryStore {
   private readonly backend: StorageLike;
   private readonly onStorageEvent: ((event: StorageEvent) => void) | undefined;
   private readonly onFirstKeep: (() => void) | undefined;
+  private readonly onExternalChange: (() => void) | undefined;
+  private readonly storageEvents: StorageEventTarget | null;
+  private readonly onStorage: (event: { key: string | null }) => void;
   private data: StoreData;
 
   constructor(opts: JournalStoreOptions) {
     this.backend = opts.backend;
     this.onStorageEvent = opts.onStorageEvent;
     this.onFirstKeep = opts.onFirstKeep;
+    this.onExternalChange = opts.onExternalChange;
     this.data = loadData(this.backend);
+
+    // Cross-tab sync: when another tab writes our key, reload the mirror. Default
+    // to `window` when present; a non-browser runtime (or an explicit null) skips it.
+    this.storageEvents =
+      opts.storageEvents !== undefined
+        ? opts.storageEvents
+        : typeof window !== 'undefined'
+          ? (window as unknown as StorageEventTarget)
+          : null;
+    this.onStorage = (event: { key: string | null }): void => {
+      // `key === null` is a `clear()`; either matters to us.
+      if (event.key !== null && event.key !== STORE_KEY) return;
+      this.data = loadData(this.backend);
+      this.onExternalChange?.();
+    };
+    this.storageEvents?.addEventListener('storage', this.onStorage);
+  }
+
+  /** Detach the cross-tab listener (host unload). Safe to call when none attached. */
+  dispose(): void {
+    this.storageEvents?.removeEventListener('storage', this.onStorage);
   }
 
   // ── EntryStore seam ─────────────────────────────────────────────────────────
@@ -373,7 +525,18 @@ export class JournalStore implements EntryStore {
     return JSON.stringify(this.data);
   }
 
+  /**
+   * Commit the in-memory state, MERGING the current on-disk blob first so a
+   * concurrent tab's writes are never clobbered (lost-update). The merged result
+   * becomes this tab's mirror, so both tabs converge. On a write failure the
+   * in-memory entry is retained (the session is not lost) but the blob is NOT
+   * durably written — the failure is surfaced so the host can prompt an export and
+   * not present the entry as durably kept.
+   */
   private save(): SaveResult {
+    // Re-load + merge so a sibling tab's writes survive this write.
+    const disk = loadData(this.backend);
+    this.data = mergeData(disk, this.data);
     try {
       this.backend.setItem(STORE_KEY, JSON.stringify(this.data));
       return OK;

@@ -18,8 +18,9 @@ describe('BackedModelCache over MemoryBackend', () => {
     // #given an empty cache
     const cache = new BackedModelCache(new MemoryBackend());
     // #when a file is put
-    await cache.put('models/a.onnx', buf('weights'));
-    // #then it is present and reads back identically
+    const result = await cache.put('models/a.onnx', buf('weights'));
+    // #then the put reports success and it reads back identically
+    expect(result.ok).toBe(true);
     expect(await cache.has('models/a.onnx')).toBe(true);
     expect(text(await cache.get('models/a.onnx'))).toBe('weights');
   });
@@ -82,6 +83,24 @@ describe('corrupt backend → null (no throw)', () => {
   it('remove swallows a backend delete error', async () => {
     const cache = new BackedModelCache(throwingBackend);
     await expect(cache.remove('k')).resolves.toBeUndefined();
+  });
+
+  it('put returns a failure result (not a throw) when the write fails', async () => {
+    // #given a backend whose write rejects (e.g. quota exhausted)
+    const writeError = new Error('QuotaExceededError');
+    const failingWrite: CacheBackend = {
+      read: () => Promise.resolve(null),
+      write: () => Promise.reject(writeError),
+      delete: () => Promise.resolve(),
+      keys: () => Promise.resolve([]),
+      clear: () => Promise.resolve(),
+    };
+    const cache = new BackedModelCache(failingWrite);
+    // #when a put is attempted
+    const result = await cache.put('k', buf('v'));
+    // #then it reports the failure (so the caller distinguishes it from a net error)
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe(writeError);
   });
 });
 

@@ -13,6 +13,7 @@
 //! straddling-Revise invariant instead of re-implementing it in TypeScript.
 
 use talk_core::cleanup;
+use talk_core::close;
 use talk_core::entry::{self, Entry, Mode as EntryMode};
 use talk_core::pairing::{Decision, EventKind, Pairing as CorePairing};
 use talk_core::palette::{self, Theme, Tone};
@@ -312,16 +313,20 @@ impl Pairing {
 
     /// Decide what to do with an event of the given KIND, mutating the pairing guard.
     ///
-    /// `kind` is "partial" | "commit" | "revise" | "done" (anything else → "partial",
-    /// the harmless on-record default, so the boundary never throws). Returns one of
-    /// "done" | "drop" | "applyPartial" | "applyCommit" | "applyRevise".
+    /// `kind` is "partial" | "commit" | "revise" | "done". An UNKNOWN kind returns
+    /// "drop" — the privacy-safe default: an unrecognized event must NEVER be
+    /// applied (which could land off-record text), and dropping it leaves the
+    /// pairing guard's invariant untouched. The boundary never throws. Returns one
+    /// of "done" | "drop" | "applyPartial" | "applyCommit" | "applyRevise".
     #[wasm_bindgen(js_name = "decide")]
     pub fn decide(&mut self, kind: &str) -> String {
         let event = match kind.trim().to_ascii_lowercase().as_str() {
+            "partial" => EventKind::Partial,
             "commit" => EventKind::Commit,
             "revise" => EventKind::Revise,
             "done" => EventKind::Done,
-            _ => EventKind::Partial,
+            // An UNKNOWN kind is dropped — never applied (privacy-safe default).
+            _ => return "drop".to_string(),
         };
         match self.inner.decide(event) {
             Decision::Done => "done",
@@ -352,6 +357,20 @@ pub fn compose_close(path: &str, provenance: &str, phrase: &str) -> String {
 #[wasm_bindgen(js_name = composeReleased)]
 pub fn compose_released() -> String {
     json_string_array(&render_model::compose_released())
+}
+
+/// Pick a curated close phrase by `seed`, rotating over the shared
+/// `talk_core::close::CLOSE_PHRASES` list — the single source of truth the CLI
+/// uses too, so the web can never drift from it. The seed is reduced modulo the
+/// list length; a negative seed is clamped to 0 at the boundary.
+#[wasm_bindgen(js_name = selectClosePhrase)]
+pub fn select_close_phrase(seed: f64) -> String {
+    let seed = if seed.is_finite() && seed >= 0.0 {
+        (seed as u64 % close::CLOSE_PHRASES.len() as u64) as usize
+    } else {
+        0
+    };
+    close::select_close_phrase(seed).to_string()
 }
 
 /// Select the next curated question from a TOML pack, returning a JSON object
@@ -945,10 +964,12 @@ mod tests {
     }
 
     #[test]
-    fn pairing_unknown_kind_falls_back_to_partial_without_panicking() {
+    fn pairing_unknown_kind_drops_without_panicking() {
+        // The privacy-safe default: an UNKNOWN kind must DROP, never apply — an
+        // applied unknown could land off-record text into a kept entry.
         let mut p = Pairing::new();
-        assert_eq!(p.decide("nonsense"), "applyPartial");
-        assert_eq!(p.decide(""), "applyPartial");
+        assert_eq!(p.decide("nonsense"), "drop");
+        assert_eq!(p.decide(""), "drop");
     }
 
     #[test]
@@ -956,6 +977,18 @@ mod tests {
         let close = compose_close("~/talk/x.md", "entry 3", "Let it settle.");
         assert!(close.contains("~/talk/x.md") && close.contains("Let it settle."));
         assert_eq!(compose_released(), "[\"Released. Nothing was written.\"]");
+    }
+
+    #[test]
+    fn select_close_phrase_rotates_over_the_shared_list() {
+        let n = close::CLOSE_PHRASES.len();
+        // seed 0 → first phrase; wrapping past the end returns to the start.
+        assert_eq!(select_close_phrase(0.0), close::CLOSE_PHRASES[0]);
+        assert_eq!(select_close_phrase(n as f64), close::CLOSE_PHRASES[0]);
+        assert_eq!(select_close_phrase((n + 3) as f64), close::CLOSE_PHRASES[3]);
+        // A non-finite / negative seed clamps to the first phrase, never panics.
+        assert_eq!(select_close_phrase(f64::NAN), close::CLOSE_PHRASES[0]);
+        assert_eq!(select_close_phrase(-1.0), close::CLOSE_PHRASES[0]);
     }
 
     /// A tiny recursive-descent JSON validator — enough to prove the hand-built

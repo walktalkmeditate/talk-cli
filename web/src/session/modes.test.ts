@@ -2,7 +2,6 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import {
   ModeRouter,
   InMemoryEntryStore,
-  CLOSE_PHRASES,
   REFLECT_PACK_TOML,
   findQuestionInPack,
   type EntryPayload,
@@ -11,6 +10,7 @@ import {
   type ReflectQuestion,
   type SessionFactory,
 } from './modes';
+import { selectClosePhrase } from '../wasm/talk_wasm.js';
 import type { SessionMode } from '../mobile';
 import { initWasmForTest } from '../wasm-test-init';
 
@@ -245,15 +245,15 @@ describe('ModeRouter — unburden keeps nothing + closure (R16, AE9)', () => {
 describe('ModeRouter — reflect/journal closure moment', () => {
   it('a kept reflect entry plays a close phrase + landing line (composeClose)', () => {
     const { router } = makeRouter({
-      clock: fixedClock({ hour: 7, now: 3 }), // now=3 → CLOSE_PHRASES[3]
+      clock: fixedClock({ hour: 7, now: 3 }), // now=3 → selectClosePhrase(3)
       builder: () => fakeSession({ clean: 'kept.' }),
     });
     // #when the booted reflect session is finished
     router.complete(false);
-    // #then the closure shows the rotated close phrase
+    // #then the closure shows the rotated close phrase (the shared wasm rotation)
     expect(router.currentPhase()).toBe('closing');
     const lines = router.closureLines().join('\n');
-    expect(lines).toContain(CLOSE_PHRASES[3]);
+    expect(lines).toContain(selectClosePhrase(3));
     // #and a landing/provenance line is present (composeClose's first line)
     expect(lines).toContain('reflection kept');
   });

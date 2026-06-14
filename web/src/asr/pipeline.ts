@@ -22,12 +22,33 @@
 // pass-2 swap so the live edge never fabricates words during a pause. The real
 // no_speech_prob comes from the live engine, so it is keyed behind a clear seam.
 
-import init, { Pairing, Settle } from '../wasm/talk_wasm.js';
-import { deterministicLight } from '../wasm/talk_wasm.js';
+import init, { deterministicLight, Pairing, Settle } from '../wasm/talk_wasm.js';
 import type { Finalized, Int16Frame, Recognizer } from './recognizer';
 
 /** A pairing decision string, as `Pairing.decide(kind)` returns it. */
 type Verdict = 'done' | 'drop' | 'applyPartial' | 'applyCommit' | 'applyRevise';
+
+/** The known pairing verdicts (the wasm `Pairing.decide` contract). */
+const KNOWN_VERDICTS: ReadonlySet<string> = new Set<Verdict>([
+  'done',
+  'drop',
+  'applyPartial',
+  'applyCommit',
+  'applyRevise',
+]);
+
+/**
+ * Narrow a raw `Pairing.decide(...)` string to a `Verdict`, defending the wasm↔JS
+ * boundary: an unrecognized verdict is treated as `'drop'` (the privacy-safe
+ * default — an unknown decision must NEVER be applied, which could land off-record
+ * text) and logged, rather than blindly cast. The wasm side already drops unknown
+ * KINDS; this is the symmetric guard on the way back out.
+ */
+function toVerdict(s: string): Verdict {
+  if (KNOWN_VERDICTS.has(s)) return s as Verdict;
+  console.error(`pipeline: unknown pairing verdict ${JSON.stringify(s)} — dropping`);
+  return 'drop';
+}
 
 /**
  * The hallucination gate's verdict on a finalize. Behind a clear seam: the real
@@ -104,7 +125,7 @@ const SPEECH_HANGOVER_MS = 350;
  */
 export class Pipeline {
   readonly settle: Settle;
-  readonly pairing: Pairing;
+  private readonly pairing: Pairing;
   private readonly recognizer: Recognizer;
   private readonly gate: HallucinationGate;
   private readonly onChange: (() => void) | undefined;
@@ -112,6 +133,10 @@ export class Pipeline {
   // Per-segment accumulation for the heuristic gate + the raw/clean commit text.
   private segmentSamples = 0;
   private segmentAbsSum = 0;
+  // Snapshot of the segment's stats taken AT the endpoint, BEFORE resetSegment()
+  // wipes them — the pass-2 finalize's hallucination gate reads this (the live
+  // edge has already moved on). Null until the first endpoint of a segment.
+  private lastSegmentStats: SegmentStats | null = null;
   private edgeText = '';
   private lastEdgeAt = -Infinity;
   private ended = false;
@@ -163,7 +188,7 @@ export class Pipeline {
   // ── Recognizer event handlers — each routed through the Pairing guard. ──────
 
   private onPartial(text: string): void {
-    const verdict = this.pairing.decide('partial') as Verdict;
+    const verdict = toVerdict(this.pairing.decide('partial'));
     if (verdict === 'applyPartial') {
       this.edgeText = text;
       this.lastEdgeAt = this.now();
@@ -174,7 +199,12 @@ export class Pipeline {
   }
 
   private onEndpoint(): void {
-    const verdict = this.pairing.decide('commit') as Verdict;
+    // Snapshot the segment stats BEFORE the reset so the pass-2 finalize's
+    // hallucination gate (heuristic path) reads the audio that produced THIS
+    // segment, not the empty post-reset accumulator. Same root fixes the
+    // straddling-revise-after-pause case (the finalize lands after the edge moved).
+    this.lastSegmentStats = this.segmentStats();
+    const verdict = toVerdict(this.pairing.decide('commit'));
     if (verdict === 'applyCommit') {
       const raw = this.edgeText;
       this.settle.commit(raw, deterministicLight(raw));
@@ -186,11 +216,14 @@ export class Pipeline {
   }
 
   private onFinalize(result: Finalized): void {
-    const verdict = this.pairing.decide('revise') as Verdict;
+    const verdict = toVerdict(this.pairing.decide('revise'));
     if (verdict === 'applyRevise') {
       // Hallucination gate (R3): skip a finalize that reads as silence — keep the
-      // dim pass-1 edge rather than letting the engine fabricate words.
-      if (this.gate.plausiblySpeech(result, this.segmentStats())) {
+      // dim pass-1 edge rather than letting the engine fabricate words. Use the
+      // segment stats snapshotted at the endpoint (the live accumulator has been
+      // reset for the next segment); fall back to a live read if no endpoint fired.
+      const segment = this.lastSegmentStats ?? this.segmentStats();
+      if (this.gate.plausiblySpeech(result, segment)) {
         this.settle.reviseCommitting(result.text, deterministicLight(result.text));
       }
     }
@@ -207,6 +240,7 @@ export class Pipeline {
     this.recognizer.reset();
     this.edgeText = '';
     this.resetSegment();
+    this.lastSegmentStats = null; // off-record audio's stats must not gate a later finalize
     this.settle.onPartial(''); // the change-only edge must stop advertising the stale partial
     this.onChange?.();
   }
@@ -224,6 +258,14 @@ export class Pipeline {
     return this.pairing.isPaused();
   }
 
+  /** Whether the next pass-2 Revise will be dropped because its paired Commit was
+   *  an off-record drop (mirrors `Pairing.commitDropped`). Exposed so tests +
+   *  diagnostics read the privacy state through the Pipeline, not its private
+   *  `pairing`. */
+  commitDropped(): boolean {
+    return this.pairing.commitDropped();
+  }
+
   /**
    * End the session (R3): finish-drain through the pairing guard, flush any
    * trailing recognizer output, then finalize-or-drop the dim partial.
@@ -239,7 +281,7 @@ export class Pipeline {
     this.recognizer.flush();
     // Finalize-or-drop the dim partial: a non-empty edge is on-record at finish.
     if (this.edgeText.trim().length > 0) {
-      const verdict = this.pairing.decide('commit') as Verdict;
+      const verdict = toVerdict(this.pairing.decide('commit'));
       if (verdict === 'applyCommit') {
         this.settle.commit(this.edgeText, deterministicLight(this.edgeText));
       }

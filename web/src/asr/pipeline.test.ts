@@ -88,7 +88,7 @@ describe('Pipeline — off-record privacy invariant (AE2)', () => {
     // #then nothing off-record reached the kept entry
     pipeline.settle.finalize();
     expect(settled(pipeline)).toBe('This is on the record.');
-    expect(pipeline.pairing.commitDropped()).toBe(true);
+    expect(pipeline.commitDropped()).toBe(true);
     pipeline.free();
   });
 
@@ -124,10 +124,10 @@ describe('Pipeline — off-record privacy invariant (AE2)', () => {
     pipeline.pause();
     // an off-record commit would set commit_dropped; here we just resume cleanly
     pipeline.resume();
-    expect(pipeline.pairing.isPaused()).toBe(false);
+    expect(pipeline.isPaused()).toBe(false);
     recognizer.step(); // partial (on-record again)
     recognizer.step(); // endpoint → accepted commit re-arms the guard
-    expect(pipeline.pairing.commitDropped()).toBe(false);
+    expect(pipeline.commitDropped()).toBe(false);
     pipeline.free();
   });
 });
@@ -174,6 +174,40 @@ describe('Pipeline — hallucination gate (R3)', () => {
     const empty: Finalized = { text: '   ', noSpeechProb: 0.01 };
     const loud: SegmentStats = { samples: 48000, meanAbsAmplitude: 0.2, durationMs: 3000 };
     expect(defaultHallucinationGate.plausiblySpeech(empty, loud)).toBe(false);
+  });
+
+  it('heuristic path (no no-speech-prob) reads the segment snapshotted AT the endpoint', () => {
+    // #given a gate that records the segment stats it was handed — and a finalize
+    // with NO engine signal, so the heuristic (segment) path is taken.
+    let seen: SegmentStats | null = null;
+    const recordingGate = {
+      plausiblySpeech: (_r: Finalized, segment: SegmentStats): boolean => {
+        seen = segment;
+        return true;
+      },
+    };
+    const recognizer = new MockRecognizer(
+      [
+        { kind: 'partial', text: 'real speech here' },
+        { kind: 'endpoint' },
+        { kind: 'finalize', text: 'Real speech here.', noSpeechProb: null },
+      ],
+      { advanceOnAudio: false },
+    );
+    const pipeline = new Pipeline({ recognizer, gate: recordingGate });
+
+    // #when speech audio is fed, then the partial → endpoint → finalize plays
+    pipeline.pushAudio(new Int16Array(16000).fill(8000)); // ~1s of loud audio
+    recognizer.step(); // partial
+    recognizer.step(); // endpoint → snapshots the segment, then resets the accumulator
+    recognizer.step(); // finalize → reads the SNAPSHOT, not the post-reset zero
+
+    // #then the gate saw the real (pre-reset) segment, so the upgrade landed
+    expect(seen).not.toBeNull();
+    expect(seen!.samples).toBe(16000);
+    expect(pipeline.settle.committingRevised()).toBe(true);
+    expect(pipeline.settle.committingText()).toBe(deterministicLight('Real speech here.'));
+    pipeline.free();
   });
 });
 
