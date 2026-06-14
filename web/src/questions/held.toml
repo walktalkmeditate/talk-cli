@@ -1,0 +1,27 @@
+name = "held"
+description = "One question, held for seven days. The artifact is the change across the week — notice the drift between your answers, not any single one."
+
+[[questions]]
+id = "held-avoiding-today"
+text = "What are you avoiding right now — and what did avoiding it cost you today?"
+cadence = "held:7"
+
+[[questions]]
+id = "held-mattered-unnoticed"
+text = "What mattered today that you almost didn't notice?"
+cadence = "held:7"
+
+[[questions]]
+id = "held-becoming"
+text = "Who are you becoming — and did today move you toward or away?"
+cadence = "held:7"
+
+[[questions]]
+id = "held-carrying"
+text = "What are you carrying today that isn't yours to carry?"
+cadence = "held:7"
+
+[[questions]]
+id = "held-enough"
+text = "What was enough, today?"
+cadence = "held:7"

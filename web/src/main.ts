@@ -6,7 +6,13 @@ import { Theme, parseComposed, themeTones, type Rgb } from './theme';
 import { resolveModelState, downloadModels, type DownloadProgress } from './asr/download';
 import { Pipeline } from './asr/pipeline';
 import { MockRecognizer, type ScriptStep } from './asr/recognizer';
-import { SessionControls, type SessionCommand } from './session/controls';
+import { SessionControls } from './session/controls';
+import {
+  ModeRouter,
+  InMemoryEntryStore,
+  type ModeClock,
+  type ModeSession,
+} from './session/modes';
 import {
   isTouch,
   createChipBar,
@@ -16,15 +22,6 @@ import {
   cleanupForMode,
   type SessionMode,
 } from './mobile';
-
-/** Session commands the controller handles directly; other chip verbs
- *  (new-question/new-entry/export/back) are routed by the U8/U9 mode router. */
-const SESSION_COMMANDS: ReadonlySet<string> = new Set<SessionCommand>([
-  'done',
-  'pause',
-  'toggle-raw',
-  'cancel',
-]);
 
 const MB = 1024 * 1024;
 
@@ -60,11 +57,7 @@ function modelStatusLine(p: DownloadProgress): string {
 /**
  * Push the loaded palette into CSS custom properties so the page chrome (touch
  * chips, focus rings) derives from the same single-source-of-truth palette the
- * terminal paints from, instead of a drifting hard-coded rust accent. The CSS
- * uses `rgba(var(--accent-rgb), <a>)`; here we set just the `r,g,b` triple.
- *
- * Falls back to the `:root` default (set in style.css for the pre-JS paint) when
- * the theme is Mono (null tones — no fixed RGB).
+ * terminal paints from, instead of a drifting hard-coded rust accent.
  */
 function applyPaletteToCss(theme: string): void {
   const tones = themeTones(theme);
@@ -90,8 +83,8 @@ function dismissLoading(): void {
  * page animates the real settle → render path end-to-end NOW — dim partials
  * jittering, an endpoint settling them, the pass-2 finalize upgrading to bright
  * final text. This is a DEMO driver, not real transcription; the one-line swap to
- * `WireSherpaRecognizer` (recognizer.ts) lights up the real on-device engine once
- * the sherpa-onnx WASM assets exist.
+ * `WireSherpaRecognizer` (recognizer.ts, U6's WIRE seam) lights up the real
+ * on-device engine once the sherpa-onnx WASM assets exist.
  */
 const DEMO_SCRIPT: readonly ScriptStep[] = [
   { kind: 'partial', text: 'i think' },
@@ -107,27 +100,84 @@ const DEMO_SCRIPT: readonly ScriptStep[] = [
 
 const DEMO_STEP_MS = 700;
 
-/** A running demo session: the Pipeline driven by a timer over the MockRecognizer. */
-interface DemoSession {
-  pipeline: Pipeline;
-  timer: ReturnType<typeof setInterval>;
-  recognizer: MockRecognizer;
+/**
+ * A demo-backed session the ModeRouter drives: a Pipeline over a MockRecognizer
+ * walked on a timer, wrapped with the U7 SessionControls. It exposes the
+ * ModeSession surface (final text + cancel flag + buffer-wiping `end`) the router
+ * lands an entry from. The real session (U6 WIRE seam) replaces the timer with
+ * mic frames and the mock with WireSherpaRecognizer behind this same shape.
+ */
+class DemoModeSession implements ModeSession {
+  readonly pipeline: Pipeline;
+  readonly controls: SessionControls;
+  private readonly recognizer: MockRecognizer;
+  private readonly timer: ReturnType<typeof setInterval>;
+  private cancelled = false;
+
+  constructor(mode: SessionMode, onControlsChange: () => void) {
+    this.recognizer = new MockRecognizer(DEMO_SCRIPT, { advanceOnAudio: false });
+    this.pipeline = new Pipeline({ recognizer: this.recognizer });
+    this.controls = new SessionControls({
+      pipeline: this.pipeline,
+      ephemeral: isEphemeralMode(mode),
+      onChange: onControlsChange,
+    });
+    this.timer = setInterval(() => {
+      if (!this.recognizer.step()) clearInterval(this.timer);
+    }, DEMO_STEP_MS);
+  }
+
+  finalClean(): string {
+    return this.pipeline.settle
+      .settledText()
+      .split('\n')
+      .filter((s) => s.length > 0)
+      .join(' ');
+  }
+
+  finalRaw(): string | null {
+    const raw = this.pipeline.settle
+      .settledRaw()
+      .split('\n')
+      .filter((s) => s.length > 0)
+      .join(' ');
+    return raw.length > 0 ? raw : null;
+  }
+
+  wasCancelled(): boolean {
+    return this.cancelled;
+  }
+
+  markCancelled(): void {
+    this.cancelled = true;
+  }
+
+  end(): void {
+    clearInterval(this.timer);
+    this.pipeline.free();
+  }
 }
 
-/**
- * Start the live demo session: build a Pipeline over a MockRecognizer and walk
- * the script on a timer so the live edge animates. A real session (U7+) replaces
- * the timer with mic frames and the mock with `WireSherpaRecognizer`.
- */
-function startDemoSession(onChange: () => void): DemoSession {
-  const recognizer = new MockRecognizer(DEMO_SCRIPT, { advanceOnAudio: false });
-  const pipeline = new Pipeline({ recognizer, onChange });
-  const timer = setInterval(() => {
-    if (!recognizer.step()) {
-      clearInterval(timer);
-    }
-  }, DEMO_STEP_MS);
-  return { pipeline, timer, recognizer };
+const PICKER_LABELS: Record<SessionMode, string> = {
+  reflect: 'reflect',
+  journal: 'journal',
+  ephemeral: 'unburden',
+};
+
+/** The browser clock the router selects + timestamps from (local-civil). */
+function browserClock(): ModeClock {
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return {
+    hour: () => new Date().getHours(),
+    stamp: () => {
+      const d = new Date();
+      return {
+        date: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+        time: `${pad(d.getHours())}:${pad(d.getMinutes())}`,
+      };
+    },
+    now: () => performance.now(),
+  };
 }
 
 async function boot(): Promise<void> {
@@ -152,55 +202,158 @@ async function boot(): Promise<void> {
 
   let statusText = '';
 
-  // The live demo session drives the real settle/pairing pipeline + render path.
-  const session = startDemoSession(() => {
-    /* the rAF loop reads the composed view each frame; no explicit repaint */
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // The active session bound to the keyboard/chip surface, and a once-guard so a
+  // finished session lands/discards exactly once. Declared BEFORE the router
+  // because the router boots a reflect session in its constructor (which calls
+  // the session factory synchronously, wiring `onControlsChange`).
+  let boundSession: DemoModeSession | null = null;
+  let completed = false;
+
+  // Bridge the U7 controls → the router's completion: when a session's controls
+  // report `finished`, the router lands (done) or discards (cancel) exactly once.
+  // The DemoModeSession fires this after every control state change (key/chip),
+  // so completion is observed without polling.
+  const onControlsChange = (): void => {
+    const session = boundSession;
+    if (!session) return;
+    const st = session.controls.state();
+    if (!st.finished || completed) return;
+    completed = true;
+    if (st.cancelled) {
+      session.markCancelled();
+      router.command('cancel');
+    } else {
+      router.command('done');
+    }
+  };
+
+  // The mode router (U8) owns the experience flow: it boots into the reflect
+  // front door, runs a session through the demo pipeline + U7 controls, lands the
+  // entry through the in-memory store seam (U9 swaps in the durable one), then
+  // routes to the between-session picker. A repaint is implicit via the rAF loop.
+  const store = new InMemoryEntryStore();
+  const router = new ModeRouter({
+    store,
+    clock: browserClock(),
+    reduceMotion,
+    session: (mode) => new DemoModeSession(mode, onControlsChange),
   });
 
-  // The session interaction layer (U7): keys (space/u/p/esc) + chip taps map onto
-  // the pipeline, and the show-raw / paused / confirm-cancel UI state flows into
-  // Settle.compose. The demo runs in reflect; the U8 router selects the mode per
-  // session (kept widely typed so that swap is a one-liner).
-  const mode: SessionMode = 'reflect';
-  const controls = new SessionControls({
-    pipeline: session.pipeline,
-    ephemeral: isEphemeralMode(mode),
-  });
-
-  // Desktop: route xterm key bytes through the controller so space/u/p/esc fire
-  // regardless of which element has focus (term.onData is the focused-terminal
-  // stream; refocus() above keeps the terminal focused without a click).
-  term.onData((data) => {
-    controls.onKey(data);
-  });
-
-  // Mobile: the chip bar is the only control surface. Mount the per-mode set and
-  // route taps through the SAME controller entry point as the keys.
-  if (isTouch()) {
-    const chipBar = createChipBar(chipsFor(sessionChipScreen(mode)), (command) => {
-      if (SESSION_COMMANDS.has(command)) {
-        controls.command(command as SessionCommand);
-      }
-      // new-question / new-entry / export / back are wired by the U8/U9 router.
-    });
+  let chipBar: HTMLElement | null = null;
+  const mountChips = (): void => {
+    if (!isTouch()) return;
+    if (chipBar) {
+      chipBar.remove();
+      chipBar = null;
+    }
+    if (router.currentPhase() !== 'session') return;
+    const mode = router.mode();
+    if (mode === null) return;
+    chipBar = createChipBar(chipsFor(sessionChipScreen(mode)), (command) => handleCommand(command));
     document.body.appendChild(chipBar);
-  }
+  };
 
-  const composeView = (): string => {
+  // Whenever the router swaps the live session, (re)bind it + remount the chips.
+  // Called from the render loop (composeView) so it tracks every phase change.
+  const syncSession = (): void => {
+    const live = router.liveSession();
+    if (live instanceof DemoModeSession) {
+      if (live !== boundSession) {
+        boundSession = live;
+        completed = false;
+        mountChips();
+      }
+    } else if (boundSession !== null) {
+      boundSession = null;
+      mountChips();
+    }
+  };
+
+  /** Route a normalized command (key or chip) to the controls or the router. */
+  const handleCommand = (command: string): void => {
+    const session = boundSession;
+    switch (command) {
+      case 'done':
+      case 'pause':
+      case 'toggle-raw':
+      case 'cancel':
+        session?.controls.command(command);
+        return;
+      case 'new-question':
+        router.command('new-question');
+        return;
+      default:
+        // new-entry / export / back belong to the U9 journal view.
+        return;
+    }
+  };
+
+  // Desktop keys → commands. In a session: space/u/p/esc drive the controls,
+  // `n` re-rolls the reflect question. At the picker: r/j/u (or 1/2/3) pick a
+  // mode. During the closure moment: any key dismisses it early.
+  term.onData((data) => {
+    const phase = router.currentPhase();
+    if (phase === 'closing') {
+      router.dismissClosure();
+      return;
+    }
+    if (phase === 'picker') {
+      const mode = pickerKey(data);
+      if (mode) router.start(mode);
+      return;
+    }
+    // session phase
+    const session = boundSession;
+    if (!session) return;
+    if (session.controls.onKey(data)) return;
+    if (data === 'n') router.command('new-question');
+  });
+
+  const composeSession = (session: DemoModeSession, mode: SessionMode): string => {
     const idle = session.pipeline.idleStatus();
-    const ctl = controls.state();
+    const ctl = session.controls.state();
     const json = session.pipeline.settle.compose(
       mode,
-      'What am I avoiding?',
-      '', // held_label
+      router.questionText() ?? '',
+      '', // held_label (U8 selection has no held-label surface yet)
       idle.listening,
       '0:00',
-      cleanupForMode(mode), // journal → High (paragraphs), reflect → Light
+      cleanupForMode(mode), // journal → High (paragraphs), reflect/unburden → Light
       ctl.showRaw, // `u` flips raw verbatim ⇄ cleaned text
       ctl.paused,
       ctl.confirmCancel,
     );
     return theme.renderComposed(parseComposed(json));
+  };
+
+  const composePicker = (): string => {
+    const head = theme.core('  take a breath. what now?');
+    const opts = router
+      .pickerOptions()
+      .map((m, i) => theme.dim(`    [${i + 1}] ${PICKER_LABELS[m]}`))
+      .join('\r\n');
+    const hint = theme.edge('  press 1 · 2 · 3   (or r · j · u)');
+    return `${head}\r\n\r\n${opts}\r\n\r\n${hint}`;
+  };
+
+  const composeClosing = (): string => {
+    return router
+      .closureLines()
+      .map((l) => `  ${theme.core(l)}`)
+      .join('\r\n');
+  };
+
+  const composeView = (): string => {
+    syncSession();
+    const phase = router.currentPhase();
+    if (phase === 'picker') return composePicker();
+    if (phase === 'closing') return composeClosing();
+    const session = boundSession;
+    const mode = router.mode();
+    if (!session || mode === null) return '';
+    return composeSession(session, mode);
   };
 
   const renderView = (): string | null => {
@@ -213,7 +366,7 @@ async function boot(): Promise<void> {
 
   const loop: LoopHandle = startRenderLoop({
     term,
-    reduceMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+    reduceMotion,
     view: renderView,
   });
 
@@ -230,12 +383,28 @@ async function boot(): Promise<void> {
     statusText = text;
   });
 
-  // Stop the loop + the session when the page unloads (clean teardown).
+  // Stop the loop + tear down the router/session when the page unloads.
   window.addEventListener('beforeunload', () => {
-    clearInterval(session.timer);
     loop.stop();
-    session.pipeline.free();
+    router.dispose();
   });
+}
+
+/** The picker key → mode mapping (1/2/3 or r/j/u). */
+function pickerKey(data: string): SessionMode | null {
+  switch (data) {
+    case '1':
+    case 'r':
+      return 'reflect';
+    case '2':
+    case 'j':
+      return 'journal';
+    case '3':
+    case 'u':
+      return 'ephemeral';
+    default:
+      return null;
+  }
 }
 
 /**
