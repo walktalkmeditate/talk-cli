@@ -629,9 +629,11 @@ async function boot(): Promise<void> {
     if (data === 'n') router.command('new-question');
   });
 
-  // Route Escape through xterm's key-event handler instead of relying on `onData`
-  // to deliver '\x1b': letter keys arrived but a bare Escape did not, so esc-cancel
-  // and esc-back silently did nothing. This is context-aware "back / cancel".
+  // Context-aware "back / cancel" for Escape. Letter keys reach onData but a bare
+  // Escape does not (and xterm's key-event handler didn't catch it either), so we
+  // listen at the document in the CAPTURE phase — that fires before xterm's
+  // textarea, independent of its focus/handling, and we stop the event so it is
+  // handled exactly once.
   const handleEscape = (): void => {
     if (showingBoot) {
       dismissBoot();
@@ -658,13 +660,13 @@ async function boot(): Promise<void> {
     }
     // picker: the front door — nothing to go back to.
   };
-  term.attachCustomKeyEventHandler((e) => {
-    if (e.type === 'keydown' && e.key === 'Escape') {
-      handleEscape();
-      return false; // consume — don't also surface '\x1b' through onData
-    }
-    return true;
-  });
+  const onEscapeKeydown = (e: KeyboardEvent): void => {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    handleEscape();
+  };
+  document.addEventListener('keydown', onEscapeKeydown, true);
 
   // A click/tap anywhere is ALSO a "begin" gesture — robust when the terminal
   // lacks keyboard focus (e.g. DevTools is open), where xterm never receives the
@@ -911,6 +913,7 @@ async function boot(): Promise<void> {
     if (noticeTimer !== null) clearTimeout(noticeTimer);
     if (disclosureTimer !== null) clearTimeout(disclosureTimer);
     document.removeEventListener('pointerdown', refocus);
+    document.removeEventListener('keydown', onEscapeKeydown, true);
     window.removeEventListener('focus', refocus);
     window.removeEventListener('resize', refit);
     window.visualViewport?.removeEventListener('resize', refit);

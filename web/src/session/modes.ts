@@ -23,8 +23,9 @@ import {
   composeReleased as wasmComposeReleased,
   composeClose as wasmComposeClose,
   selectClosePhrase as wasmSelectClosePhrase,
+  shapeEntry,
 } from '../wasm/talk_wasm.js';
-import { isEphemeralMode, type SessionMode } from '../mobile';
+import { cleanupForMode, isEphemeralMode, type SessionMode } from '../mobile';
 
 // Vendored from talk-cli/questions/*.toml (the CLI's curated packs). Copied —
 // not cross-imported from outside web/ — so the Vite build stays self-contained;
@@ -424,11 +425,15 @@ export class ModeRouter {
 
   private buildPayload(session: ModeSession, mode: SessionMode): EntryPayload {
     const { date, time } = this.clock.stamp();
+    // Whole-entry shaping at session end, exactly like the CLI (main.rs applies
+    // shape_entry to result.clean): journal → High paragraphizes; reflect → Light
+    // passes through (the per-phrase deterministicLight cleanup already ran).
+    const clean = shapeEntry(cleanupForMode(mode), session.finalClean());
     return {
       date,
       time,
       raw: session.finalRaw(),
-      clean: session.finalClean(),
+      clean,
       mode,
       question: mode === 'reflect' ? this.question : null,
     };
