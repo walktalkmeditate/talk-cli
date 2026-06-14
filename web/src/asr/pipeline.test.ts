@@ -31,6 +31,18 @@ function settled(pipeline: Pipeline): string {
     .join(' ');
 }
 
+describe('deterministicLight — Whisper sound-tag stripping (CLI parity)', () => {
+  it('strips non-speech tags the live engine emits, but keeps real words', () => {
+    // #given Whisper's verbatim transcript with non-speech annotations
+    // #when the wasm Light cleanup runs (the web clean path)
+    // #then the tags are gone and the spoken words survive, cased + terminated
+    expect(deterministicLight('i woke up [BLANK_AUDIO] early')).toBe('I woke up early.');
+    expect(deterministicLight('(Keyboard clicking) i kept typing')).toBe('I kept typing.');
+    // a tag-only segment cleans to nothing — never a lone terminal period
+    expect(deterministicLight('[BLANK_AUDIO]')).toBe('');
+  });
+});
+
 describe('Pipeline — partial → endpoint → finalize (the happy path, AE1)', () => {
   it('updates the live edge on a partial', () => {
     // #given a pipeline with a single partial
