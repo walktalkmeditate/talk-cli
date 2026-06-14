@@ -111,6 +111,73 @@ describe('JournalStore — persistence round-trip (R18)', () => {
   });
 });
 
+// ── Deletion (survives reload + the union-merge) ───────────────────────────────
+
+describe('JournalStore — deletion', () => {
+  it('deleteDay removes a journal day and it stays gone after reload', () => {
+    // #given two journal days
+    const backend = fakeBackend();
+    const a = new JournalStore({ backend });
+    a.keep(journalEntry('day one.', '2026-06-13'));
+    a.keep(journalEntry('day two.', '2026-06-14'));
+
+    // #when one day is deleted
+    a.deleteDay('2026-06-13');
+
+    // #then it's gone now and after a reload (it didn't get re-merged from disk)
+    expect(a.journalForDate('2026-06-13')).toEqual([]);
+    const b = new JournalStore({ backend });
+    expect(b.journalForDate('2026-06-13')).toEqual([]);
+    expect(b.journalForDate('2026-06-14').map((e) => e.clean)).toEqual(['day two.']);
+  });
+
+  it('a delete is not resurrected by a later keep()s union-merge', () => {
+    // #given a kept day that is then deleted
+    const backend = fakeBackend();
+    const store = new JournalStore({ backend });
+    store.keep(journalEntry('doomed.', '2026-06-13'));
+    store.deleteDay('2026-06-13');
+
+    // #when a new entry is kept (keep() re-unions the on-disk blob)
+    store.keep(journalEntry('fresh.', '2026-06-14'));
+
+    // #then the deleted day does NOT come back
+    expect(store.journalForDate('2026-06-13')).toEqual([]);
+    expect(store.journalForDate('2026-06-14').map((e) => e.clean)).toEqual(['fresh.']);
+  });
+
+  it('deleteThread removes a reflect thread', () => {
+    const backend = fakeBackend();
+    const store = new JournalStore({ backend });
+    store.keep(reflectEntry('avoidance', 'kept.'));
+    store.deleteThread('avoidance');
+    expect(store.thread('avoidance')).toEqual([]);
+    expect(new JournalStore({ backend }).thread('avoidance')).toEqual([]);
+  });
+
+  it('clearAll removes every entry and survives reload', () => {
+    const backend = fakeBackend();
+    const store = new JournalStore({ backend });
+    store.keep(journalEntry('note.'));
+    store.keep(reflectEntry('avoidance', 'kept.'));
+    store.clearAll();
+    expect(store.allEntries()).toEqual([]);
+    expect(store.hasKept()).toBe(false);
+    const reloaded = new JournalStore({ backend });
+    expect(reloaded.allEntries()).toEqual([]);
+  });
+
+  it('surfaces a write failure on delete instead of swallowing it', () => {
+    const backend = fakeBackend();
+    const store = new JournalStore({ backend });
+    store.keep(journalEntry('note.', '2026-06-13'));
+    backend.failAlways(domError('QuotaExceededError'));
+    const result = store.deleteDay('2026-06-13');
+    expect(result.persisted).toBe(false);
+    expect(result.failure?.kind).toBe('quota-exceeded');
+  });
+});
+
 // ── Corrupt blob → empty, never throws ─────────────────────────────────────────
 
 describe('JournalStore — corrupt-safe load', () => {

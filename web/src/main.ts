@@ -455,13 +455,18 @@ async function boot(): Promise<void> {
   // (each journal day, then each reflect thread). ↑/↓ move it; the view scrolls to
   // keep it visible, so the list works for any number of entries (not just 9).
   let journalCursor = 0;
+  // A pending delete confirmation (irreversible, so it's two-step): 'unit' = the
+  // selected day/thread, 'all' = the whole journal. The next key is the y/n answer.
+  let journalConfirm: 'unit' | 'all' | null = null;
   const openJournalView = (): void => {
     viewingJournal = true;
     journalCursor = 0;
+    journalConfirm = null;
     mountChips();
   };
   const closeJournalView = (): void => {
     viewingJournal = false;
+    journalConfirm = null;
     mountChips();
   };
 
@@ -578,6 +583,43 @@ async function boot(): Promise<void> {
     if (unit) runExportScope(unit, 'download');
   };
 
+  /** A human label for an export unit (the date for a day, the question for a
+   *  thread) — used in the delete-confirm prompt and the deleted notice. */
+  const unitLabel = (scope: ExportScope): string =>
+    scope.kind === 'day'
+      ? scope.date
+      : scope.kind === 'thread'
+        ? scope.entries[0]?.question?.text ?? scope.questionId
+        : '';
+
+  /** How many entries a unit holds (for the confirm prompt's count). */
+  const unitCount = (scope: ExportScope): number =>
+    scope.kind === 'day' || scope.kind === 'thread' ? scope.entries.length : 0;
+
+  /** Delete the currently-selected day/thread (after confirm), then keep the
+   *  cursor in range and surface the outcome. */
+  const deleteSelectedUnit = (): void => {
+    const unit = exportUnits()[journalCursor];
+    if (!unit) return;
+    const label = unitLabel(unit);
+    const result =
+      unit.kind === 'day'
+        ? store.deleteDay(unit.date)
+        : unit.kind === 'thread'
+          ? store.deleteThread(unit.questionId)
+          : { persisted: true };
+    const remaining = exportUnits().length;
+    journalCursor = Math.min(journalCursor, Math.max(0, remaining - 1));
+    showNotice(result.persisted ? `deleted ${label}` : result.failure?.message ?? 'delete failed');
+  };
+
+  /** Delete every kept entry (after confirm). */
+  const deleteAllEntries = (): void => {
+    const result = store.clearAll();
+    journalCursor = 0;
+    showNotice(result.persisted ? 'deleted all entries' : result.failure?.message ?? 'delete failed');
+  };
+
   /** Route a normalized command (key or chip) to the controls, the router, or
    *  the host-level journal view (new-entry / export / back). */
   const handleCommand = (command: string): void => {
@@ -684,6 +726,11 @@ async function boot(): Promise<void> {
       return;
     }
     if (viewingJournal) {
+      // A pending delete-confirm cancels first; a second esc then leaves the view.
+      if (journalConfirm !== null) {
+        journalConfirm = null;
+        return;
+      }
       closeJournalView();
       return;
     }
@@ -721,7 +768,19 @@ async function boot(): Promise<void> {
   /** Keys while the journal view is open. `c` continues the most-recent thread —
    *  re-prompting that exact reflect question (R19's "continue a thread"). */
   const handleJournalViewKey = (data: string): void => {
-    const unitCount = exportUnits().length;
+    // A pending delete swallows the next key as its y/n answer (irreversible, so
+    // it never deletes on a single keystroke).
+    if (journalConfirm !== null) {
+      const pending = journalConfirm;
+      journalConfirm = null;
+      if (data === 'y') {
+        if (pending === 'all') deleteAllEntries();
+        else deleteSelectedUnit();
+      }
+      // any other key cancels (already cleared)
+      return;
+    }
+    const count = exportUnits().length;
     switch (data) {
       case '\x1b[A': // up arrow
       case 'k':
@@ -729,7 +788,7 @@ async function boot(): Promise<void> {
         return;
       case '\x1b[B': // down arrow
       case 'j':
-        journalCursor = Math.min(Math.max(0, unitCount - 1), journalCursor + 1);
+        journalCursor = Math.min(Math.max(0, count - 1), journalCursor + 1);
         return;
       case 'x':
       case '\r': // enter → export the selected day/thread (YYYY-MM-DD.md / slug.md)
@@ -737,6 +796,12 @@ async function boot(): Promise<void> {
         return;
       case 'e':
         exportJournal('download');
+        return;
+      case 'd': // delete the selected day/thread (arms the y/n confirm)
+        if (count > 0) journalConfirm = 'unit';
+        return;
+      case 'D': // delete EVERYTHING (arms the y/n confirm)
+        if (count > 0) journalConfirm = 'all';
         return;
       case 'b':
         closeJournalView();
@@ -888,10 +953,26 @@ async function boot(): Promise<void> {
     lines.push(...windowed);
     if (scrollTop + visible < body.length) lines.push(theme.edge('  ↓ more below'));
     lines.push('');
-    lines.push(
-      theme.edge('  ↑ ↓  select   ·   x  export one   ·   e  export all   ·   c  continue   ·   b / esc  back   ·   ?  help'),
-    );
+    lines.push(journalFooter());
     return lines.join('\r\n');
+  };
+
+  /** The journal view's bottom line: a delete-confirm prompt when one is armed,
+   *  otherwise the key hints. */
+  const journalFooter = (): string => {
+    if (journalConfirm === 'all') {
+      const total = store.allEntries().length;
+      return theme.core(`  delete ALL ${total} ${total === 1 ? 'entry' : 'entries'}? this can't be undone.   y  yes   ·   n  no`);
+    }
+    if (journalConfirm === 'unit') {
+      const unit = exportUnits()[journalCursor];
+      const label = unit ? unitLabel(unit) : '';
+      const n = unit ? unitCount(unit) : 0;
+      return theme.core(`  delete ${label} (${n} ${n === 1 ? 'entry' : 'entries'})?   y  yes   ·   n  no`);
+    }
+    return theme.edge(
+      '  ↑ ↓  select   ·   x  export   ·   e  export all   ·   d  delete   ·   D  delete all   ·   c  continue   ·   b / esc  back',
+    );
   };
 
   /** The commands/help overlay (`?` or `/`). Context-aware: it mirrors exactly
@@ -910,6 +991,7 @@ async function boot(): Promise<void> {
         '↑ ↓  (or k / j)  select a day or thread',
         'x  (or enter)  export the selected one → YYYY-MM-DD.md / slug.md',
         'e  export everything → talk-journal.md',
+        'd  delete the selected one   ·   D  delete everything  (both ask first)',
         'c  continue a thread',
         'b / esc  back',
       ]);

@@ -502,6 +502,51 @@ export class JournalStore implements EntryStore {
     return out;
   }
 
+  // ── Deletion ────────────────────────────────────────────────────────────────
+  //
+  // Deletes write DIRECTLY (no union-merge): save() re-unions the on-disk blob to
+  // protect concurrent-tab adds, which would resurrect a just-deleted entry. Each
+  // delete instead re-loads the freshest disk blob, removes the target, and writes
+  // that — so a sibling tab's OTHER entries survive but the removal sticks.
+
+  /** Delete one journal day (all its entries). */
+  deleteDay(date: string): SaveResult {
+    const disk = loadData(this.backend);
+    delete disk.journalByDate[date];
+    return this.commitDeletion(disk);
+  }
+
+  /** Delete one reflect thread (all entries answering that question). */
+  deleteThread(questionId: string): SaveResult {
+    const disk = loadData(this.backend);
+    delete disk.threads[questionId];
+    return this.commitDeletion(disk);
+  }
+
+  /** Delete every kept entry (journal + threads). The selection/rotation state is
+   *  kept — it is metadata about which questions were served, not user content. */
+  clearAll(): SaveResult {
+    const disk = loadData(this.backend);
+    disk.threads = {};
+    disk.journalByDate = {};
+    disk.hasKept = false;
+    return this.commitDeletion(disk);
+  }
+
+  /** Write a post-deletion blob directly (bypassing save()'s union-merge) and
+   *  adopt it as the mirror. Surfaces a write failure exactly like save(). */
+  private commitDeletion(data: StoreData): SaveResult {
+    try {
+      this.backend.setItem(STORE_KEY, JSON.stringify(data));
+      this.data = data;
+      return OK;
+    } catch (err) {
+      const failure = classifyStorageError(err);
+      this.onStorageEvent?.(failure);
+      return { persisted: false, failure };
+    }
+  }
+
   // ── Durability ──────────────────────────────────────────────────────────────
 
   /**
