@@ -1,12 +1,11 @@
 import './style.css';
-import init, { Settle } from './wasm/talk_wasm.js';
+import init from './wasm/talk_wasm.js';
 import { createTerminal } from './terminal';
-import { frameSequence } from './loop';
-import { Repl } from './repl';
+import { startRenderLoop, type LoopHandle } from './loop';
 import { Theme, parseComposed, themeTones, type Rgb } from './theme';
 import { resolveModelState, downloadModels, type DownloadProgress } from './asr/download';
-
-const PROMPT = '❯ ';
+import { Pipeline } from './asr/pipeline';
+import { MockRecognizer, type ScriptStep } from './asr/recognizer';
 
 const MB = 1024 * 1024;
 
@@ -68,30 +67,48 @@ function dismissLoading(): void {
 }
 
 /**
- * Build a representative static reflect screen: a question, a settled line, a dim
- * live-edge line, and the status/chrome lines. This is the U4 "it paints"
- * milestone — full session wiring (mic, modes, journal) lands in later units.
+ * A scripted reflection for the live demo. The MockRecognizer replays it so the
+ * page animates the real settle → render path end-to-end NOW — dim partials
+ * jittering, an endpoint settling them, the pass-2 finalize upgrading to bright
+ * final text. This is a DEMO driver, not real transcription; the one-line swap to
+ * `WireSherpaRecognizer` (recognizer.ts) lights up the real on-device engine once
+ * the sherpa-onnx WASM assets exist.
  */
-function staticReflectScreen(theme: Theme): string {
-  const settle = new Settle();
-  settle.commit('um i think i have been', 'I think I have been holding my breath all week.');
-  settle.finalize();
-  settle.onPartial('and what i want is to slow down');
+const DEMO_SCRIPT: readonly ScriptStep[] = [
+  { kind: 'partial', text: 'i think' },
+  { kind: 'partial', text: 'i think i have been' },
+  { kind: 'partial', text: 'um i think i have been holding my breath' },
+  { kind: 'partial', text: 'um i think i have been holding my breath all week' },
+  { kind: 'endpoint' },
+  { kind: 'finalize', text: 'I think I have been holding my breath all week.', noSpeechProb: 0.02 },
+  { kind: 'partial', text: 'and what i want' },
+  { kind: 'partial', text: 'and what i want is to slow down' },
+  { kind: 'partial', text: 'and what i want is to slow down and notice' },
+];
 
-  const json = settle.compose(
-    'reflect',
-    'What am I avoiding?',
-    '', // held_label
-    true, // listening — the live edge is active
-    '2:14',
-    'Light',
-    false, // show_raw
-    false, // paused
-    false, // confirm_cancel
-  );
-  const body = theme.renderComposed(parseComposed(json));
-  settle.free();
-  return body;
+const DEMO_STEP_MS = 700;
+
+/** A running demo session: the Pipeline driven by a timer over the MockRecognizer. */
+interface DemoSession {
+  pipeline: Pipeline;
+  timer: ReturnType<typeof setInterval>;
+  recognizer: MockRecognizer;
+}
+
+/**
+ * Start the live demo session: build a Pipeline over a MockRecognizer and walk
+ * the script on a timer so the live edge animates. A real session (U7+) replaces
+ * the timer with mic frames and the mock with `WireSherpaRecognizer`.
+ */
+function startDemoSession(onChange: () => void): DemoSession {
+  const recognizer = new MockRecognizer(DEMO_SCRIPT, { advanceOnAudio: false });
+  const pipeline = new Pipeline({ recognizer, onChange });
+  const timer = setInterval(() => {
+    if (!recognizer.step()) {
+      clearInterval(timer);
+    }
+  }, DEMO_STEP_MS);
+  return { pipeline, timer, recognizer };
 }
 
 async function boot(): Promise<void> {
@@ -101,7 +118,7 @@ async function boot(): Promise<void> {
   if (!screen) throw new Error('missing #screen mount');
 
   const { term, fit } = createTerminal(screen);
-  term.write('\x1b[?25l'); // hide the terminal cursor; the REPL renders its own
+  term.write('\x1b[?25l'); // hide the terminal cursor; the live edge renders its own
 
   const themeName = 'rust';
   applyPaletteToCss(themeName);
@@ -114,45 +131,61 @@ async function boot(): Promise<void> {
   document.addEventListener('pointerdown', refocus);
   window.addEventListener('focus', refocus);
 
-  // A minimal interactive REPL so the terminal responds to input. Commands are
-  // stubbed for U4 — full dispatch (modes, controls) arrives in later units.
-  const repl = new Repl(() => ['reflect', 'journal', 'unburden', 'help']);
   let statusText = '';
 
-  const paint = (): void => {
-    const { cols, rows } = term;
-    if (cols === 0 || rows === 0) return;
-    const composed = staticReflectScreen(theme);
-    const bottom = statusText
-      ? theme.edge(`  ${statusText}`)
-      : `  ${repl.line(theme.dim(PROMPT), "type 'help'")}`;
-    term.write(frameSequence(`${composed}\r\n\r\n${bottom}\x1b[K`));
+  // The live demo session drives the real settle/pairing pipeline + render path.
+  const session = startDemoSession(() => {
+    /* the rAF loop reads the composed view each frame; no explicit repaint */
+  });
+
+  const composeView = (): string => {
+    const idle = session.pipeline.idleStatus();
+    const json = session.pipeline.settle.compose(
+      'reflect',
+      'What am I avoiding?',
+      '', // held_label
+      idle.listening,
+      '0:00',
+      'Light',
+      false, // show_raw
+      session.pipeline.pairing.isPaused(),
+      false, // confirm_cancel
+    );
+    return theme.renderComposed(parseComposed(json));
   };
 
-  term.onData((data) => {
-    const result = repl.handle(data);
-    if (result.submitted !== undefined) {
-      statusText = `'${result.submitted}' — session wiring lands in a later unit`;
-    } else if (result.changed) {
-      statusText = '';
-    }
-    paint();
+  const renderView = (): string | null => {
+    const { cols, rows } = term;
+    if (cols === 0 || rows === 0) return null;
+    const body = composeView();
+    const bottom = statusText ? theme.edge(`  ${statusText}`) : '';
+    return `${body}\r\n\r\n${bottom}\x1b[K`;
+  };
+
+  const loop: LoopHandle = startRenderLoop({
+    term,
+    reduceMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+    view: renderView,
   });
 
   const refit = (): void => {
     fit.fit();
-    paint();
   };
   refit();
   window.addEventListener('resize', refit);
   window.visualViewport?.addEventListener('resize', refit);
 
   dismissLoading();
-  paint();
 
   void orchestrateModels((text) => {
     statusText = text;
-    paint();
+  });
+
+  // Stop the loop + the session when the page unloads (clean teardown).
+  window.addEventListener('beforeunload', () => {
+    clearInterval(session.timer);
+    loop.stop();
+    session.pipeline.free();
   });
 }
 
