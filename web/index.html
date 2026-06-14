@@ -2,6 +2,64 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+
+    <!-- Strict Content-Security-Policy (R6). Enforces the privacy promise: the
+         only origin the page may reach is the one model host. The directive set
+         is the U1-spike draft (web/spike/index.html, which loaded the sherpa-onnx
+         Emscripten ASR demo under it) — U1's go/no-go memo confirms the exact set
+         the production loader needs; if the loader demands more, widen HERE and
+         re-justify (a requirement for 'unsafe-eval' triggers a privacy-posture
+         re-review per the plan's decision tree). Every relaxation off 'self' is
+         named and justified below; the net-silence canary (tests/no-egress.spec.ts)
+         verifies connect-src INDEPENDENTLY of script-src, so the wasm-unsafe-eval
+         relaxation cannot blind the egress proof.
+
+         RESIDUAL: a <meta http-equiv> CSP cannot set frame-ancestors (that is a
+         response-header-only directive), and GitHub Pages cannot set response
+         headers — so clickjacking of the mic button is a documented residual.
+         When/if the deploy target gains header control (U12), add
+         `frame-ancestors 'none'` as a real header.
+
+         Directives:
+           default-src 'self'           — fallback: same-origin only.
+           connect-src 'self'
+             https://cdn.pilgrimapp.org — RELAXATION: the single model host. The
+                                          one-time model fetch (~327 MB) lands
+                                          here and nowhere else; this is the only
+                                          permitted egress origin (Key Technical
+                                          Decisions: one CSP-allowed host).
+           script-src 'self'
+             'wasm-unsafe-eval'         — RELAXATION: the sherpa-onnx Emscripten
+                                          loader compiles/instantiates the ASR
+                                          WASM module, which the WebAssembly CSP
+                                          integration gates behind
+                                          'wasm-unsafe-eval'. This permits WASM
+                                          compilation ONLY — not arbitrary
+                                          JS eval() (that would need
+                                          'unsafe-eval', which we do NOT grant).
+           worker-src 'self' blob:      — RELAXATION: the Emscripten loader spawns
+                                          its pthread/worklet helpers from blob:
+                                          URLs it generates at runtime. Scoped to
+                                          workers only.
+           img-src 'self' data:         — RELAXATION: data: URIs for inline/SVG
+                                          chrome (favicon is /favicon.svg via
+                                          'self'; data: covers any inlined raster).
+                                          No remote image origin.
+           style-src 'self'
+             'unsafe-inline'            — RELAXATION: the inline critical CSS below
+                                          (calm zero-JS paint) and xterm.js's
+                                          runtime inline styles. Style injection is
+                                          not an egress vector; no remote stylesheet
+                                          origin is allowed.
+           base-uri 'none'              — HARDENING: no <base> tag can repoint
+                                          relative URLs (defeats a base-tag
+                                          exfil/redirect trick).
+           object-src 'none'            — HARDENING: no <object>/<embed>/<applet>. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src 'self' https://cdn.pilgrimapp.org; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; base-uri 'none'; object-src 'none'"
+    />
+
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>talk</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />

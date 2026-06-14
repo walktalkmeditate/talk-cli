@@ -18,6 +18,7 @@ import {
   durabilityWarnings,
   DURABILITY_WARNING_COPY,
   type StorageEvent,
+  type StorageLike,
 } from './journal/store';
 import { buildJournalView, continueThread, type JournalThreadGroup } from './journal/view';
 import {
@@ -37,6 +38,37 @@ import {
 } from './mobile';
 
 const MB = 1024 * 1024;
+
+/**
+ * The up-front privacy assertion (R5) — the precisely-worded promise, shown ONCE
+ * on a visitor's first load. localStorage flag, so a returning reflector is not
+ * re-nagged. Worded to match index.html's meta description + the CSP's intent:
+ * the one-time model download is the only thing that ever crosses the network.
+ */
+const PRIVACY_ASSERTION =
+  'after a one-time model download, nothing you say or write leaves your browser.';
+const PRIVACY_SEEN_KEY = 'talk.privacy-seen.v1';
+
+/** True the first time this browser profile loads the app (R5 one-time gate). */
+function isFirstVisit(backend: StorageLike): boolean {
+  try {
+    return backend.getItem(PRIVACY_SEEN_KEY) === null;
+  } catch {
+    // Storage unavailable (hard private-mode block): treat as first visit so the
+    // promise is still shown — better to over-show the assertion than to hide it.
+    return true;
+  }
+}
+
+/** Mark the privacy assertion as shown so it appears only once. Best-effort. */
+function markPrivacySeen(backend: StorageLike): void {
+  try {
+    backend.setItem(PRIVACY_SEEN_KEY, '1');
+  } catch {
+    // If we cannot persist the flag, the assertion simply shows again next visit
+    // — a harmless re-affirmation of the promise, never a failure.
+  }
+}
 
 function fmtMb(bytes: number): string {
   return `${(bytes / MB).toFixed(0)} MB`;
@@ -98,12 +130,17 @@ function dismissLoading(): void {
 }
 
 /**
- * A scripted reflection for the live demo. The MockRecognizer replays it so the
- * page animates the real settle → render path end-to-end NOW — dim partials
- * jittering, an endpoint settling them, the pass-2 finalize upgrading to bright
- * final text. This is a DEMO driver, not real transcription; the one-line swap to
- * `WireSherpaRecognizer` (recognizer.ts, U6's WIRE seam) lights up the real
- * on-device engine once the sherpa-onnx WASM assets exist.
+ * The taste-it preview (R10), INLINED here per U10. The MockRecognizer replays
+ * this canned partials→settle sequence into the REAL settle → render path so the
+ * live edge animates — dim partials jittering, an endpoint settling them, the
+ * pass-2 finalize upgrading to bright final text — as the FIRST thing a visitor
+ * sees, BEFORE/WHILE the models would download. It reuses the exact pipeline the
+ * real session uses (not a separate code path), so the "taste" is faithful to the
+ * live experience. This is scripted playback, NOT real transcription; the
+ * one-line swap to `WireSherpaRecognizer` (recognizer.ts, U6's WIRE seam) lights
+ * up the real on-device engine once the sherpa-onnx WASM assets exist — behind
+ * the same Pipeline, so the visitor's first impression transitions seamlessly
+ * into a real session.
  */
 const DEMO_SCRIPT: readonly ScriptStep[] = [
   { kind: 'partial', text: 'i think' },
@@ -277,6 +314,18 @@ async function boot(): Promise<void> {
   const privateMode = detectPrivateMode(localStorage);
   const exportSink = browserExportSink();
   const exportDisclosure = new ExportDisclosure();
+
+  // Up-front privacy assertion (R5): on a first visit, lead with the promise —
+  // held longer than an ordinary notice because it is the load-bearing claim the
+  // whole app is built to honor (the strict CSP + the net-silence canary are its
+  // enforcement). Shown once; a returning reflector is not re-nagged. It rides
+  // alongside the taste-it preview below, so the visitor reads the promise WHILE
+  // the live edge animates a sample reflection.
+  if (isFirstVisit(localStorage)) {
+    const PRIVACY_DWELL_MS = 14000;
+    showNotice(PRIVACY_ASSERTION, PRIVACY_DWELL_MS);
+    markPrivacySeen(localStorage);
+  }
 
   // The mode router (U8) owns the experience flow: it boots into the reflect
   // front door, runs a session through the demo pipeline + U7 controls, lands the
