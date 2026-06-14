@@ -451,8 +451,13 @@ async function boot(): Promise<void> {
   // current screen accepts plus the globals. Any key closes it. A cheat-sheet, not
   // a type-to-run palette — discoverability without a new input mode.
   let showingHelp = false;
+  // The journal browser's selection cursor: an index into the exportable units
+  // (each journal day, then each reflect thread). ↑/↓ move it; the view scrolls to
+  // keep it visible, so the list works for any number of entries (not just 9).
+  let journalCursor = 0;
   const openJournalView = (): void => {
     viewingJournal = true;
+    journalCursor = 0;
     mountChips();
   };
   const closeJournalView = (): void => {
@@ -716,18 +721,24 @@ async function boot(): Promise<void> {
   /** Keys while the journal view is open. `c` continues the most-recent thread —
    *  re-prompting that exact reflect question (R19's "continue a thread"). */
   const handleJournalViewKey = (data: string): void => {
-    // A digit exports that numbered unit (a journal day → YYYY-MM-DD.md, a reflect
-    // thread → slug.md) — the per-item half of the two-tier export.
-    if (data >= '1' && data <= '9') {
-      exportUnit(Number(data));
-      return;
-    }
+    const unitCount = exportUnits().length;
     switch (data) {
+      case '\x1b[A': // up arrow
+      case 'k':
+        journalCursor = Math.max(0, journalCursor - 1);
+        return;
+      case '\x1b[B': // down arrow
+      case 'j':
+        journalCursor = Math.min(Math.max(0, unitCount - 1), journalCursor + 1);
+        return;
+      case 'x':
+      case '\r': // enter → export the selected day/thread (YYYY-MM-DD.md / slug.md)
+        exportUnit(journalCursor + 1);
+        return;
       case 'e':
         exportJournal('download');
         return;
       case 'b':
-      case '\x1b': // esc
         closeJournalView();
         return;
       case 'c': {
@@ -817,42 +828,69 @@ async function boot(): Promise<void> {
    *  paints the resulting view-model in the theme. */
   const composeJournalView = (): string => {
     const vm = buildJournalView(store.journalDays(), store.threads());
-    const lines: string[] = [theme.core('  your journal'), ''];
-
     if (vm.isEmpty) {
-      lines.push(theme.dim(`    ${vm.emptyMessage}`));
-    } else {
-      // Number day + thread groups in one sequence (days first), matching
-      // exportUnits(): pressing the digit exports that one as its own file.
-      let n = 0;
-      const tag = (): string => {
-        n += 1;
-        return n <= 9 ? `${theme.core(`[${n}]`)} ` : '';
-      };
-      if (vm.byDate.length > 0) {
-        lines.push(theme.edge('  by date'));
-        for (const group of vm.byDate) {
-          lines.push(`    ${tag()}${theme.dim(group.date)}`);
-          for (const e of group.entries) {
-            lines.push(`      ${theme.core(`${e.time}  ${truncate(e.clean)}`)}`);
-          }
-        }
-        lines.push('');
-      }
-      if (vm.byThread.length > 0) {
-        lines.push(theme.edge('  by thread'));
-        for (const t of vm.byThread) {
-          lines.push(`    ${tag()}${theme.dim(t.questionText)}`);
-          for (const e of t.entries) {
-            lines.push(`      ${theme.core(`${e.date} ${e.time}  ${truncate(e.clean)}`)}`);
-          }
-        }
-        lines.push('');
-      }
+      return [
+        theme.core('  your journal'),
+        '',
+        theme.dim(`    ${vm.emptyMessage}`),
+        '',
+        theme.edge('  b / esc  back   ·   ?  help'),
+      ].join('\r\n');
     }
 
-    const hint = theme.edge('  e  export all   ·   1–9  export one   ·   c  continue   ·   b / esc  back   ·   ?  help');
-    lines.push(hint);
+    // Build the scrollable body, recording each selectable unit's header line so
+    // the viewport can scroll to keep the cursor's selection visible. Unit order
+    // (days, then threads) matches exportUnits().
+    const body: string[] = [];
+    const headerLineOf: number[] = [];
+    let u = 0;
+    const pushUnitHeader = (text: string): void => {
+      const selected = u === journalCursor;
+      headerLineOf[u] = body.length;
+      const marker = selected ? theme.core('›') : ' ';
+      const label = selected ? theme.core(text) : theme.dim(text);
+      body.push(`  ${marker} ${label}`);
+      u += 1;
+    };
+    if (vm.byDate.length > 0) {
+      body.push(theme.edge('  by date'));
+      for (const group of vm.byDate) {
+        pushUnitHeader(group.date);
+        for (const e of group.entries) {
+          body.push(`      ${theme.core(`${e.time}  ${truncate(e.clean)}`)}`);
+        }
+      }
+      body.push('');
+    }
+    if (vm.byThread.length > 0) {
+      body.push(theme.edge('  by thread'));
+      for (const t of vm.byThread) {
+        pushUnitHeader(t.questionText);
+        for (const e of t.entries) {
+          body.push(`      ${theme.core(`${e.date} ${e.time}  ${truncate(e.clean)}`)}`);
+        }
+      }
+      body.push('');
+    }
+
+    // Viewport: window `body` so the selected unit's header stays in view, scrolling
+    // as the cursor moves — the list works at any size.
+    const visible = Math.max(4, term.rows - 9);
+    const selLine = headerLineOf[journalCursor] ?? 0;
+    const scrollTop =
+      body.length <= visible
+        ? 0
+        : Math.min(Math.max(0, selLine - Math.floor(visible / 3)), body.length - visible);
+    const windowed = body.slice(scrollTop, scrollTop + visible);
+
+    const lines: string[] = [theme.core('  your journal'), ''];
+    if (scrollTop > 0) lines.push(theme.edge('  ↑ more above'));
+    lines.push(...windowed);
+    if (scrollTop + visible < body.length) lines.push(theme.edge('  ↓ more below'));
+    lines.push('');
+    lines.push(
+      theme.edge('  ↑ ↓  select   ·   x  export one   ·   e  export all   ·   c  continue   ·   b / esc  back   ·   ?  help'),
+    );
     return lines.join('\r\n');
   };
 
@@ -869,8 +907,9 @@ async function boot(): Promise<void> {
     };
     if (viewingJournal) {
       section('your journal', [
+        '↑ ↓  (or k / j)  select a day or thread',
+        'x  (or enter)  export the selected one → YYYY-MM-DD.md / slug.md',
         'e  export everything → talk-journal.md',
-        '1–9  export one day → YYYY-MM-DD.md  (or a thread → slug.md)',
         'c  continue a thread',
         'b / esc  back',
       ]);
