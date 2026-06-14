@@ -814,23 +814,18 @@ async function boot(): Promise<void> {
     }
   };
 
-  /** Continue from the SELECTED unit: a reflect thread re-prompts its exact
-   *  question (resolved from the thread's first kept entry); a journal day resumes
-   *  journaling — a fresh freeform entry, which lands under today's date. */
+  /** Continue the SELECTED thread: re-prompt its exact question (resolved from the
+   *  thread's first kept entry). Only reflect threads continue — a journal day has
+   *  no question to resume, and journal entries always land under today, so `c` is
+   *  a no-op there (start journaling from the picker). */
   const continueSelectedUnit = (): void => {
     const unit = exportUnits()[journalCursor];
-    if (!unit) return;
-    if (unit.kind === 'thread') {
-      const first = store.thread(unit.questionId)[0];
-      if (!first || first.question === null) return;
-      closeJournalView();
-      router.continueQuestion(first.question);
-      beginCurrentSession();
-    } else if (unit.kind === 'day') {
-      closeJournalView();
-      router.start('journal');
-      beginCurrentSession();
-    }
+    if (!unit || unit.kind !== 'thread') return;
+    const first = store.thread(unit.questionId)[0];
+    if (!first || first.question === null) return;
+    closeJournalView();
+    router.continueQuestion(first.question);
+    beginCurrentSession();
   };
 
   const composeSession = (session: LiveSessionView, mode: SessionMode): string => {
@@ -971,7 +966,7 @@ async function boot(): Promise<void> {
       return theme.core(`  delete ${label} (${n} ${n === 1 ? 'entry' : 'entries'})?   y  yes   ·   n  no`);
     }
     return theme.edge(
-      '  ↑ ↓  select   ·   x  export   ·   e  export all   ·   d  delete   ·   D  delete all   ·   c  continue   ·   b / esc  back',
+      '  ↑ ↓  select   ·   x  export   ·   e  export all   ·   d  delete   ·   D  delete all   ·   c  continue a thread   ·   b / esc  back',
     );
   };
 
@@ -992,7 +987,7 @@ async function boot(): Promise<void> {
         'x  (or enter)  export the selected one → YYYY-MM-DD.md / slug.md',
         'e  export everything → talk-journal.md',
         'd  delete the selected one   ·   D  delete everything  (both ask first)',
-        'c  continue the selected — re-ask a thread, or keep journaling',
+        'c  continue a thread — re-ask the selected reflect question',
         'b / esc  back',
       ]);
     } else {
