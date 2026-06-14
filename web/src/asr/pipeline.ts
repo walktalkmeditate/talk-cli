@@ -218,6 +218,12 @@ export class Pipeline {
     this.onChange?.();
   }
 
+  /** Whether the session is off-record (paused). Exposed so the Pipeline directly
+   *  satisfies the session-controls surface without reaching into `pairing`. */
+  isPaused(): boolean {
+    return this.pairing.isPaused();
+  }
+
   /**
    * End the session (R3): finish-drain through the pairing guard, flush any
    * trailing recognizer output, then finalize-or-drop the dim partial.

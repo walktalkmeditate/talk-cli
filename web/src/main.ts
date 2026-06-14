@@ -6,6 +6,25 @@ import { Theme, parseComposed, themeTones, type Rgb } from './theme';
 import { resolveModelState, downloadModels, type DownloadProgress } from './asr/download';
 import { Pipeline } from './asr/pipeline';
 import { MockRecognizer, type ScriptStep } from './asr/recognizer';
+import { SessionControls, type SessionCommand } from './session/controls';
+import {
+  isTouch,
+  createChipBar,
+  chipsFor,
+  sessionChipScreen,
+  isEphemeralMode,
+  cleanupForMode,
+  type SessionMode,
+} from './mobile';
+
+/** Session commands the controller handles directly; other chip verbs
+ *  (new-question/new-entry/export/back) are routed by the U8/U9 mode router. */
+const SESSION_COMMANDS: ReadonlySet<string> = new Set<SessionCommand>([
+  'done',
+  'pause',
+  'toggle-raw',
+  'cancel',
+]);
 
 const MB = 1024 * 1024;
 
@@ -138,18 +157,48 @@ async function boot(): Promise<void> {
     /* the rAF loop reads the composed view each frame; no explicit repaint */
   });
 
+  // The session interaction layer (U7): keys (space/u/p/esc) + chip taps map onto
+  // the pipeline, and the show-raw / paused / confirm-cancel UI state flows into
+  // Settle.compose. The demo runs in reflect; the U8 router selects the mode per
+  // session (kept widely typed so that swap is a one-liner).
+  const mode: SessionMode = 'reflect';
+  const controls = new SessionControls({
+    pipeline: session.pipeline,
+    ephemeral: isEphemeralMode(mode),
+  });
+
+  // Desktop: route xterm key bytes through the controller so space/u/p/esc fire
+  // regardless of which element has focus (term.onData is the focused-terminal
+  // stream; refocus() above keeps the terminal focused without a click).
+  term.onData((data) => {
+    controls.onKey(data);
+  });
+
+  // Mobile: the chip bar is the only control surface. Mount the per-mode set and
+  // route taps through the SAME controller entry point as the keys.
+  if (isTouch()) {
+    const chipBar = createChipBar(chipsFor(sessionChipScreen(mode)), (command) => {
+      if (SESSION_COMMANDS.has(command)) {
+        controls.command(command as SessionCommand);
+      }
+      // new-question / new-entry / export / back are wired by the U8/U9 router.
+    });
+    document.body.appendChild(chipBar);
+  }
+
   const composeView = (): string => {
     const idle = session.pipeline.idleStatus();
+    const ctl = controls.state();
     const json = session.pipeline.settle.compose(
-      'reflect',
+      mode,
       'What am I avoiding?',
       '', // held_label
       idle.listening,
       '0:00',
-      'Light',
-      false, // show_raw
-      session.pipeline.pairing.isPaused(),
-      false, // confirm_cancel
+      cleanupForMode(mode), // journal → High (paragraphs), reflect → Light
+      ctl.showRaw, // `u` flips raw verbatim ⇄ cleaned text
+      ctl.paused,
+      ctl.confirmCancel,
     );
     return theme.renderComposed(parseComposed(json));
   };
