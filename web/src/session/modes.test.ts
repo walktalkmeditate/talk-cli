@@ -3,6 +3,8 @@ import {
   ModeRouter,
   InMemoryEntryStore,
   CLOSE_PHRASES,
+  REFLECT_PACK_TOML,
+  findQuestionInPack,
   type EntryPayload,
   type ModeClock,
   type ModeSession,
@@ -291,5 +293,61 @@ describe('ModeRouter — between-session picker (R17)', () => {
     expect(router.mode()).toBe('reflect');
     // boot(reflect) + journal + reflect
     expect(starts).toEqual(['reflect', 'journal', 'reflect']);
+  });
+});
+
+// ── Deep-link question lookup (U11) ───────────────────────────────────────────
+
+describe('findQuestionInPack — deep-link id resolution', () => {
+  it('resolves a known id to its full question from the pack TOML', () => {
+    // #given a real spine id
+    const q = findQuestionInPack(REFLECT_PACK_TOML, 'grateful-this-moment');
+    // #then the question is resolved with its id + text (and the parsed fields)
+    expect(q).not.toBeNull();
+    expect(q?.id).toBe('grateful-this-moment');
+    expect(q?.text).toBe('What are you grateful for in this moment?');
+    expect(q?.slot).toBe('morning');
+    // #and the defaults mirror parseQuestion when a field is absent
+    expect(q?.addressee).toBe('self');
+    expect(q?.cadence).toBe('daily');
+  });
+
+  it('returns null for an unknown (but alphabet-safe) id', () => {
+    // #given an id that simply isn't in the pack
+    // #then the lookup fails so the host falls back to normal selection
+    expect(findQuestionInPack(REFLECT_PACK_TOML, 'not-a-real-question')).toBeNull();
+  });
+
+  it('does not let one block bleed into the next on a partial match', () => {
+    // #given a real second id
+    const q = findQuestionInPack(REFLECT_PACK_TOML, 'ready-to-let-go');
+    // #then it resolves that exact question, not a neighbor's text
+    expect(q?.id).toBe('ready-to-let-go');
+    expect(q?.text).toBe('What are you ready to let go of?');
+  });
+});
+
+describe('ModeRouter.startWithQuestion — the #q deep-link seam (U11)', () => {
+  it('opens a known question in a reflect session and returns true', () => {
+    const store = new InMemoryEntryStore();
+    const { router } = makeRouter({ store, builder: () => fakeSession({ clean: 'x.' }) });
+    // #when a known id is opened (the host applies this after parseHash)
+    const opened = router.startWithQuestion('grateful-this-moment');
+    // #then a reflect session runs bound to that exact question
+    expect(opened).toBe(true);
+    expect(router.mode()).toBe('reflect');
+    expect(router.reflectQuestion()?.id).toBe('grateful-this-moment');
+    // #and the serve was recorded so the rotation recency advances
+    expect(store.selection().servedCount.get('grateful-this-moment')).toBeGreaterThanOrEqual(1);
+  });
+
+  it('is a no-op (returns false) for an unknown id — host keeps normal selection', () => {
+    const { router } = makeRouter({ builder: () => fakeSession({ clean: 'x.' }) });
+    const before = router.reflectQuestion()?.id;
+    // #when an unknown id is opened
+    const opened = router.startWithQuestion('definitely-not-in-the-pack');
+    // #then nothing changed — the booted front-door question still stands
+    expect(opened).toBe(false);
+    expect(router.reflectQuestion()?.id).toBe(before);
   });
 });

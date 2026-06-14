@@ -36,8 +36,48 @@ import {
   cleanupForMode,
   type SessionMode,
 } from './mobile';
+import { renderBoot, INSTALL_HINT, type BootLine, type BootTone } from './boot';
+import { parseHash } from './deeplink';
 
 const MB = 1024 * 1024;
+
+/** The web app version stamped into the boot MOTD. Tracks web/package.json. */
+const VERSION = '0.1.0';
+
+/** How long the login/MOTD boot banner holds before the front door takes over;
+ *  any key dismisses it early. Reduced motion shortens it (R26 calm parity). */
+const BOOT_DWELL_MS = 4200;
+const BOOT_DWELL_MS_REDUCED = 1800;
+
+/** A dedicated last-visit stamp for the boot banner's "Last visit …" line, kept
+ *  in its own localStorage key so it is independent of the journal blob's schema
+ *  (boot must work even before any entry is kept, and a journal-schema bump must
+ *  not disturb the visit clock). Best-effort: a storage failure simply degrades
+ *  to a first-visit welcome. */
+const LAST_VISIT_KEY = 'talk.last-visit.v1';
+
+/** Read the previous visit's epoch-ms, or null on a first visit / unreadable
+ *  storage (→ the boot banner shows the first-reflection welcome). */
+function readLastVisit(backend: StorageLike): number | null {
+  try {
+    const raw = backend.getItem(LAST_VISIT_KEY);
+    if (raw === null) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Stamp this visit (call once at boot, AFTER reading the previous one). */
+function markVisit(backend: StorageLike, now: number): void {
+  try {
+    backend.setItem(LAST_VISIT_KEY, String(now));
+  } catch {
+    // No durable visit clock here just means the next boot welcomes again —
+    // harmless, never a failure.
+  }
+}
 
 /**
  * The up-front privacy assertion (R5) — the precisely-worded promise, shown ONCE
@@ -338,6 +378,33 @@ async function boot(): Promise<void> {
     session: (mode) => new DemoModeSession(mode, onControlsChange),
   });
 
+  // The login-style boot banner (U11): a "Last visit … on talk.pilgrimapp.org"
+  // line over a short MOTD (version stamp + install funnel), painted in the rust
+  // theme over the live front door for a calm dwell, then dismissed (any key
+  // skips it). boot.ts returns tone-tagged lines; the host paints them — keeping
+  // the banner copy pure + tested. Read the previous visit BEFORE stamping this
+  // one, so the line shows when you were last here, not "just now".
+  const lastVisit = readLastVisit(localStorage);
+  markVisit(localStorage, Date.now());
+  const bootLines: readonly BootLine[] = renderBoot(VERSION, lastVisit, Date.now());
+  let showingBoot = true;
+  const bootDwell = reduceMotion ? BOOT_DWELL_MS_REDUCED : BOOT_DWELL_MS;
+  const dismissBoot = (): void => {
+    showingBoot = false;
+  };
+  const bootTimer = setTimeout(dismissBoot, bootDwell);
+
+  // Deep-link (U11): `#q=<question-id>` opens that specific reflect question on
+  // load IF it resolves to a known question in the pack. The hash is already run
+  // through deeplink.ts's SAFE_ID alphabet gate + control-byte neutralizer, so
+  // an attacker-controlled fragment can never reach the terminal; an unknown
+  // (but safe) id is ignored and the router keeps its normal front-door
+  // selection. Applied once at boot — the banner still rides on top.
+  const link = parseHash(window.location.hash);
+  if (link.questionId !== undefined) {
+    router.startWithQuestion(link.questionId);
+  }
+
   // One-time durability/exposure warnings (R21/R22): surface them once the page
   // settles, opting into persistent storage first so the eviction-risk decision
   // reflects reality.
@@ -451,6 +518,12 @@ async function boot(): Promise<void> {
   // re-rolls the reflect question. At the picker: r/j/u (or 1/2/3) pick a mode,
   // `v` opens the journal view. During the closure moment: any key dismisses it.
   term.onData((data) => {
+    if (showingBoot) {
+      // Any key skips the login banner straight into the front door.
+      clearTimeout(bootTimer);
+      dismissBoot();
+      return;
+    }
     if (viewingJournal) {
       handleJournalViewKey(data);
       return;
@@ -463,6 +536,13 @@ async function boot(): Promise<void> {
     if (phase === 'picker') {
       if (data === 'v') {
         openJournalView();
+        return;
+      }
+      if (data === 'i') {
+        // The soft install funnel: surface the CLI install line as a notice, not
+        // a nag. The same hint also rides the boot MOTD; this is the on-demand
+        // echo for a returning visitor who skipped the banner.
+        showNotice(`run it in your real terminal:  ${INSTALL_HINT}`);
         return;
       }
       const mode = pickerKey(data);
@@ -530,13 +610,31 @@ async function boot(): Promise<void> {
     return theme.renderComposed(parseComposed(json));
   };
 
+  /** Paint the boot banner (U11): each tone-tagged line through the rust theme,
+   *  indented to sit calmly off the left edge, with a closing hint. boot.ts owns
+   *  the COPY decision; this only maps tones → the shared palette. */
+  const composeBoot = (): string => {
+    const paintTone = (line: BootLine): string => {
+      if (line.text === '') return '';
+      const tone: BootTone = line.tone;
+      const painted =
+        tone === 'core' ? theme.core(line.text)
+        : tone === 'dim' ? theme.dim(line.text)
+        : theme.edge(line.text);
+      return `  ${painted}`;
+    };
+    const body = bootLines.map(paintTone).join('\r\n');
+    const hint = theme.edge('  press any key to begin');
+    return `${body}\r\n\r\n${hint}`;
+  };
+
   const composePicker = (): string => {
     const head = theme.core('  take a breath. what now?');
     const opts = router
       .pickerOptions()
       .map((m, i) => theme.dim(`    [${i + 1}] ${PICKER_LABELS[m]}`))
       .join('\r\n');
-    const hint = theme.edge('  press 1 · 2 · 3   (or r · j · u)   ·   v  read your journal');
+    const hint = theme.edge('  press 1 · 2 · 3   (or r · j · u)   ·   v  read your journal   ·   i  install the CLI');
     return `${head}\r\n\r\n${opts}\r\n\r\n${hint}`;
   };
 
@@ -586,6 +684,7 @@ async function boot(): Promise<void> {
 
   const composeView = (): string => {
     syncSession();
+    if (showingBoot) return composeBoot();
     if (viewingJournal) return composeJournalView();
     const phase = router.currentPhase();
     if (phase === 'picker') return composePicker();
@@ -628,6 +727,7 @@ async function boot(): Promise<void> {
   window.addEventListener('beforeunload', () => {
     loop.stop();
     router.dispose();
+    clearTimeout(bootTimer);
     if (noticeTimer !== null) clearTimeout(noticeTimer);
   });
 }

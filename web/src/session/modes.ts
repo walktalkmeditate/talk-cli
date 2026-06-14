@@ -251,6 +251,22 @@ export class ModeRouter {
   }
 
   /**
+   * Open a SPECIFIC reflect question by id — the deep-link seam (U11's
+   * `#q=<id>`). Resolves the id against the reflect pack; an UNKNOWN id is a
+   * no-op and returns false, so the host falls back to normal reflect selection
+   * (the deep-link's sanitization moat already guarantees the id is alphabet-safe
+   * before it reaches here, but an id that simply isn't in the pack must not
+   * derail the front door). A known id starts a reflect session bound to it,
+   * reusing `continueQuestion` so the rotation recency still advances.
+   */
+  startWithQuestion(id: string): boolean {
+    const question = findQuestionInPack(REFLECT_PACK_TOML, id);
+    if (question === null) return false;
+    this.continueQuestion(question);
+    return true;
+  }
+
+  /**
    * Skip / re-roll the reflect question BEFORE answering (the `new-question`
    * chip / `n` key / `:skip`). Draws the next question via the same rotation.
    * A no-op outside an in-progress reflect session.
@@ -548,6 +564,54 @@ function parseQuestion(json: string): ReflectQuestion | null {
 function parseHeldLen(cadence: string): number | null {
   const m = /^held:(\d+)$/.exec(cadence);
   return m ? Number(m[1]) : null;
+}
+
+/**
+ * Resolve a question by id from a pack's TOML — the deep-link lookup (U11). The
+ * shared `selectQuestion` wasm export only ROTATES (it has no by-id seam), so to
+ * open a specific `#q=<id>` we scan the pack's `[[questions]]` blocks here.
+ *
+ * This is a focused reader of the CLI pack shape (`questions.rs` / the
+ * `questions/*.toml` files), NOT a general TOML parser: each `[[questions]]`
+ * block is flat `key = "value"` lines (`id`, `text`, and optional `slot` /
+ * `cadence` / `addressee`), and the defaults mirror `parseQuestion`. The id is
+ * matched verbatim (the caller has already alphabet-gated it). Returns null for
+ * an unknown id so the router falls back to normal selection.
+ */
+export function findQuestionInPack(packToml: string, id: string): ReflectQuestion | null {
+  // Split on the `[[questions]]` table-array header; the first chunk is the
+  // pack-level header (name/description) and carries no question.
+  const blocks = packToml.split(/^\s*\[\[questions\]\]\s*$/m).slice(1);
+  for (const block of blocks) {
+    const fields = parseBlockFields(block);
+    const blockId = fields.get('id');
+    if (blockId === undefined || blockId !== id) continue;
+    const text = fields.get('text');
+    if (text === undefined) return null; // a question with no text is unusable
+    return {
+      id: blockId,
+      text,
+      slug: fields.get('slug') ?? null,
+      addressee: fields.get('addressee') ?? 'self',
+      cadence: fields.get('cadence') ?? 'daily',
+      slot: fields.get('slot') ?? null,
+    };
+  }
+  return null;
+}
+
+/** Read the flat `key = "value"` lines of one `[[questions]]` block into a map.
+ *  Stops at the next table header (a `[` line), so a block never bleeds into the
+ *  next. Only double-quoted string values are read (the pack shape). */
+function parseBlockFields(block: string): Map<string, string> {
+  const fields = new Map<string, string>();
+  for (const line of block.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('[')) break;
+    const m = /^([a-z_]+)\s*=\s*"((?:[^"\\]|\\.)*)"\s*$/.exec(trimmed);
+    if (m) fields.set(m[1], m[2]);
+  }
+  return fields;
 }
 
 function clampHour(hour: number): number {
