@@ -22,7 +22,7 @@ import {
   type StorageEvent,
   type StorageLike,
 } from './journal/store';
-import { buildJournalView, continueThread, type JournalThreadGroup } from './journal/view';
+import { buildJournalView } from './journal/view';
 import {
   runExport,
   browserExportSink,
@@ -806,31 +806,31 @@ async function boot(): Promise<void> {
       case 'b':
         closeJournalView();
         return;
-      case 'c': {
-        const top = topThread();
-        if (top) continueThreadView(top);
+      case 'c':
+        continueSelectedUnit();
         return;
-      }
       default:
         return;
     }
   };
 
-  /** The most-recently-touched reflect thread, or null when there are none. */
-  const topThread = (): JournalThreadGroup | null => {
-    const vm = buildJournalView(store.journalDays(), store.threads());
-    return vm.byThread.length > 0 ? vm.byThread[0] : null;
-  };
-
-  /** Continue a thread: resolve its full question (from the thread's first kept
-   *  entry) and hand it to the router so the exact question is re-prompted. */
-  const continueThreadView = (group: JournalThreadGroup): void => {
-    const id = continueThread(group);
-    const first = store.thread(id)[0];
-    if (!first || first.question === null) return;
-    closeJournalView();
-    router.continueQuestion(first.question);
-    beginCurrentSession();
+  /** Continue from the SELECTED unit: a reflect thread re-prompts its exact
+   *  question (resolved from the thread's first kept entry); a journal day resumes
+   *  journaling — a fresh freeform entry, which lands under today's date. */
+  const continueSelectedUnit = (): void => {
+    const unit = exportUnits()[journalCursor];
+    if (!unit) return;
+    if (unit.kind === 'thread') {
+      const first = store.thread(unit.questionId)[0];
+      if (!first || first.question === null) return;
+      closeJournalView();
+      router.continueQuestion(first.question);
+      beginCurrentSession();
+    } else if (unit.kind === 'day') {
+      closeJournalView();
+      router.start('journal');
+      beginCurrentSession();
+    }
   };
 
   const composeSession = (session: LiveSessionView, mode: SessionMode): string => {
@@ -992,7 +992,7 @@ async function boot(): Promise<void> {
         'x  (or enter)  export the selected one → YYYY-MM-DD.md / slug.md',
         'e  export everything → talk-journal.md',
         'd  delete the selected one   ·   D  delete everything  (both ask first)',
-        'c  continue a thread',
+        'c  continue the selected — re-ask a thread, or keep journaling',
         'b / esc  back',
       ]);
     } else {
