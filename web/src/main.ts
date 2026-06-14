@@ -388,6 +388,10 @@ async function boot(): Promise<void> {
   // or the new-entry/back chips; rendered from view.ts via the theme. `false`
   // means a session/picker is showing, not the journal browser.
   let viewingJournal = false;
+  // The commands/help overlay (web addition): `?` or `/` lists every command the
+  // current screen accepts plus the globals. Any key closes it. A cheat-sheet, not
+  // a type-to-run palette — discoverability without a new input mode.
+  let showingHelp = false;
   const openJournalView = (): void => {
     viewingJournal = true;
     mountChips();
@@ -520,6 +524,16 @@ async function boot(): Promise<void> {
       beginCurrentSession();
       return;
     }
+    // The commands/help overlay swallows the next key to close — so the key that
+    // dismisses help never also fires a command underneath (e.g. space ≠ done).
+    if (showingHelp) {
+      showingHelp = false;
+      return;
+    }
+    if (data === '?' || data === '/') {
+      showingHelp = true;
+      return;
+    }
     if (viewingJournal) {
       handleJournalViewKey(data);
       return;
@@ -645,7 +659,7 @@ async function boot(): Promise<void> {
       .pickerOptions()
       .map((m, i) => theme.dim(`    [${i + 1}] ${PICKER_LABELS[m]}`))
       .join('\r\n');
-    const hint = theme.edge('  press 1 · 2 · 3   (or r · j · u)   ·   v  read your journal   ·   i  install the CLI');
+    const hint = theme.edge('  press 1 · 2 · 3   (or r · j · u)   ·   v  journal   ·   i  install   ·   ?  help');
     return `${head}\r\n\r\n${opts}\r\n\r\n${hint}`;
   };
 
@@ -688,14 +702,57 @@ async function boot(): Promise<void> {
       }
     }
 
-    const hint = theme.edge('  e  export   ·   c  continue a thread   ·   b / esc  back');
+    const hint = theme.edge('  e  export   ·   c  continue a thread   ·   b / esc  back   ·   ?  help');
     lines.push(hint);
     return lines.join('\r\n');
+  };
+
+  /** The commands/help overlay (`?` or `/`). Context-aware: it mirrors exactly
+   *  what the current screen accepts, then the always-available globals and the
+   *  privacy promise. view.ts/compose* own the inline hints; this is the full
+   *  reference behind one keystroke. */
+  const composeHelp = (): string => {
+    const rows: string[] = [theme.core('  commands'), ''];
+    const section = (title: string, lines: readonly string[]): void => {
+      rows.push(theme.edge(`  ${title}`));
+      for (const l of lines) rows.push(theme.dim(`    ${l}`));
+      rows.push('');
+    };
+    if (viewingJournal) {
+      section('your journal', ['e  export', 'c  continue a thread', 'b / esc  back']);
+    } else {
+      const phase = router.currentPhase();
+      if (phase === 'session') {
+        section('this reflection', [
+          'space  done — keep it and continue',
+          'u  show raw ⇄ cleaned text',
+          'p  pause (off the record)',
+          'n  ask a different question',
+          'esc  cancel — discard this one',
+        ]);
+      } else if (phase === 'picker') {
+        section('choose a mode', [
+          '1 / r  reflect',
+          '2 / j  journal',
+          '3 / u  unburden — nothing is kept',
+          'v  read your journal',
+          'i  install the CLI',
+        ]);
+      } else if (phase === 'closing') {
+        section('this moment', ['any key  continue']);
+      }
+    }
+    section('always', ['?  or  /   this help']);
+    rows.push(theme.dim('  nothing you say or write leaves your browser.'));
+    rows.push('');
+    rows.push(theme.edge('  press any key to close'));
+    return rows.join('\r\n');
   };
 
   const composeView = (): string => {
     syncSession();
     if (showingBoot) return composeBoot();
+    if (showingHelp) return composeHelp();
     if (viewingJournal) return composeJournalView();
     const phase = router.currentPhase();
     if (phase === 'picker') return composePicker();
