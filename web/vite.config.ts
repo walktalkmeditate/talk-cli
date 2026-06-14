@@ -16,6 +16,19 @@ import topLevelAwait from 'vite-plugin-top-level-await';
 export default defineConfig({
   base: '/',
   plugins: [wasm(), topLevelAwait()],
+  // The transformers.js inference worker (src/asr/transformers-worker.ts) is an ES
+  // module worker (`new Worker(..., { type: 'module' })`); build it as ESM so its
+  // dynamic imports + the wasm plugin work inside the worker bundle too.
+  worker: {
+    format: 'es',
+    plugins: () => [wasm(), topLevelAwait()],
+  },
+  // @huggingface/transformers ships onnxruntime-web + large dynamic chunks that
+  // esbuild's dep pre-bundling mishandles (it tries to bundle the .wasm/.mjs ORT
+  // runtime). Excluding it lets Vite serve it as-is and code-split it at build.
+  optimizeDeps: {
+    exclude: ['@huggingface/transformers'],
+  },
   build: {
     target: 'esnext',
     outDir: 'dist',

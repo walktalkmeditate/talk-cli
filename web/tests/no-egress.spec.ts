@@ -15,9 +15,16 @@
 //      script-src token permitted the code that made it.
 //
 // The session here is the MockRecognizer-driven demo pipeline that ships in
-// main.ts (the real sherpa-onnx engine plugs in behind the same seam at U6's
-// WIRE: point). That is exactly what we want to assert net-silence over: the
-// settle/render/session path must make no network calls of its own.
+// main.ts (the real engine plugs in behind the same seam at U6's WIRE: point).
+// That is exactly what we want to assert net-silence over: the settle/render/
+// session path must make no network calls of its own.
+//
+// SPIKE NOTE: the live app now DEFAULTS to the transformers.js engine, which
+// fetches its model from the HF CDN — so this canary boots with `?engine=mock`
+// to assert net-silence over the demo pipeline (the seam's net-silent contract),
+// independent of the spike engine's one-time model download. When the model +
+// ort-wasm are self-hosted on cdn.pilgrimapp.org (production), the single-host
+// connect-src is restored and this canary can boot the real engine too.
 
 import { test, expect, type Request } from '@playwright/test';
 
@@ -77,10 +84,13 @@ test.describe('net-silence', () => {
       requests.push({ url: request.url(), afterCutoff: cutoffReached });
     });
 
-    // Boot the production build. networkidle lets the bundle + WASM façade + any
-    // first-run model probe settle — that whole window is the "model-cache phase"
-    // we are allowed to fetch within. Egress is asserted on what fires AFTER.
-    await page.goto('/', { waitUntil: 'networkidle' });
+    // Boot the production build with the MOCK engine (the demo pipeline whose
+    // net-silence this canary asserts; the spike's real engine fetches its model
+    // from the HF CDN, which is a separate, allowed cache-phase concern).
+    // networkidle lets the bundle + WASM façade + any first-run model probe settle
+    // — that whole window is the "model-cache phase" we are allowed to fetch
+    // within. Egress is asserted on what fires AFTER.
+    await page.goto('/?engine=mock', { waitUntil: 'networkidle' });
 
     // The app's own origin, derived from the loaded page — same-origin asset
     // loads are not egress; anything to another origin is.
@@ -166,7 +176,7 @@ test.describe('net-silence', () => {
     // strict connect-src. We assert the CSP is present + correctly scoped at the
     // document level (the production proof of connect-src), independent of
     // whether the real loader is wired yet.
-    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    await page.goto('/?engine=mock', { waitUntil: 'domcontentloaded' });
 
     const csp = await page.evaluate(() => {
       const meta = document.querySelector('meta[http-equiv="Content-Security-Policy"]');
@@ -175,13 +185,27 @@ test.describe('net-silence', () => {
 
     expect(csp, 'no CSP meta tag present').not.toBeNull();
     expect(csp).toContain("default-src 'self'");
-    expect(csp).toContain("connect-src 'self' https://cdn.pilgrimapp.org");
+    // SPIKE connect-src: the production model host PLUS the two transformers.js
+    // origins (HF model CDN + jsdelivr ort-wasm runtime). Production self-hosts
+    // both and narrows this back to `'self' https://cdn.pilgrimapp.org`.
+    expect(csp).toContain(
+      "connect-src 'self' https://cdn.pilgrimapp.org https://huggingface.co https://cdn.jsdelivr.net",
+    );
     expect(csp).toContain("object-src 'none'");
     expect(csp).toContain("base-uri 'none'");
-    // The connect-src must NOT contain a wildcard or any third-party host.
+    // The connect-src must NOT contain a wildcard (no blanket egress). The exact
+    // permitted origins are the three named above (the spike allowlist); the
+    // canary keeps the net-silence proof honest by intercepting requests
+    // regardless of which origin the CSP permits.
     const connectSrc = csp?.match(/connect-src([^;]*)/)?.[1] ?? '';
     expect(connectSrc).not.toContain('*');
-    expect(connectSrc.match(/https?:\/\//g) ?? []).toEqual(['https://']);
+    const SPIKE_ALLOWED_ORIGINS = [
+      'https://cdn.pilgrimapp.org',
+      'https://huggingface.co',
+      'https://cdn.jsdelivr.net',
+    ];
+    const origins = connectSrc.match(/https?:\/\/[^\s]+/g) ?? [];
+    expect(origins.sort()).toEqual([...SPIKE_ALLOWED_ORIGINS].sort());
 
     // A from-page connect to a disallowed origin must be refused by the CSP. We
     // observe the attempt via the request interceptor (canary discipline) AND

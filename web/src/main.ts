@@ -8,6 +8,7 @@ import {
   DemoModeSession,
   type LiveSessionView,
 } from './session/demo-session';
+import { LiveModeSession } from './session/live-session';
 import {
   ModeRouter,
   type ModeClock,
@@ -42,6 +43,25 @@ const MB = 1024 * 1024;
 
 /** The web app version stamped into the boot MOTD. Tracks web/package.json. */
 const VERSION = '0.1.0';
+
+/**
+ * Engine selection (the U6 spike). The live app defaults to the REAL
+ * browser-native engine (`TransformersRecognizer` behind `LiveModeSession`) so
+ * `npm run dev` actually transcribes; `?engine=mock` forces the scripted demo
+ * (the path the unit tests drive). The Whisper model id is overridable via
+ * `?model=` so the user can try `onnx-community/whisper-tiny.en` (smaller/faster).
+ */
+const USE_REAL_ENGINE_DEFAULT = true;
+
+/** Resolve the engine + model id from the URL, falling back to the defaults. The
+ *  Demo path takes no model id; the real path defaults to whisper-base.en. */
+function resolveEngine(search: string): { real: boolean; modelId: string | undefined } {
+  const params = new URLSearchParams(search);
+  const engine = params.get('engine');
+  const real = engine === 'real' ? true : engine === 'mock' ? false : USE_REAL_ENGINE_DEFAULT;
+  const modelParam = params.get('model');
+  return { real, modelId: modelParam ?? undefined };
+}
 
 /** How long the login/MOTD boot banner holds before the front door takes over;
  *  any key dismisses it early. Reduced motion shortens it (R26 calm parity). */
@@ -299,11 +319,29 @@ async function boot(): Promise<void> {
   // front door, runs a session through the demo pipeline + U7 controls, lands the
   // entry through the durable store seam (U9), then routes to the between-session
   // picker. A repaint is implicit via the rAF loop.
+  // Engine choice (the U6 spike): the live app defaults to the real
+  // transformers.js Whisper engine so `npm run dev` transcribes; `?engine=mock`
+  // forces the scripted demo (the tests' path). The model/mic status flows into
+  // the bottom status line so the first-run download + permission states show.
+  const { real: useRealEngine, modelId } = resolveEngine(window.location.search);
   const router = new ModeRouter({
     store,
     clock: browserClock(),
     reduceMotion,
-    session: (mode) => new DemoModeSession(mode, onControlsChange),
+    session: (mode) =>
+      useRealEngine
+        ? new LiveModeSession(mode, onControlsChange, {
+            modelId,
+            onModelStatus: (s) => {
+              statusText = s.message;
+            },
+            onMicState: (d) => {
+              // Surface a non-listening mic state (waiting / denied / busy) so the
+              // user isn't left guessing; a granted mic falls back to the model line.
+              if (d.state !== 'granted') statusText = d.message;
+            },
+          })
+        : new DemoModeSession(mode, onControlsChange),
   });
 
   // The login-style boot banner (U11): a "Last visit … on talk.pilgrimapp.org"
@@ -657,9 +695,16 @@ async function boot(): Promise<void> {
 
   dismissLoading();
 
-  void orchestrateModels((text) => {
-    statusText = text;
-  });
+  // U5 model orchestration drives the SHERPA model manifest (cdn.pilgrimapp.org).
+  // The transformers.js spike engine fetches + caches its OWN model from the HF
+  // CDN inside the worker (status flows through onModelStatus above), so skip the
+  // sherpa download when the real transformers engine is active — running both
+  // would double-download and fight over the status line.
+  if (!useRealEngine) {
+    void orchestrateModels((text) => {
+      statusText = text;
+    });
+  }
 
   // Stop the loop + tear down the router/session + detach every global listener
   // and timer when the page unloads, so nothing fires against a dead screen.
