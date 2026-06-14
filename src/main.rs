@@ -441,7 +441,7 @@ fn run_live_session(
             .map(|d| format!(" · held {d} days"))
             .unwrap_or_default();
         let provenance = format!("entry {entry_count}{held}");
-        let phrase = live::CLOSE_PHRASES[entry_count % live::CLOSE_PHRASES.len()];
+        let phrase = live::select_close_phrase(entry_count);
         live::show_close(&path.display().to_string(), &provenance, phrase)?;
     }
     Ok(Some(Ok(())))

@@ -1,0 +1,93 @@
+# talk-web → GitHub Pages.
+#
+# Builds the talk web terminal (Rust reflection core compiled to WASM + the Vite/TS
+# front end) and deploys it to GitHub Pages. Mirrors meditate-cli's pages.yml,
+# adapted to this repo's conventions: Actions are pinned by full commit SHA
+# (supply-chain hygiene, matching ci.yml / release.yml) with a trailing comment
+# recording the human-readable version, and the Rust toolchain action gets an
+# EXPLICIT `toolchain:` input because the action ref is SHA-pinned (the version is
+# otherwise inferred from the ref, which a SHA does not carry).
+#
+# ---------------------------------------------------------------------------
+# USER-OWNED OPS (must be done outside this file before / at go-live):
+#   1. DNS: add `CNAME  talk  ->  <org>.github.io` for pilgrimapp.org.
+#   2. Pages: set `talk.pilgrimapp.org` as the custom domain in this repo's
+#      Settings → Pages. There is NO committed CNAME file — Actions deploys
+#      ignore a committed CNAME and the domain belongs in Pages settings.
+#   3. Models: upload the pinned, extracted model files to cdn.pilgrimapp.org
+#      (R2), VERIFIED against upstream (k2-fsa / HuggingFace) BEFORE upload.
+#   4. CDN CORS: set exact-origin, not `*`:
+#        Access-Control-Allow-Origin: https://talk.pilgrimapp.org
+#      and expose Range so per-file resume works:
+#        Accept-Ranges: bytes
+#        Access-Control-Expose-Headers: Content-Range
+#      If the same R2 bucket also serves meditate audio, scope CORS per-prefix
+#      so talk's prefix stays exact-origin.
+# ---------------------------------------------------------------------------
+#
+# wasm-bindgen: the CLI version installed below MUST stay in sync with the
+# wasm-bindgen library pinned in crates/talk-wasm/Cargo.toml (`=0.2.95`).
+# web/scripts/build-wasm.sh reads that Cargo.toml pin at build time and FAILS
+# the build if the installed CLI does not match — so a drift here surfaces as a
+# hard build failure, not a silent ABI mismatch.
+
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - "crates/talk-wasm/**"
+      - "crates/talk-core/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          # Explicit because the action is SHA-pinned. 1.82.0 = talk-wasm's MSRV
+          # (crates/talk-wasm/Cargo.toml `rust-version = "1.82"`).
+          toolchain: 1.82.0
+          targets: wasm32-unknown-unknown
+      # Prebuilt wasm-bindgen CLI (no compile). `--locked` makes binstall resolve
+      # against the crate's published Cargo.lock for a reproducible, integrity-
+      # checked fetch. The version MUST match crates/talk-wasm/Cargo.toml (see the
+      # header note); build-wasm.sh re-checks it and fails on mismatch.
+      - uses: cargo-bins/cargo-binstall@1d2ff7ce3f67fe46c45478d09d1670c1f1b100dc # v1.20.0 (main)
+      - run: cargo binstall --no-confirm --locked wasm-bindgen-cli@0.2.95
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run build # build:wasm && tsc --noEmit && vite build
+        working-directory: web
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5

@@ -152,10 +152,12 @@ pub fn format_revise(whisper: &str, prev_clean: Option<&str>) -> String {
     decapitalize_continuation(&pre, prev_clean)
 }
 
-/// Deterministic "Light": capitalize sentence starts, ensure terminal
+/// Deterministic "Light": strip Whisper non-speech tags (`[BLANK_AUDIO]`,
+/// `(keyboard clicking)`), capitalize sentence starts, ensure terminal
 /// punctuation, strip leading fillers. Always guard-safe by construction.
 pub fn deterministic_light(text: &str) -> String {
-    let trimmed = text.trim();
+    let without_tags = strip_sound_tags(text);
+    let trimmed = without_tags.trim();
     let without_lead = strip_leading_fillers(trimmed);
     let capped = capitalize_sentences(&without_lead);
     ensure_terminal(&capitalize_standalone_i(&capped))
@@ -220,6 +222,11 @@ const SOUND_WORDS: &[&str] = &[
     "breathing", "breath", "breathes", "static", "noise", "silence", "blank_audio",
     "wind", "blowing", "clears", "throat", "typing", "footsteps", "door", "closes",
     "knock", "knocking", "indistinct", "inaudible", "sniffles", "chuckles",
+    // Desk/ambient events Whisper commonly emits while you talk at a keyboard.
+    "keyboard", "click", "clicks", "clicking", "clatter", "clattering", "tap", "taps",
+    "tapping", "mouse", "rustling", "rustles", "ringing", "ring", "humming", "hum",
+    "ticking", "whirring", "vibrating", "vibrates", "vibration", "chirping", "birds",
+    "rain", "engine", "traffic", "chatter", "chattering", "mumbling", "muttering",
 ];
 
 /// Remove Whisper's non-speech tags. `[...]` spans go only when a known tag or an
@@ -428,6 +435,16 @@ mod tests {
     #[test]
     fn deterministic_light_caps_and_terminates() {
         assert_eq!(deterministic_light("um the thing is"), "The thing is.");
+    }
+
+    #[test]
+    fn deterministic_light_strips_whisper_sound_tags() {
+        // Whisper's non-speech annotations are never user words — Light removes them
+        // (the live-transcription artifact: "[BLANK_AUDIO]." / "(Keyboard clicking).").
+        assert_eq!(deterministic_light("i woke up [BLANK_AUDIO] early"), "I woke up early.");
+        assert_eq!(deterministic_light("(Keyboard clicking) i kept typing"), "I kept typing.");
+        // A tag-only segment cleans to nothing — never a lone terminal period.
+        assert_eq!(deterministic_light("[BLANK_AUDIO]"), "");
     }
 
     #[test]

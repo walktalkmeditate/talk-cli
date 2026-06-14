@@ -1,0 +1,58 @@
+# talk-web CI (PR gate).
+#
+# The cargo CI lives in ci.yml; this is the web/WASM counterpart that the cargo
+# pipeline did not cover. It runs on PRs touching the web app or the crates the
+# WASM build consumes, and builds the WASM façade + runs the front-end checks the
+# Pages deploy depends on, so a broken web build is caught at PR time rather than
+# on push to main.
+#
+# Actions are pinned by full commit SHA (matching ci.yml / release.yml / pages.yml)
+# with a trailing version comment. The Rust toolchain action gets an EXPLICIT
+# `toolchain:` input because the action ref is SHA-pinned. wasm-bindgen-cli is
+# pinned to 0.2.95 to match crates/talk-wasm/Cargo.toml and pages.yml — keep all
+# three in sync (build-wasm.sh fails the build on a mismatch).
+
+name: web-ci
+
+on:
+  pull_request:
+    paths:
+      - "web/**"
+      - "crates/talk-wasm/**"
+      - "crates/talk-core/**"
+      - ".github/workflows/web-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: 1.82.0 # talk-wasm MSRV; matches pages.yml
+          targets: wasm32-unknown-unknown
+      - uses: cargo-bins/cargo-binstall@1d2ff7ce3f67fe46c45478d09d1670c1f1b100dc # v1.20.0 (main)
+      - run: cargo binstall --no-confirm --locked wasm-bindgen-cli@0.2.95
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run build:wasm
+        working-directory: web
+      - run: npx tsc --noEmit
+        working-directory: web
+      - run: npm test # vitest run (pretest re-runs build:wasm — cheap, already built)
+        working-directory: web
+      # Playwright net-silence canary: builds the production bundle under the
+      # shipped CSP and proves zero egress. It boots a full browser, so it is the
+      # slow leg of this job; kept here because the canary IS the privacy gate.
+      - run: npx playwright install --with-deps chromium
+        working-directory: web
+      - run: npm run e2e # playwright test (tests/no-egress.spec.ts)
+        working-directory: web

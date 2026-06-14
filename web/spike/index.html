@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>talk-web U1 spike — ASR feasibility harness</title>
+
+    <!--
+      DRAFT STRICT CSP — the production target (plan U1/U10).
+      The harness applies it via <meta> so the sherpa-onnx Emscripten loader is
+      measured under (close to) the real Pages header CSP. For these directives
+      meta-CSP ≈ header-CSP; serve via a real Pages preview to confirm.
+
+      Every directive the loader violates is reported live in the results panel
+      via a `securitypolicyviolation` listener — that is metric #4.
+
+      The id lets spike.ts read the active policy text back into the memo.
+    -->
+    <meta
+      id="csp-strict"
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self' https://cdn.pilgrimapp.org"
+    />
+
+    <style>
+      :root {
+        --bg: #14100e;
+        --fg: #e6d5c8;
+        --accent: rgb(210, 146, 118);
+        --ok: #7fbf7f;
+        --warn: #d8b85a;
+        --err: #e07a5f;
+        --panel: #1d1815;
+        --line: #2c2520;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        min-height: 100%;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      header {
+        padding: 1rem 1.25rem;
+        border-bottom: 1px solid var(--line);
+      }
+      header h1 { margin: 0 0 0.25rem; font-size: 1.1rem; color: var(--accent); }
+      header p { margin: 0; opacity: 0.65; font-size: 0.82rem; }
+      .layout {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+        padding: 1rem 1.25rem;
+      }
+      @media (max-width: 760px) {
+        .layout { grid-template-columns: 1fr; }
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0.9rem 1rem;
+      }
+      .card h2 {
+        margin: 0 0 0.6rem;
+        font-size: 0.78rem;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        opacity: 0.7;
+      }
+      .controls { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+      button {
+        font-family: inherit;
+        font-size: 0.85rem;
+        background: transparent;
+        color: var(--fg);
+        border: 1px solid var(--accent);
+        border-radius: 6px;
+        padding: 0.45rem 0.85rem;
+        cursor: pointer;
+      }
+      button:hover { background: rgba(210, 146, 118, 0.12); }
+      button:disabled { opacity: 0.35; cursor: not-allowed; }
+      button.primary { background: var(--accent); color: #14100e; font-weight: 600; }
+      .toggle { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; opacity: 0.85; }
+
+      .transcript {
+        min-height: 3.2rem;
+        margin-top: 0.6rem;
+        padding: 0.6rem 0.7rem;
+        background: #100c0a;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .partials { color: var(--warn); opacity: 0.9; }
+      .final { color: var(--fg); }
+      .label { font-size: 0.7rem; letter-spacing: 0.1em; text-transform: uppercase; opacity: 0.5; }
+
+      .metrics { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 0.9rem; }
+      .metrics dt { opacity: 0.6; }
+      .metrics dd { margin: 0; }
+      .val-ok { color: var(--ok); }
+      .val-warn { color: var(--warn); }
+      .val-err { color: var(--err); }
+      .val-pending { opacity: 0.45; }
+
+      #log {
+        margin-top: 0.4rem;
+        max-height: 16rem;
+        overflow: auto;
+        font-size: 0.78rem;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      #log .row { padding: 0.1rem 0; border-bottom: 1px solid #221d19; }
+      #log .row.viol { color: var(--err); }
+      #log .row.net { color: var(--accent); }
+      #log .row.info { opacity: 0.7; }
+      .full { grid-column: 1 / -1; }
+      .seam {
+        margin-top: 0.5rem;
+        padding: 0.5rem 0.7rem;
+        border-left: 3px solid var(--warn);
+        background: rgba(216, 184, 90, 0.07);
+        font-size: 0.8rem;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>talk-web U1 spike — ASR feasibility &amp; CSP-loadability harness</h1>
+      <p>
+        THROWAWAY measurement scaffold. Drop in the sherpa-onnx WASM assets, run on a desktop
+        AND a mid-range phone, fill the memo, paste it into the plan's Open Questions. See README.md.
+      </p>
+    </header>
+
+    <div class="layout">
+      <section class="card full" style="border-color: var(--warn); background: rgba(216, 184, 90, 0.08);">
+        <h2 style="opacity: 1; color: var(--warn);">⚠ Harness limitations — these bound what the numbers can prove</h2>
+        <ul style="margin: 0; padding-left: 1.1rem; font-size: 0.82rem; line-height: 1.6;">
+          <li><strong>Metrics 6 &amp; 7 are MAIN-THREAD ONLY.</strong> The fetch/XHR wrappers
+            patch only the page's fetch/XHR. A <strong>threaded</strong> sherpa build loads its
+            WASM + pthread workers via worker/pthread fetches the page <strong>cannot</strong>
+            intercept — those requests are invisible here. Verify module shape AND zero-egress
+            for a threaded build in the browser <strong>Network panel</strong> (or a proxy).</li>
+          <li><strong>crossOriginIsolated can't be enabled via meta-CSP.</strong> A
+            <code>&lt;meta&gt;</code> tag cannot set COOP/COEP, so the threading branch
+            (single-threaded OK vs threads needed) must be confirmed on a real
+            <strong>header-setting host</strong>, not from this spike.</li>
+          <li><strong>The chunked digest is I/O-only.</strong> It runs a full SHA-256 per slice
+            (placeholder), so its total ≈ the full-buffer cost. It is <strong>not</strong>
+            numerically comparable to the full-buffer hash — don't conclude "chunking isn't worth
+            it" from it. Wire a streaming SHA-256 for the real number.</li>
+          <li><strong>Footprint is baseline-subtracted but origin-wide.</strong> A pre-load
+            <code>storage.estimate()</code> baseline is subtracted so the delta ≈ the model cache,
+            but <code>estimate()</code> counts everything this origin has cached.</li>
+        </ul>
+      </section>
+
+      <section class="card">
+        <h2>1 · Mic &amp; recognition</h2>
+        <div class="controls">
+          <button id="btn-start" class="primary">Start mic</button>
+          <button id="btn-stop" disabled>Stop</button>
+          <button id="btn-finalize" disabled title="Force a Whisper base.en finalize pass on the buffered audio">Finalize now</button>
+        </div>
+
+        <div class="label" style="margin-top:0.7rem">live partials (streaming Zipformer edge)</div>
+        <div id="partials" class="transcript partials"></div>
+
+        <div class="label" style="margin-top:0.7rem">finalized (Whisper base.en / Moonshine)</div>
+        <div id="final" class="transcript final"></div>
+
+        <div class="seam">
+          Integration seam: until the sherpa-onnx loader is wired in spike.ts, the recognizer
+          is NOT connected. Partials/final stay empty and RTF reads <code>seam not wired</code>.
+          This is intentional — no fabricated recognition. See <code>// TODO: wire to sherpa-onnx</code>.
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>2 · Live metrics</h2>
+        <dl class="metrics">
+          <dt>RTF — live edge</dt>          <dd id="m-rtf-live" class="val-pending">—</dd>
+          <dt>RTF — finalize</dt>           <dd id="m-rtf-final" class="val-pending">—</dd>
+          <dt>Cached footprint Δ <span style="opacity:0.5">(baseline-subtracted, origin-wide)</span></dt>         <dd id="m-storage" class="val-pending">—</dd>
+          <dt>digest (full buffer)</dt>     <dd id="m-digest-full" class="val-pending">—</dd>
+          <dt>digest (chunked) <span style="opacity:0.5">(I/O-only; not comparable)</span></dt>         <dd id="m-digest-chunk" class="val-pending">—</dd>
+          <dt>crossOriginIsolated <span style="opacity:0.5">(can't enable via meta-CSP)</span></dt>      <dd id="m-coi" class="val-pending">—</dd>
+          <dt>SharedArrayBuffer</dt>        <dd id="m-sab" class="val-pending">—</dd>
+          <dt>threads requested <span style="opacity:0.5">(confirm on header host)</span></dt>        <dd id="m-threads" class="val-pending">—</dd>
+          <dt>ran single-threaded</dt>      <dd id="m-singlethread" class="val-pending">—</dd>
+          <dt>modules fetched <span style="opacity:0.5">(main-thread only)</span></dt>          <dd id="m-modcount" class="val-pending">—</dd>
+          <dt>asset consumption</dt>        <dd id="m-assetshape" class="val-pending">—</dd>
+        </dl>
+
+        <div class="controls" style="margin-top:0.8rem">
+          <button id="btn-storage">Measure footprint</button>
+          <button id="btn-digest" title="Pick the ~199 MB model file to time digest cost">Time digest…</button>
+          <label class="toggle">
+            <input type="checkbox" id="toggle-csp" />
+            relax CSP (permissive — confirm loader works, then re-tighten)
+          </label>
+        </div>
+        <div class="seam" id="csp-note">
+          CSP relax toggle re-injects a permissive policy at runtime. NOTE: an already-applied
+          meta-CSP cannot be loosened by adding a second meta tag (CSP intersects). Use the toggle
+          BEFORE loading the recognizer; if it has no effect, edit the meta in this file or serve
+          with a permissive header, reload, confirm the loader runs, then tighten directive-by-directive.
+        </div>
+      </section>
+
+      <section class="card full">
+        <h2>3 · Event log — CSP violations · network requests · phase markers</h2>
+        <div class="controls">
+          <button id="btn-mark-loaded" title="Mark the end of the model-load phase; requests after this are egress candidates">Mark "models loaded"</button>
+          <button id="btn-clear-log">Clear log</button>
+          <button id="btn-copy" class="primary" title="Copy a filled-in go/no-go memo to the clipboard">Copy results memo</button>
+        </div>
+        <div id="log"></div>
+      </section>
+    </div>
+
+    <script type="module" src="./spike.ts"></script>
+  </body>
+</html>

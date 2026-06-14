@@ -1,0 +1,117 @@
+<!doctype html>
+<!--
+  Source for the Open Graph / social share card (the rust talk card). Render at
+  1200×630 and save to web/public/og.jpg: serve this dir, open in a browser sized
+  exactly 1200×630, screenshot. The shipped og.jpg is a PLACEHOLDER; the
+  pixel-perfect card is a design follow-up (see the plan's Deferred to Follow-Up
+  Work). Self-contained — no remote fonts/assets, so it never widens the CSP.
+
+  The talk identity is rust on a dark warm ground (mirrors index.html's
+  #14100e ground + the palette tones), with a hint of the LIVE EDGE: a settled
+  line in bright rust, a dim partial trailing it with a caret — the "dim partial
+  settles into bright final" motion frozen into one frame.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 1200px;
+        height: 630px;
+        overflow: hidden;
+      }
+      body {
+        position: relative;
+        background:
+          radial-gradient(130% 100% at 50% 38%, #1c1411 0%, #14100e 54%, #0c0907 100%);
+        font-family: "SF Mono", "JetBrains Mono", "Cascadia Code", "Menlo", "DejaVu Sans Mono", monospace;
+        color: #e6d5c8;
+      }
+
+      /* ── the live edge: settled (bright rust) then a dim partial + caret ──── */
+      .edge {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 232px;
+        text-align: center;
+        font-size: 34px;
+        letter-spacing: 0.5px;
+        line-height: 1.5;
+      }
+      /* settled = core tone (brightest, rgb 210 146 118) */
+      .settled {
+        color: rgb(210, 146, 118);
+      }
+      /* the live partial = dim tone (rgb 170 124 104), still settling */
+      .partial {
+        color: rgb(170, 124, 104);
+        opacity: 0.9;
+      }
+      .caret {
+        display: inline-block;
+        width: 14px;
+        height: 30px;
+        margin-left: 4px;
+        vertical-align: -4px;
+        background: rgb(170, 124, 104);
+        opacity: 0.65;
+      }
+
+      /* ── wordmark + tagline + url (chrome = edge tone, rgb 150 122 112) ───── */
+      .wordmark {
+        position: absolute;
+        top: 392px;
+        left: 0;
+        right: 0;
+        text-align: center;
+        font-size: 70px;
+        font-weight: 600;
+        letter-spacing: 4px;
+        color: rgb(210, 146, 118);
+      }
+      .tagline {
+        position: absolute;
+        top: 488px;
+        left: 0;
+        right: 0;
+        text-align: center;
+        font-size: 25px;
+        letter-spacing: 1.5px;
+        color: rgb(170, 124, 104);
+      }
+      .url {
+        position: absolute;
+        bottom: 44px;
+        left: 0;
+        right: 0;
+        text-align: center;
+        font-size: 22px;
+        letter-spacing: 1px;
+        color: rgb(150, 122, 112);
+      }
+      .url .prompt {
+        color: rgb(210, 146, 118);
+      }
+      .url .host {
+        color: rgb(170, 124, 104);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="edge">
+      <span class="settled">I think I have been holding my breath all week.</span><br />
+      <span class="partial">and what i want is to slow down</span><span class="caret"></span>
+    </div>
+
+    <div class="wordmark">talk</div>
+    <div class="tagline">a reflection in your terminal</div>
+    <div class="url"><span class="prompt">❯</span> <span class="host">talk.pilgrimapp.org</span></div>
+  </body>
+</html>

@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+
+    <!-- Strict Content-Security-Policy (R6). Enforces the privacy promise: the
+         only origin the page may reach is the one model host. The directive set
+         is the U1-spike draft (web/spike/index.html, which loaded the sherpa-onnx
+         Emscripten ASR demo under it) — U1's go/no-go memo confirms the exact set
+         the production loader needs; if the loader demands more, widen HERE and
+         re-justify (a requirement for 'unsafe-eval' triggers a privacy-posture
+         re-review per the plan's decision tree). Every relaxation off 'self' is
+         named and justified below; the net-silence canary (tests/no-egress.spec.ts)
+         verifies connect-src INDEPENDENTLY of script-src, so the wasm-unsafe-eval
+         relaxation cannot blind the egress proof.
+
+         RESIDUAL: a <meta http-equiv> CSP cannot set frame-ancestors (that is a
+         response-header-only directive), and GitHub Pages cannot set response
+         headers — so clickjacking of the mic button is a documented residual.
+         When/if the deploy target gains header control (U12), add
+         `frame-ancestors 'none'` as a real header.
+
+         SPIKE NOTE (transformers.js engine, U6): the real browser-native engine
+         currently loads transformers.js Whisper, which fetches its model from the
+         Hugging Face CDN (huggingface.co) and its onnxruntime-web WASM runtime
+         from cdn.jsdelivr.net. Those two origins are added to connect-src below to
+         make the spike run. This DENTS the strict zero-egress story — PRODUCTION
+         MUST self-host BOTH the model files AND the ort-wasm runtime on
+         cdn.pilgrimapp.org (point transformers.js `env.remoteHost` /
+         `env.localModelPath` and onnxruntime-web `env.backends.onnx.wasm.wasmPaths`
+         at it), then REMOVE huggingface.co + cdn.jsdelivr.net here and restore the
+         single-host policy. The net-silence canary's allowlist (tests/no-egress.
+         spec.ts) MUST be kept in lock-step with whatever connect-src lists.
+
+         Directives:
+           default-src 'self'           — fallback: same-origin only.
+           connect-src 'self'
+             https://cdn.pilgrimapp.org — the single production model host. The
+                                          one-time model fetch lands here and
+                                          nowhere else once self-hosted.
+             https://huggingface.co     — SPIKE RELAXATION (remove in production):
+                                          transformers.js fetches the Whisper model
+                                          files (config/tokenizer/onnx weights) from
+                                          the HF CDN here.
+             https://cdn.jsdelivr.net   — SPIKE RELAXATION (remove in production):
+                                          transformers.js v3 points onnxruntime-web's
+                                          default wasmPaths at jsdelivr
+                                          (@huggingface/transformers@<ver>/dist/) to
+                                          fetch the ort-wasm runtime binaries.
+           script-src 'self'
+             'wasm-unsafe-eval'         — RELAXATION: the ASR engine (sherpa-onnx
+                                          Emscripten or onnxruntime-web for the
+                                          transformers.js spike) compiles/instantiates
+                                          its WASM module, which the WebAssembly CSP
+                                          integration gates behind 'wasm-unsafe-eval'.
+                                          This permits WASM compilation ONLY — not
+                                          arbitrary JS eval() (that would need
+                                          'unsafe-eval', which we do NOT grant).
+           worker-src 'self' blob:      — RELAXATION: the inference engine runs in a
+                                          Web Worker; the Emscripten/ORT loaders also
+                                          spawn pthread/worklet helpers from blob:
+                                          URLs they generate at runtime. Scoped to
+                                          workers only.
+           img-src 'self' data:         — RELAXATION: data: URIs for inline/SVG
+                                          chrome (favicon is /favicon.svg via
+                                          'self'; data: covers any inlined raster).
+                                          No remote image origin.
+           style-src 'self'
+             'unsafe-inline'            — RELAXATION: the inline critical CSS below
+                                          (calm zero-JS paint) and xterm.js's
+                                          runtime inline styles. Style injection is
+                                          not an egress vector; no remote stylesheet
+                                          origin is allowed.
+           base-uri 'none'              — HARDENING: no <base> tag can repoint
+                                          relative URLs (defeats a base-tag
+                                          exfil/redirect trick).
+           object-src 'none'            — HARDENING: no <object>/<embed>/<applet>. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src 'self' https://cdn.pilgrimapp.org https://huggingface.co https://*.huggingface.co https://*.hf.co https://cdn.jsdelivr.net; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; base-uri 'none'; object-src 'none'"
+    />
+
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>talk</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <meta
+      name="description"
+      content="Speak a reflection in your terminal. Free, on-device — after a one-time model download, nothing leaves your browser."
+    />
+
+    <!-- Open Graph / social share card -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="talk" />
+    <meta property="og:url" content="https://talk.pilgrimapp.org/" />
+    <meta property="og:title" content="talk — a reflection in your terminal" />
+    <meta
+      property="og:description"
+      content="Speak a reflection in your terminal. Free, on-device — after a one-time model download, nothing leaves your browser."
+    />
+    <meta property="og:image" content="https://talk.pilgrimapp.org/og.jpg" />
+    <meta property="og:image:type" content="image/jpeg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="Warm rust text settling on a dark terminal — talk, talk.pilgrimapp.org"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="talk — a reflection in your terminal" />
+    <meta
+      name="twitter:description"
+      content="Speak a reflection in your terminal. Free, on-device — nothing leaves your browser."
+    />
+    <meta name="twitter:image" content="https://talk.pilgrimapp.org/og.jpg" />
+
+    <!-- Critical styles inline so the calm placeholder paints with zero JS,
+         before the bundle or any font loads. No blank white flash. The rust
+         palette: a dark warm ground, a warm off-white body, the rust accent. -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #14100e;
+        overflow: hidden;
+        font-family: "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+        color: #e6d5c8;
+      }
+      #screen {
+        position: absolute;
+        inset: 0;
+      }
+      #loading {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 1.1rem;
+        transition: opacity 0.5s ease;
+        pointer-events: none;
+        color: rgb(210, 146, 118);
+      }
+      #loading.gone {
+        opacity: 0;
+      }
+      #loading pre {
+        margin: 0;
+        font-size: 1.6rem;
+        line-height: 1.05;
+        opacity: 0.5;
+      }
+      #loading span {
+        font-size: 0.78rem;
+        letter-spacing: 0.28em;
+        opacity: 0.6;
+        text-transform: lowercase;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="screen"></div>
+    <!-- The zero-JS loading placeholder: painted from inline CSS so the calm rust
+         ground shows before main.ts boots. main.ts dismisses it once it mounts. -->
+    <div id="loading" aria-hidden="true">
+      <pre>talk</pre>
+      <span>loading…</span>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
