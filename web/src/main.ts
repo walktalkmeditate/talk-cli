@@ -4,8 +4,40 @@ import { createTerminal } from './terminal';
 import { frameSequence } from './loop';
 import { Repl } from './repl';
 import { Theme, parseComposed, themeTones, type Rgb } from './theme';
+import { resolveModelState, downloadModels, type DownloadProgress } from './asr/download';
 
 const PROMPT = '❯ ';
+
+const MB = 1024 * 1024;
+
+function fmtMb(bytes: number): string {
+  return `${(bytes / MB).toFixed(0)} MB`;
+}
+
+/**
+ * First-run model-acquisition status as a single terminal line. U5 owns the LOGIC
+ * + states; the rich first-run screens are refined with U6/U10. Returns the line
+ * for a given download phase/progress.
+ */
+function modelStatusLine(p: DownloadProgress): string {
+  switch (p.phase) {
+    case 'complete':
+      return 'models ready';
+    case 'pre-accept':
+      return 'one-time model download needed (~327 MB) — starting…';
+    case 'blocked':
+      return 'offline — connect once to download the models';
+    case 'paused':
+      return `download paused (${fmtMb(p.receivedBytes)} fetched) — will resume`;
+    case 'error':
+      return 'model download failed — reload to retry';
+    case 'downloading': {
+      const pct = p.fraction === null ? null : Math.round(p.fraction * 100);
+      const tail = pct === null ? fmtMb(p.receivedBytes) : `${pct}% (${fmtMb(p.receivedBytes)})`;
+      return `downloading models — ${tail}`;
+    }
+  }
+}
 
 /**
  * Push the loaded palette into CSS custom properties so the page chrome (touch
@@ -117,6 +149,34 @@ async function boot(): Promise<void> {
 
   dismissLoading();
   paint();
+
+  void orchestrateModels((text) => {
+    statusText = text;
+    paint();
+  });
+}
+
+/**
+ * First-run model orchestration (U5). On load: if every model file is cached and
+ * verifies, proceed silently; if absent and online, download with a live status
+ * line; if absent and offline, surface the blocked state. The session pipeline
+ * (U6) consumes the cached, verified files once this resolves complete.
+ */
+async function orchestrateModels(onStatus: (text: string) => void): Promise<void> {
+  try {
+    const state = await resolveModelState();
+    if (state.phase === 'complete') {
+      onStatus(modelStatusLine({ phase: 'complete', files: [], receivedBytes: 0, totalBytes: 0, fraction: 1 }));
+      return;
+    }
+    if (state.phase === 'blocked') {
+      onStatus(modelStatusLine({ phase: 'blocked', files: [], receivedBytes: 0, totalBytes: null, fraction: null }));
+      return;
+    }
+    await downloadModels({ onProgress: (p) => onStatus(modelStatusLine(p)) });
+  } catch (err) {
+    onStatus(`models unavailable — ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 boot().catch((err) => {
