@@ -12,6 +12,7 @@
     "pretest": "npm run build:wasm",
     "test": "vitest run",
     "e2e": "playwright test",
+    "og": "node scripts/gen-og.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
