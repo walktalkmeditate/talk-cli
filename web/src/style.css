@@ -16,7 +16,7 @@
   background-color: transparent !important;
 }
 
-/* Touch chip row — every essential action without a keyboard. */
+/* Touch pill row — every essential action without a keyboard. */
 #chips {
   position: fixed;
   left: 0;
@@ -24,23 +24,34 @@
   bottom: 0;
   z-index: 10;
   display: flex;
-  gap: 0.4rem;
+  gap: 0.45rem;
   padding: 0.6rem 0.7rem calc(0.6rem + env(safe-area-inset-bottom));
-  background: linear-gradient(to top, rgba(20, 16, 14, 0.96), rgba(20, 16, 14, 0));
+  background: linear-gradient(to top, rgba(20, 16, 14, 0.97), rgba(20, 16, 14, 0));
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
+  scrollbar-width: none; /* the row scrolls; the bar itself stays clean */
+}
+#chips::-webkit-scrollbar {
+  display: none;
 }
 
 .chip {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px; /* accessible tap target (WCAG 2.5.5) */
   font-family: inherit;
-  font-size: 0.85rem;
+  font-size: 0.9rem;
   color: #f0ddcf;
   background: rgba(var(--accent-rgb), 0.16);
   border: 1px solid rgba(var(--accent-rgb), 0.35);
   border-radius: 999px;
-  padding: 0.45rem 0.95rem;
+  padding: 0.4rem 1.05rem;
   cursor: pointer;
+  white-space: nowrap;
+  touch-action: manipulation; /* no 300ms tap delay / double-tap zoom */
+  -webkit-tap-highlight-color: transparent;
 }
 
 .chip:active {
@@ -50,4 +61,21 @@
 .chip:focus-visible {
   outline: 2px solid rgba(var(--accent-rgb), 1);
   outline-offset: 2px;
+}
+
+/* The picker's modes read louder — a filled pill draws the primary choice. */
+.chip--primary {
+  background: rgba(var(--accent-rgb), 0.32);
+  border-color: rgba(var(--accent-rgb), 0.6);
+  font-weight: 600;
+}
+
+/* Destructive actions (delete) — a warm-red tint to slow the finger. */
+.chip--danger {
+  color: #f3c9bd;
+  background: rgba(190, 80, 60, 0.18);
+  border-color: rgba(190, 80, 60, 0.5);
+}
+.chip--danger:active {
+  background: rgba(190, 80, 60, 0.34);
 }

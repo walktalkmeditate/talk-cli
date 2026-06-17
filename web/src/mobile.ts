@@ -10,6 +10,10 @@ export interface Chip {
   readonly label: string;
   /** The normalized command the chip dispatches (key-parity with desktop). */
   readonly command: string;
+  /** A spoken-form accessible name when the visible label is a glyph (↑ / ↓). */
+  readonly ariaLabel?: string;
+  /** A visual emphasis hint — `primary` pills (the picker's modes) read louder. */
+  readonly emphasis?: 'primary' | 'danger';
 }
 
 /** A coarse pointer (finger) → show the chip row. */
@@ -42,12 +46,16 @@ export function createChipBar(chips: readonly Chip[], onCommand: (command: strin
   bar.id = 'chips';
   bar.setAttribute('role', 'toolbar');
   bar.setAttribute('aria-label', 'talk controls');
+  // A tap on a pill is NOT a tap on the terminal: stop it bubbling so the
+  // document's begin/resume/dismiss handler doesn't also fire under the press.
+  bar.addEventListener('pointerdown', (e) => e.stopPropagation());
 
   for (const chip of chips) {
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = 'chip';
+    button.className = chip.emphasis ? `chip chip--${chip.emphasis}` : 'chip';
     button.textContent = chip.label;
+    if (chip.ariaLabel) button.setAttribute('aria-label', chip.ariaLabel);
     button.addEventListener('click', () => onCommand(chip.command));
     bar.appendChild(button);
   }
@@ -67,7 +75,13 @@ export function createChipBar(chips: readonly Chip[], onCommand: (command: strin
  * Which chip set to show. A "session" phase is an in-progress recording
  * (reflect/journal/unburden); "journal-view" is the durable journal browser.
  */
-export type ChipScreen = 'reflect-session' | 'journal-session' | 'unburden-session' | 'journal-view';
+export type ChipScreen =
+  | 'picker'
+  | 'reflect-session'
+  | 'journal-session'
+  | 'unburden-session'
+  | 'journal-view'
+  | 'journal-confirm';
 
 /** A live session's mode (the U8 router selects it; `ephemeral` = unburden). */
 export type SessionMode = 'reflect' | 'journal' | 'ephemeral';
@@ -99,25 +113,48 @@ export function sessionChipScreen(mode: SessionMode): ChipScreen {
   }
 }
 
+// Session controls (key-parity with desktop).
 const DONE: Chip = { label: 'done', command: 'done' };
 const DONE_RELEASE: Chip = { label: 'release', command: 'done' };
 const PAUSE: Chip = { label: 'pause', command: 'pause' };
 const RAW_CLEAN: Chip = { label: 'raw ⇄ clean', command: 'toggle-raw' };
 const NEW_QUESTION: Chip = { label: 'new question', command: 'new-question' };
 const CANCEL: Chip = { label: 'cancel', command: 'cancel' };
-const NEW_ENTRY: Chip = { label: 'new entry', command: 'new-entry' };
-const EXPORT: Chip = { label: 'export', command: 'export' };
+
+// Picker (the touch equivalent of pressing 1 / 2 / 3 · v · ?).
+const PICK_REFLECT: Chip = { label: 'reflect', command: 'pick-reflect', emphasis: 'primary' };
+const PICK_JOURNAL: Chip = { label: 'journal', command: 'pick-journal', emphasis: 'primary' };
+const PICK_UNBURDEN: Chip = { label: 'unburden', command: 'pick-unburden', emphasis: 'primary' };
+const OPEN_JOURNAL: Chip = { label: 'my journal', command: 'open-journal' };
+const HELP: Chip = { label: 'help', command: 'help' };
+
+// Journal browser (the touch equivalent of ↑ ↓ · x · d · c · e · esc).
+const SEL_PREV: Chip = { label: '↑', command: 'journal-up', ariaLabel: 'select previous' };
+const SEL_NEXT: Chip = { label: '↓', command: 'journal-down', ariaLabel: 'select next' };
+const EXPORT_ONE: Chip = { label: 'export', command: 'export-one' };
+const EXPORT_ALL: Chip = { label: 'export all', command: 'export-all' };
+const DELETE_ONE: Chip = { label: 'delete', command: 'delete-one', emphasis: 'danger' };
+const CONTINUE: Chip = { label: 'continue', command: 'continue' };
 const BACK: Chip = { label: 'back', command: 'back' };
 
+// Delete confirmation (the touch equivalent of y / n).
+const CONFIRM_DELETE: Chip = { label: 'yes, delete', command: 'confirm-yes', emphasis: 'danger' };
+const KEEP: Chip = { label: 'keep', command: 'confirm-no' };
+
 /**
- * The chip set for a given screen, enumerated per the plan's U7:
+ * The chip set for a given screen — the touch control surface that mirrors the
+ * desktop keys for every screen, so a phone reaches every action:
+ *   picker            — reflect · journal · unburden · my-journal · help
  *   reflect-session   — done · pause · raw⇄clean · new-question · cancel
  *   journal-session   — done · pause · raw⇄clean · cancel
- *   unburden-session  — done(release) · pause · cancel
- *   journal-view      — new-entry · export · back
+ *   unburden-session  — release · pause · cancel
+ *   journal-view      — ↑ · ↓ · export · delete · continue · export-all · back
+ *   journal-confirm   — yes-delete · keep
  */
 export function chipsFor(screen: ChipScreen): readonly Chip[] {
   switch (screen) {
+    case 'picker':
+      return [PICK_REFLECT, PICK_JOURNAL, PICK_UNBURDEN, OPEN_JOURNAL, HELP];
     case 'reflect-session':
       return [DONE, PAUSE, RAW_CLEAN, NEW_QUESTION, CANCEL];
     case 'journal-session':
@@ -125,6 +162,8 @@ export function chipsFor(screen: ChipScreen): readonly Chip[] {
     case 'unburden-session':
       return [DONE_RELEASE, PAUSE, CANCEL];
     case 'journal-view':
-      return [NEW_ENTRY, EXPORT, BACK];
+      return [SEL_PREV, SEL_NEXT, EXPORT_ONE, DELETE_ONE, CONTINUE, EXPORT_ALL, BACK];
+    case 'journal-confirm':
+      return [CONFIRM_DELETE, KEEP];
   }
 }

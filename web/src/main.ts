@@ -37,6 +37,7 @@ import {
   chipsFor,
   sessionChipScreen,
   cleanupForMode,
+  type ChipScreen,
   type SessionMode,
 } from './mobile';
 import type { EnginePlacement } from './asr/transformers-protocol';
@@ -493,30 +494,46 @@ async function boot(): Promise<void> {
     viewingJournal = true;
     journalCursor = 0;
     journalConfirm = null;
-    mountChips();
+    syncChips();
   };
   const closeJournalView = (): void => {
     viewingJournal = false;
     journalConfirm = null;
-    mountChips();
+    syncChips();
   };
 
   let chipBar: HTMLElement | null = null;
-  const mountChips = (): void => {
+  let chipScreen: ChipScreen | null = null;
+
+  /** The touch pill set for the current state, or null when none applies (desktop,
+   *  boot, the help overlay, the closing moment — a tap drives those). */
+  const desiredChipScreen = (): ChipScreen | null => {
+    if (showingBoot || showingHelp) return null;
+    if (viewingJournal) return journalConfirm ? 'journal-confirm' : 'journal-view';
+    const phase = router.currentPhase();
+    if (phase === 'picker') return 'picker';
+    if (phase === 'session') {
+      const mode = router.mode();
+      return mode ? sessionChipScreen(mode) : null;
+    }
+    return null; // closing
+  };
+
+  /** Mount / replace the touch pill bar to match the current screen, rebuilding
+   *  ONLY when the screen changes (it's called every frame from composeView, so
+   *  it must be cheap when nothing changed). The pills mirror the desktop keys so
+   *  a phone reaches every action. Touch-only; desktop drives by keyboard. */
+  const syncChips = (): void => {
     if (!isTouch()) return;
+    const desired = desiredChipScreen();
+    if (desired === chipScreen) return;
+    chipScreen = desired;
     if (chipBar) {
       chipBar.remove();
       chipBar = null;
     }
-    if (viewingJournal) {
-      chipBar = createChipBar(chipsFor('journal-view'), (command) => handleCommand(command));
-      document.body.appendChild(chipBar);
-      return;
-    }
-    if (router.currentPhase() !== 'session') return;
-    const mode = router.mode();
-    if (mode === null) return;
-    chipBar = createChipBar(chipsFor(sessionChipScreen(mode)), (command) => handleCommand(command));
+    if (desired === null) return;
+    chipBar = createChipBar(chipsFor(desired), handleCommand);
     document.body.appendChild(chipBar);
   };
 
@@ -533,12 +550,12 @@ async function boot(): Promise<void> {
         boundSession = live;
         completed = false;
         sessionStartMs = null; // a new session's timer starts on its first begin()
-        mountChips();
+        syncChips();
       }
     } else if (boundSession !== null) {
       boundSession = null;
       sessionStartMs = null;
-      mountChips();
+      syncChips();
     }
   };
 
@@ -668,6 +685,7 @@ async function boot(): Promise<void> {
   const handleCommand = (command: string): void => {
     const session = boundSession;
     switch (command) {
+      // ── session controls ──
       case 'done':
       case 'pause':
       case 'toggle-raw':
@@ -677,8 +695,52 @@ async function boot(): Promise<void> {
       case 'new-question':
         router.command('new-question');
         return;
-      case 'export':
+      // ── picker (touch equivalent of 1/2/3 · v · ?) ──
+      case 'pick-reflect':
+        router.start('reflect');
+        beginCurrentSession(); // the tap is the gesture that starts the mic
+        return;
+      case 'pick-journal':
+        router.start('journal');
+        beginCurrentSession();
+        return;
+      case 'pick-unburden':
+        router.start('ephemeral');
+        beginCurrentSession();
+        return;
+      case 'open-journal':
+        openJournalView();
+        return;
+      case 'help':
+        showingHelp = true;
+        return;
+      // ── journal browser (touch equivalent of ↑ ↓ · x · d · c · e) ──
+      case 'journal-up':
+        journalCursor = Math.max(0, journalCursor - 1);
+        return;
+      case 'journal-down':
+        journalCursor = Math.min(Math.max(0, exportUnits().length - 1), journalCursor + 1);
+        return;
+      case 'export-one':
+        exportUnit(journalCursor + 1);
+        return;
+      case 'export-all':
+      case 'export': // legacy alias
         exportJournal('download');
+        return;
+      case 'delete-one':
+        if (exportUnits().length > 0) journalConfirm = 'unit';
+        return;
+      case 'confirm-yes':
+        if (journalConfirm === 'all') deleteAllEntries();
+        else if (journalConfirm === 'unit') deleteSelectedUnit();
+        journalConfirm = null;
+        return;
+      case 'confirm-no':
+        journalConfirm = null;
+        return;
+      case 'continue':
+        continueSelectedUnit();
         return;
       case 'new-entry':
         closeJournalView();
@@ -803,7 +865,24 @@ async function boot(): Promise<void> {
   // session's mic (the gesture getUserMedia/AudioContext require), and focuses the
   // terminal so subsequent keys land.
   document.addEventListener('pointerdown', () => {
-    if (showingBoot) dismissBoot();
+    // A tap on the TERMINAL (pills stop their own propagation). Drive the same
+    // dismissals a keypress would, then begin/resume the session.
+    if (showingBoot) {
+      dismissBoot();
+      beginCurrentSession();
+      term.focus();
+      return;
+    }
+    if (showingHelp) {
+      showingHelp = false; // tap closes the help overlay (no key on touch)
+      term.focus();
+      return;
+    }
+    if (router.currentPhase() === 'closing') {
+      router.dismissClosure(); // tap continues past the save/release moment
+      term.focus();
+      return;
+    }
     beginCurrentSession();
     // A tap after returning from a screen lock is the user gesture iOS needs to
     // resume a suspended audio context — so recording continues, not dies.
@@ -907,7 +986,7 @@ async function boot(): Promise<void> {
       return `  ${painted}`;
     };
     const body = bootLines.map(paintTone).join('\r\n');
-    const hint = theme.edge('  press any key to begin');
+    const hint = theme.edge(isTouch() ? '  tap to begin' : '  press any key to begin');
     return `${body}\r\n\r\n${hint}`;
   };
 
@@ -1079,6 +1158,7 @@ async function boot(): Promise<void> {
 
   const composeView = (): string => {
     syncSession();
+    syncChips(); // keep the touch pill bar matched to the current screen
     if (showingBoot) return composeBoot();
     if (showingHelp) return composeHelp();
     if (viewingJournal) return composeJournalView();
