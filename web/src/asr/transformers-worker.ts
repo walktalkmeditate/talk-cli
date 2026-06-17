@@ -98,15 +98,16 @@ function post(message: WorkerOutbound): void {
   self.postMessage(message);
 }
 
-/** Load the tokenizer / processor / model for `modelId` on the best device,
- *  forwarding HF's per-file download progress to the main thread for the UI. */
-async function load(modelId: string): Promise<void> {
+/** Load the tokenizer / processor / model for `modelId` on the chosen device,
+ *  forwarding HF's per-file download progress to the main thread for the UI. A
+ *  `forcedDevice` (iOS forces `wasm`) skips the WebGPU probe entirely. */
+async function load(modelId: string, forcedDevice?: EnginePlacement): Promise<void> {
   if (engine) {
     post({ type: 'ready', modelId, device: engine.device });
     return;
   }
 
-  const device = await selectDevice();
+  const device = forcedDevice ?? (await selectDevice());
   const dtype = DTYPE_BY_DEVICE[device];
 
   const progress_callback = (info: ProgressInfo): void => {
@@ -194,7 +195,7 @@ self.onmessage = (event: MessageEvent<WorkerInbound>): void => {
   const msg = event.data;
   switch (msg.type) {
     case 'load':
-      void load(msg.modelId);
+      void load(msg.modelId, msg.device);
       return;
     case 'transcribe':
       void transcribe(msg.id, msg.audio, msg.isFinal);

@@ -9,10 +9,13 @@ export type EnginePlacement = 'webgpu' | 'wasm';
 
 // ── Main thread → worker ────────────────────────────────────────────────────
 
-/** Ask the worker to lazy-load the tokenizer / processor / model. */
+/** Ask the worker to lazy-load the tokenizer / processor / model. `device` forces
+ *  the backend (iOS forces `wasm` — its WebGPU path crashes); omitted → the worker
+ *  probes for WebGPU and falls back to WASM. */
 export interface LoadMessage {
   readonly type: 'load';
   readonly modelId: string;
+  readonly device?: EnginePlacement;
 }
 
 /** Ask the worker to transcribe a Float32 16 kHz mono window. `isFinal` marks
