@@ -2,6 +2,7 @@ import './style.css';
 import init from './wasm/talk_wasm.js';
 import { createTerminal } from './terminal';
 import { startRenderLoop, type LoopHandle } from './loop';
+import { wrapAnsi } from './wrap';
 import { Theme, parseComposed, themeTones, type Rgb } from './theme';
 import { resolveModelState, downloadModels, type DownloadProgress } from './asr/download';
 import {
@@ -1001,6 +1002,9 @@ async function boot(): Promise<void> {
         return `    ${key} ${label} ${desc}`;
       })
       .join('\r\n');
+    // On touch the pills carry these actions, so the long key hint is redundant
+    // (and would just eat vertical space) — drop it.
+    if (isTouch()) return `${head}\r\n\r\n${opts}`;
     const hint = theme.edge('  press 1 · 2 · 3   (or r · j · u)   ·   v  journal   ·   i  install   ·   ?  help');
     return `${head}\r\n\r\n${opts}\r\n\r\n${hint}`;
   };
@@ -1088,16 +1092,20 @@ async function boot(): Promise<void> {
   /** The journal view's bottom line: a delete-confirm prompt when one is armed,
    *  otherwise the key hints. */
   const journalFooter = (): string => {
+    // On touch the pills carry the keys, so omit the y/n text (the confirm pills
+    // are yes/keep) and the long key hint — keep only what names the action.
+    const yn = isTouch() ? '' : '   y  yes   ·   n  no';
     if (journalConfirm === 'all') {
       const total = store.allEntries().length;
-      return theme.core(`  delete ALL ${total} ${total === 1 ? 'entry' : 'entries'}? this can't be undone.   y  yes   ·   n  no`);
+      return theme.core(`  delete ALL ${total} ${total === 1 ? 'entry' : 'entries'}? this can't be undone.${yn}`);
     }
     if (journalConfirm === 'unit') {
       const unit = exportUnits()[journalCursor];
       const label = unit ? unitLabel(unit) : '';
       const n = unit ? unitCount(unit) : 0;
-      return theme.core(`  delete ${label} (${n} ${n === 1 ? 'entry' : 'entries'})?   y  yes   ·   n  no`);
+      return theme.core(`  delete ${label} (${n} ${n === 1 ? 'entry' : 'entries'})?${yn}`);
     }
+    if (isTouch()) return '';
     return theme.edge(
       '  ↑ ↓  select   ·   x  export   ·   e  export all   ·   d  delete   ·   D  delete all   ·   c  continue a thread   ·   b / esc  back',
     );
@@ -1177,7 +1185,11 @@ async function boot(): Promise<void> {
     const body = composeView();
     const notice = noticeText ? theme.dim(`  ${noticeText}`) : '';
     const bottom = statusText ? theme.edge(`  ${statusText}`) : '';
-    return `${body}\r\n\r\n${notice}\x1b[K\r\n${bottom}\x1b[K`;
+    // Word-wrap the whole frame to the terminal width so long lines reflow on a
+    // narrow screen (phones) instead of overflowing into xterm's auto-wrap and
+    // breaking the cursor-home overwrite. Desktop is wide → lines fit → no-op.
+    // frameSequence adds the per-row \x1b[K, so none is needed here.
+    return wrapAnsi(`${body}\r\n\r\n${notice}\r\n${bottom}`, cols);
   };
 
   const loop: LoopHandle = startRenderLoop({
