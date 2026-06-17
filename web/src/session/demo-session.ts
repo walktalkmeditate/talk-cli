@@ -49,6 +49,9 @@ export interface LiveSessionView extends ModeSession {
    *  constructor (which the router runs at page load) leaves the AudioContext
    *  suspended and no audio is ever captured. Idempotent. */
   begin(): void;
+  /** Resume capture after the page was backgrounded / the screen locked (iOS
+   *  suspends the audio context). Idempotent; a no-op before begin / after end. */
+  resumeCapture(): void;
   /** Compose the session's screen as a wasm JSON string for the given view fields. */
   compose(args: {
     readonly mode: SessionMode;
@@ -97,6 +100,9 @@ export class DemoModeSession implements LiveSessionView {
       if (!this.recognizer.step() && this.timer) clearInterval(this.timer);
     }, DEMO_STEP_MS);
   }
+
+  /** No real mic to resume in the scripted demo. */
+  resumeCapture(): void {}
 
   compose(args: {
     readonly mode: SessionMode;

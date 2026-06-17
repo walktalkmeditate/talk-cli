@@ -308,6 +308,22 @@ export class AudioCapture {
     this.ctx = null;
   }
 
+  /** Resume capture after the page was backgrounded / the screen locked. iOS
+   *  Safari suspends (or non-standardly "interrupts") the AudioContext on lock;
+   *  without a resume, no frames arrive once the user returns and recording
+   *  silently stops. Resume the context if it isn't running. Best-effort +
+   *  idempotent — safe to call on every visibility regain and tap. iOS may require
+   *  this to run inside a user gesture for the resume to take, so the host calls it
+   *  from BOTH `visibilitychange` and a pointer tap. (A track that iOS *ended*
+   *  while backgrounded can't be revived by resume — that needs a fresh session.) */
+  async resume(): Promise<void> {
+    if (this.stopping || !this.ctx) return;
+    const state = this.ctx.state as string; // iOS adds a non-standard 'interrupted'
+    if (state === 'suspended' || state === 'interrupted') {
+      await this.ctx.resume().catch(() => undefined);
+    }
+  }
+
   /** Stop capture and release the mic. Safe to call when not started, and safe to
    *  call WHILE `start()` is still awaiting — the `stopping` flag makes an in-flight
    *  `wireCaptureGraph` bail before it leaves orphaned nodes emitting frames. */

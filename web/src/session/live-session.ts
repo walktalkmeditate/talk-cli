@@ -82,6 +82,13 @@ export class LiveModeSession implements LiveSessionView {
     void this.capture.start();
   }
 
+  /** Resume capture after a screen lock / backgrounding (iOS suspends the audio
+   *  context, so frames stop). No-op before begin() or after end(). */
+  resumeCapture(): void {
+    if (!this.started || this.ended) return;
+    void this.capture.resume();
+  }
+
   compose(args: {
     readonly mode: SessionMode;
     readonly question: string;
