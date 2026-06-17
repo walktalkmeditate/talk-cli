@@ -204,8 +204,16 @@ describe('chipsFor — per-mode chip sets (U7 enumeration)', () => {
     expect(chips[0].label).toBe('release');
   });
 
-  it('journal-view — new-entry · export · back', () => {
-    expect(commands(chipsFor('journal-view'))).toEqual(['new-entry', 'export', 'back']);
+  it('journal-view — select · export · delete · continue · export-all · back', () => {
+    expect(commands(chipsFor('journal-view'))).toEqual([
+      'journal-up',
+      'journal-down',
+      'export-one',
+      'delete-one',
+      'continue',
+      'export-all',
+      'back',
+    ]);
   });
 
   it('every session chip set contains a done and a cancel', () => {
