@@ -31,12 +31,15 @@ import {
 } from './journal/export';
 import {
   isTouch,
+  isIOS,
+  isMobile,
   createChipBar,
   chipsFor,
   sessionChipScreen,
   cleanupForMode,
   type SessionMode,
 } from './mobile';
+import type { EnginePlacement } from './asr/transformers-protocol';
 import { renderBoot, installHint, type InstallOs, type BootLine, type BootTone } from './boot';
 import { parseHash } from './deeplink';
 
@@ -54,14 +57,30 @@ const VERSION = '0.1.0';
  */
 const USE_REAL_ENGINE_DEFAULT = true;
 
-/** Resolve the engine + model id from the URL, falling back to the defaults. The
- *  Demo path takes no model id; the real path defaults to whisper-base.en. */
-function resolveEngine(search: string): { real: boolean; modelId: string | undefined } {
+/** Resolve the engine + model id + backend from the URL, with a mobile profile.
+ *  iOS Safari's WebGPU + ONNX path crashes the tab loading Whisper, so iOS forces
+ *  the WASM backend; mobile also defaults to the lighter/faster tiny.en. Both are
+ *  overridable: `?device=wasm|webgpu`, `?model=…` (for on-device bisecting). The
+ *  Demo path (`?engine=mock`) takes no model id; desktop real path probes WebGPU
+ *  and defaults to whisper-base.en. */
+function resolveEngine(search: string): {
+  real: boolean;
+  modelId: string | undefined;
+  device: EnginePlacement | undefined;
+} {
   const params = new URLSearchParams(search);
   const engine = params.get('engine');
   const real = engine === 'real' ? true : engine === 'mock' ? false : USE_REAL_ENGINE_DEFAULT;
   const modelParam = params.get('model');
-  return { real, modelId: modelParam ?? undefined };
+  const deviceParam = params.get('device');
+  const device: EnginePlacement | undefined =
+    deviceParam === 'wasm' || deviceParam === 'webgpu'
+      ? deviceParam
+      : isIOS()
+        ? 'wasm'
+        : undefined;
+  const modelId = modelParam ?? (isMobile() ? 'onnx-community/whisper-tiny.en' : undefined);
+  return { real, modelId, device };
 }
 
 /** A dedicated last-visit stamp for the boot banner's "Last visit …" line, kept
@@ -357,7 +376,7 @@ async function boot(): Promise<void> {
   // transformers.js Whisper engine so `npm run dev` transcribes; `?engine=mock`
   // forces the scripted demo (the tests' path). The model/mic status flows into
   // the bottom status line so the first-run download + permission states show.
-  const { real: useRealEngine, modelId } = resolveEngine(window.location.search);
+  const { real: useRealEngine, modelId, device: engineDevice } = resolveEngine(window.location.search);
   const router = new ModeRouter({
     store,
     clock: browserClock(),
@@ -366,6 +385,7 @@ async function boot(): Promise<void> {
       useRealEngine
         ? new LiveModeSession(mode, onControlsChange, {
             modelId,
+            device: engineDevice,
             onModelStatus: (s) => {
               if (s.phase === 'ready') {
                 // Steady state — clear the line so "speech model ready" doesn't trail

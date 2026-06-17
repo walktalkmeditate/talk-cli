@@ -63,6 +63,9 @@ export interface ModelLoadStatus {
 export interface TransformersRecognizerOptions {
   /** HF model id. Defaults to `whisper-base.en`. */
   readonly modelId?: string;
+  /** Force the inference backend. iOS passes `wasm` because its WebGPU + ONNX path
+   *  crashes the tab; omitted → the worker probes WebGPU, then falls back to WASM. */
+  readonly device?: EnginePlacement;
   /** Model-load + download progress, for the host's loading UI. */
   readonly onModelStatus?: (status: ModelLoadStatus) => void;
   /** Injected worker factory — the test seam (a fake worker). Defaults to
@@ -85,6 +88,7 @@ export class TransformersRecognizer implements Recognizer {
   private handlers: RecognizerEvents | null = null;
   private readonly worker: WorkerLike;
   private readonly modelId: string;
+  private readonly device: EnginePlacement | undefined;
   private readonly onModelStatus: ((status: ModelLoadStatus) => void) | undefined;
   private readonly now: () => number;
 
@@ -103,6 +107,7 @@ export class TransformersRecognizer implements Recognizer {
 
   constructor(opts: TransformersRecognizerOptions = {}) {
     this.modelId = opts.modelId ?? DEFAULT_MODEL_ID;
+    this.device = opts.device;
     this.onModelStatus = opts.onModelStatus;
     this.now = opts.now ?? (() => performance.now());
     this.worker = (opts.workerFactory ?? spawnDefaultWorker)();
@@ -116,7 +121,7 @@ export class TransformersRecognizer implements Recognizer {
       console.error('transformers worker error', event);
     };
     this.onModelStatus?.({ phase: 'loading', message: 'loading speech model…', fraction: null });
-    this.worker.postMessage({ type: 'load', modelId: this.modelId });
+    this.worker.postMessage({ type: 'load', modelId: this.modelId, device: this.device });
   }
 
   on(events: RecognizerEvents): Recognizer {

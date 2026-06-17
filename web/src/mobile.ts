@@ -17,6 +17,21 @@ export function isTouch(): boolean {
   return window.matchMedia('(pointer: coarse)').matches;
 }
 
+/** iOS / iPadOS (incl. iPadOS Safari that reports itself as "Mac" — disambiguated
+ *  by touch points). iOS Safari's WebGPU + ONNX-runtime path crashes the tab when
+ *  loading Whisper, so the engine forces the WASM backend there (see resolveEngine). */
+export function isIOS(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  if (/iPhone|iPad|iPod/i.test(navigator.userAgent)) return true;
+  return /Mac/i.test(navigator.platform ?? '') && (navigator.maxTouchPoints ?? 0) > 1;
+}
+
+/** A phone/tablet — gets the lighter, faster tiny.en model by default. */
+export function isMobile(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return isIOS() || /Android/i.test(navigator.userAgent);
+}
+
 /**
  * Build the safe-area-aware chip toolbar. `role="toolbar"` groups the buttons
  * for assistive tech; each tap fires `onCommand(chip.command)`. The bar is a

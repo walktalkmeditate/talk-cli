@@ -19,6 +19,7 @@ import {
   TransformersRecognizer,
   type ModelLoadStatus,
 } from '../asr/transformers-recognizer';
+import type { EnginePlacement } from '../asr/transformers-protocol';
 import { SessionControls } from './controls';
 import { isEphemeralMode, type SessionMode } from '../mobile';
 import type { LiveSessionView } from './demo-session';
@@ -26,6 +27,8 @@ import type { LiveSessionView } from './demo-session';
 export interface LiveModeSessionOptions {
   /** HF model id override (e.g. `onnx-community/whisper-tiny.en`). */
   readonly modelId?: string;
+  /** Force the inference backend (iOS → `wasm`); omitted → the worker probes. */
+  readonly device?: EnginePlacement;
   /** Model load + download status, for the boot/status surface. */
   readonly onModelStatus?: (status: ModelLoadStatus) => void;
   /** Mic permission state transitions (R8), for the status surface. */
@@ -56,6 +59,7 @@ export class LiveModeSession implements LiveSessionView {
     // load) leaves the AudioContext suspended and captures no audio.
     this.recognizer = new TransformersRecognizer({
       modelId: opts.modelId,
+      device: opts.device,
       onModelStatus: opts.onModelStatus,
     });
     this.pipeline = new Pipeline({ recognizer: this.recognizer });
