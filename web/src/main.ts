@@ -165,6 +165,14 @@ function fmtMb(bytes: number): string {
   return `${(bytes / MB).toFixed(0)} MB`;
 }
 
+/** Format a session duration (ms) as `M:SS` for the live timer. */
+function fmtElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
 /** One-line preview of an entry body for the journal list (first line, clipped). */
 function truncate(text: string, max = 64): string {
   const firstLine = text.split('\n')[0] ?? '';
@@ -294,6 +302,9 @@ async function boot(): Promise<void> {
   // the session factory synchronously, wiring `onControlsChange`).
   let boundSession: LiveSessionView | null = null;
   let completed = false;
+  // When the current session's recording began (set on the first begin() gesture,
+  // reset when a new session binds) — drives the live M:SS timer.
+  let sessionStartMs: number | null = null;
 
   // Bridge the U7 controls → the router's completion: when a session's controls
   // report `finished`, the router lands (done) or discards (cancel) exactly once.
@@ -521,10 +532,12 @@ async function boot(): Promise<void> {
       if (live !== boundSession) {
         boundSession = live;
         completed = false;
+        sessionStartMs = null; // a new session's timer starts on its first begin()
         mountChips();
       }
     } else if (boundSession !== null) {
       boundSession = null;
+      sessionStartMs = null;
       mountChips();
     }
   };
@@ -533,7 +546,17 @@ async function boot(): Promise<void> {
    *  (keypress/click), because getUserMedia + AudioContext are gesture-gated.
    *  Idempotent, so calling it on every session-starting gesture is safe. */
   const beginCurrentSession = (): void => {
-    (router.liveSession() as LiveSessionView | null)?.begin();
+    const live = router.liveSession() as LiveSessionView | null;
+    if (!live) return;
+    live.begin();
+    // The timer counts from when recording actually begins (this first gesture).
+    if (sessionStartMs === null) sessionStartMs = performance.now();
+  };
+
+  /** Resume the current session's capture after a screen lock / backgrounding
+   *  (iOS suspends the audio context). Idempotent + safe off-session. */
+  const resumeCurrentSession = (): void => {
+    (router.liveSession() as LiveSessionView | null)?.resumeCapture();
   };
 
   // The deferred clipboard-disclosure note's timer — held so unload can clear it
@@ -782,8 +805,19 @@ async function boot(): Promise<void> {
   document.addEventListener('pointerdown', () => {
     if (showingBoot) dismissBoot();
     beginCurrentSession();
+    // A tap after returning from a screen lock is the user gesture iOS needs to
+    // resume a suspended audio context — so recording continues, not dies.
+    resumeCurrentSession();
     term.focus();
   });
+
+  // Returning from a screen lock / tab switch: iOS suspends the audio context, so
+  // resume it (best-effort here; the pointer tap above is the gesture-backed retry
+  // iOS may require). Cleaned up on unload.
+  const onVisibility = (): void => {
+    if (document.visibilityState === 'visible') resumeCurrentSession();
+  };
+  document.addEventListener('visibilitychange', onVisibility);
 
   /** Keys while the journal view is open. `c` continues the most-recent thread —
    *  re-prompting that exact reflect question (R19's "continue a thread"). */
@@ -853,7 +887,7 @@ async function boot(): Promise<void> {
       mode,
       question: router.questionText() ?? '',
       heldLabel: '', // U8 selection has no held-label surface yet
-      elapsed: '0:00',
+      elapsed: sessionStartMs === null ? '0:00' : fmtElapsed(performance.now() - sessionStartMs),
       cleanup: cleanupForMode(mode), // journal → High (paragraphs), reflect/unburden → Light
     });
     return theme.renderComposed(parseComposed(json));
@@ -1102,6 +1136,7 @@ async function boot(): Promise<void> {
     if (disclosureTimer !== null) clearTimeout(disclosureTimer);
     document.removeEventListener('pointerdown', refocus);
     document.removeEventListener('keydown', onEscapeKeydown, true);
+    document.removeEventListener('visibilitychange', onVisibility);
     window.removeEventListener('focus', refocus);
     window.removeEventListener('resize', refit);
     window.visualViewport?.removeEventListener('resize', refit);
